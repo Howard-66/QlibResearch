@@ -1,0 +1,178 @@
+# FinanceDataHub 数据源配置文件
+#
+# 此文件定义了可用的数据提供者和智能路由策略
+
+# 数据提供者配置
+providers:
+  # Tushare Pro配置
+  tushare:
+    enabled: true
+    token: "${TUSHARE_TOKEN}"  # 从环境变量读取
+    timeout: 30
+    max_retry: 3
+    retry_delay: 1.0
+    priority: 1  # 优先级（数字越小优先级越高）
+
+  # XTQuant配置
+  xtquant:
+    enabled: true
+    api_url: "${XTQUANT_API_URL:-http://localhost:8100}"  # 默认值
+    timeout: 60
+    max_retry: 3
+    priority: 2
+
+# 数据源路由策略
+# 定义不同资产类别和数据频率应该使用哪些提供者
+routing_strategy:
+  # 股票数据路由
+  stock:
+    # 基本信息
+    basic:
+      providers: [tushare]  # 只使用tushare
+      fallback: true  # 启用故障转移
+
+    # 日线数据
+    daily:
+      providers: [tushare, xtquant]  # 优先tushare，失败则使用xtquant
+      fallback: true
+      load_balance: false  # 不启用负载均衡
+
+    # 分钟数据
+    minute:
+      1m:
+        providers: [xtquant]  # 1分钟数据只使用xtquant
+        fallback: false
+      5m:
+        providers: [xtquant]
+        fallback: true
+      15m:
+        providers: [xtquant]
+        fallback: true
+      30m:
+        providers: [xtquant]
+        fallback: true
+      60m:
+        providers: [xtquant]
+        fallback: true
+
+    # 每日指标
+    daily_basic:
+      providers: [tushare]
+      fallback: false
+
+    # 复权因子
+    adj_factor:
+      providers: [tushare]
+      fallback: false
+
+    # 财务指标
+    fina_indicator:
+      providers: [tushare]
+      fallback: false
+
+    # 现金流量表
+    cashflow:
+      providers: [tushare]
+      fallback: false
+
+    # 资产负债表
+    balancesheet:
+      providers: [tushare]
+      fallback: false
+
+    # 利润表
+    income:
+      providers: [tushare]
+      fallback: false
+
+    # Tick数据
+    tick:
+      providers: [xtquant]
+      fallback: false
+
+  # 期货数据路由（暂未实现）
+  future:
+    daily:
+      providers: [xtquant]
+      fallback: false
+    minute:
+      providers: [xtquant]
+      fallback: false
+
+  # 宏观经济数据路由
+  macro:
+    gdp:
+      providers: [tushare]
+      fallback: false
+    ppi:
+      providers: [tushare]
+      fallback: false
+    m:
+      providers: [tushare]
+      fallback: false
+    pmi:
+      providers: [tushare]
+      fallback: false
+
+  # 指数数据路由
+  index:
+    dailybasic:
+      providers: [tushare]
+      fallback: false
+
+    # 指数成分权重
+    index_weight:
+      providers: [tushare]
+      fallback: false
+
+    # 申万行业分类
+    sw_classify:
+      providers: [tushare]
+      fallback: false
+
+    # 申万行业成分股
+    sw_member:
+      providers: [tushare]
+      fallback: false
+
+    # 申万行业日线行情
+    sw_daily:
+      providers: [tushare]
+      fallback: false
+
+  # 市场数据路由
+  market:
+    # 交易日历
+    trade_cal:
+      providers: [tushare]
+      fallback: false
+
+# 故障转移配置
+failover:
+  enabled: true
+  max_retries: 2  # 每个提供者最多重试2次
+  retry_delay: 2.0  # 重试延迟（秒）
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 5  # 连续失败5次后断路
+    reset_timeout: 60  # 60秒后重置断路器
+
+# 负载均衡配置（暂未使用）
+load_balance:
+  enabled: false
+  strategy: "round_robin"  # round_robin | weighted | random
+  weights:
+    tushare: 0.7
+    xtquant: 0.3
+
+# 缓存配置（暂未实现）
+cache:
+  enabled: false
+  backend: "redis"
+  ttl: 3600  # 缓存生存时间（秒）
+
+# 日志配置
+logging:
+  level: "INFO"
+  log_routing_decisions: true  # 记录路由决策
+  log_provider_stats: true  # 记录提供者统计信息

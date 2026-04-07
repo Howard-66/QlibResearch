@@ -1,0 +1,40 @@
+[project]
+name = "qlib-research"
+version = "0.1.0"
+description = "Independent qlib research workspace for TradingNexus"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "akshare>=1.18.8",
+    "ipykernel>=7.1.0",
+    "jupyter-notebook-renderer>=0.0.2",
+    "lightgbm>=4.0.0",
+    "numpy>=2.4.0",
+    "pandas>=2.3.3",
+    "plotly>=6.5.1",
+    "pytest>=9.0.2",
+    "python-dotenv>=1.2.1",
+    "scipy>=1.17.0",
+    "streamlit>=1.52.2",
+    "tushare>=1.4.24",
+    "watchdog>=6.0.0",
+    "yfinance>=1.0",
+    "finance-data-hub",
+]
+
+[project.optional-dependencies]
+qlib = [
+    "pyqlib>=0.9.7,<0.10",
+]
+app = [
+    "fastapi>=0.128.0",
+    "uvicorn>=0.40.0",
+    "pydantic>=2.11.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.uv.sources]
+finance-data-hub = { path = "../FinanceDataHub", editable = true }
