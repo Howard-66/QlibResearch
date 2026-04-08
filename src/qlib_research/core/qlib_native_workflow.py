@@ -110,6 +110,7 @@ class NativeResearchRecipe:
     signal_objective: SignalObjective = "huber_regression"
     label_recipe: LabelRecipe = "blended_excess_4w_8w"
     feature_groups: tuple[str, ...] = field(default_factory=lambda: RESEARCH_DEFAULT_FEATURE_GROUPS)
+    included_features: tuple[str, ...] = field(default_factory=tuple)
     excluded_features: tuple[str, ...] = field(default_factory=tuple)
     industry_normalization: str = "l1_weekly_robust"
     model_params: dict[str, Any] = field(default_factory=dict)
@@ -160,6 +161,7 @@ class NativeWorkflowConfig:
     model_num_threads: int | None = None
     publish_model: bool = False
     feature_groups: tuple[str, ...] = field(default_factory=lambda: RESEARCH_DEFAULT_FEATURE_GROUPS)
+    included_features: tuple[str, ...] = field(default_factory=tuple)
     excluded_features: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -296,6 +298,7 @@ def build_native_recipe_registry(config: NativeWorkflowConfig) -> dict[str, Nati
         signal_objective=config.signal_objective,
         label_recipe=config.label_recipe,
         feature_groups=tuple(config.feature_groups),
+        included_features=tuple(normalize_feature_name_list(config.included_features)),
         excluded_features=tuple(normalize_feature_name_list(config.excluded_features)),
         model_params={},
     )
@@ -306,6 +309,7 @@ def build_native_recipe_registry(config: NativeWorkflowConfig) -> dict[str, Nati
             signal_objective="mae_regression",
             label_recipe="excess_4w",
             feature_groups=baseline.feature_groups,
+            included_features=baseline.included_features,
             excluded_features=baseline.excluded_features,
         ),
         "binary_4w": NativeResearchRecipe(
@@ -313,6 +317,7 @@ def build_native_recipe_registry(config: NativeWorkflowConfig) -> dict[str, Nati
             signal_objective="binary_top_quintile",
             label_recipe="excess_4w",
             feature_groups=baseline.feature_groups,
+            included_features=baseline.included_features,
             excluded_features=baseline.excluded_features,
         ),
         "rank_blended": NativeResearchRecipe(
@@ -320,6 +325,7 @@ def build_native_recipe_registry(config: NativeWorkflowConfig) -> dict[str, Nati
             signal_objective="grouped_rank",
             label_recipe="blended_excess_4w_8w",
             feature_groups=baseline.feature_groups,
+            included_features=baseline.included_features,
             excluded_features=baseline.excluded_features,
         ),
         "huber_8w": NativeResearchRecipe(
@@ -327,6 +333,7 @@ def build_native_recipe_registry(config: NativeWorkflowConfig) -> dict[str, Nati
             signal_objective="huber_regression",
             label_recipe="excess_8w",
             feature_groups=baseline.feature_groups,
+            included_features=baseline.included_features,
             excluded_features=baseline.excluded_features,
         ),
     }
@@ -950,6 +957,7 @@ def _prefilter_and_normalize_features(panel: pd.DataFrame, recipe: NativeResearc
     requested = compose_feature_columns(recipe.feature_groups)
     selected = resolve_feature_columns(
         requested,
+        included_features=recipe.included_features,
         excluded_features=recipe.excluded_features,
         default_features=requested,
     )

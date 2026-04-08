@@ -35,6 +35,7 @@ def _normalize_time(values: pd.Series) -> pd.Series:
         pd.to_datetime(values, utc=True, errors="coerce")
         .dt.tz_localize(None)
         .dt.normalize()
+        .astype("datetime64[ns]")
     )
 
 
@@ -178,8 +179,13 @@ def build_index_membership_flag_frame(
     normalized_history["symbol"] = _normalize_symbol(normalized_history["symbol"])
     normalized_history = normalized_history.dropna(subset=["trade_date", "symbol"]).sort_values(["trade_date", "symbol"]).reset_index(drop=True)
 
-    weekly_index = pd.DataFrame({"time": sorted(pd.to_datetime(pd.Index(weekly_dates)).unique())}).sort_values("time").reset_index(drop=True)
-    snapshots = pd.DataFrame({"snapshot_date": sorted(normalized_history["trade_date"].dropna().unique())}).sort_values("snapshot_date").reset_index(drop=True)
+    weekly_index = pd.DataFrame({"time": sorted(pd.to_datetime(pd.Index(weekly_dates)).unique())})
+    weekly_index["time"] = _normalize_time(weekly_index["time"])
+    weekly_index = weekly_index.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
+
+    snapshots = pd.DataFrame({"snapshot_date": sorted(normalized_history["trade_date"].dropna().unique())})
+    snapshots["snapshot_date"] = _normalize_time(snapshots["snapshot_date"])
+    snapshots = snapshots.dropna(subset=["snapshot_date"]).sort_values("snapshot_date").reset_index(drop=True)
     if snapshots.empty:
         return pd.DataFrame(columns=["time", "symbol", flag_column])
 

@@ -25,17 +25,15 @@
 下面这条命令对齐当前 notebook 默认 `CONFIG`，适合直接跑 `csi300` 的 baseline 和候选 recipe：
 
 ```bash
-uv run python scripts/evaluate_qlib_native_weekly.py \
-  --panel data/qlib_artifacts/panels/csi300_weekly.csv \
-  --output-dir data/qlib_artifacts/native_workflow/csi300 \
+uv run python scripts/evaluate_native_weekly.py \
+  --panel artifacts/panels/csi300_weekly.csv \
+  --output-dir artifacts/native_workflow/csi300 \
   --universe-profile csi300 \
   --benchmark-mode auto \
   --signal-objective huber_regression \
   --label-recipe blended_excess_4w_8w \
   --topk 10 \
   --rebalance-interval-weeks 1 \
-  --min-liquidity-filter 0.0 \
-  --min-score-spread 0.0 \
   --eval-count 52 \
   --train-weeks 260 \
   --valid-weeks 52 \
@@ -45,9 +43,6 @@ uv run python scripts/evaluate_qlib_native_weekly.py \
   --walk-forward-train-weeks 260 \
   --walk-forward-valid-weeks 52 \
   --walk-forward-step-weeks 1 \
-  --run-validation-comparison \
-  --diagnostics-enabled \
-  --native-only-tradable \
   --native-risk-degree 0.95 \
   --account 1000000.0 \
   --run-export auto_if_missing \
@@ -67,14 +62,41 @@ uv run python scripts/evaluate_qlib_native_weekly.py \
   --recipe mae_4w \
   --recipe binary_4w \
   --recipe rank_blended \
-  --recipe huber_8w
+  --recipe huber_8w \
+  --exclude-feature 'npm*,gpm*' \
+  --recipe-parallel-workers 0
 ```
 
+## 命令生成
 同一条命令现在也可以由 helper 自动生成：
 
 - `run_native_notebook_workflow(...)[\"cli_command\"]`
 - `build_native_workflow_cli_command(config_overrides=CONFIG, recipe_names=RECIPE_NAMES)`
 
+
+## 参数include-feature和exclude-feature说明:
+建议加引号避免 shell 展开：
+```
+uv run python scripts/evaluate_native_weekly.py --include-feature pb --include-feature 'macro*'
+uv run python scripts/evaluate_native_weekly.py --exclude-feature macro_industry_match --exclude-feature 'macro*'
+```
+也支持逗号分隔：--include-feature 'pb,pe_ttm,macro*'
+规则是：
+
+不带通配符时按精确特征名匹配。
+带 */?/[] 时按 glob 模式匹配，macro* 就是“以 macro 开头”。
+执行顺序是“先 include 白名单，再 exclude 剔除”，并保持原特征列顺序。
+
+补充一个实现约定：include-feature 目前是对 recipe 默认特征集合做白名单过滤，不会额外把 recipe 之外的新特征拉进来。
+
+## 参数run-export
+不需要先手动跑 export_weekly_panel。当前 evaluate_native_weekly 的 --run-export 默认是 auto_if_missing，见 scripts/evaluate_native_weekly.py:136，而 _ensure_panel 会在面板文件不存在时自动调用导出，见 src/qlib_research/core/qlib_native_workflow.py:362。只有这几种情况你才需要先单独跑：
+
+你把 --run-export never 打开了。
+你想强制刷新面板，建议用 --run-export always。
+你想先单独产出一个自定义 panel，再通过 --panel 指向它。
+
+## 参数walk_forward_eval_count
 如果你希望 walk-forward 覆盖全部可评估历史，`walk_forward_eval_count` 应设为 `0`。
 
 解释要点：
@@ -86,7 +108,7 @@ uv run python scripts/evaluate_qlib_native_weekly.py \
 如果只想先确认主链路通了，可以先只跑：
 
 ```bash
-uv run python scripts/evaluate_qlib_native_weekly.py \
+uv run python scripts/evaluate_native_weekly.py \
   --panel data/qlib_artifacts/panels/csi300_weekly.csv \
   --output-dir data/qlib_artifacts/native_workflow/csi300 \
   --universe-profile csi300 \

@@ -1,5 +1,6 @@
 import asyncio
 
+import numpy as np
 import pandas as pd
 
 from qlib_research.core.research_universe import (
@@ -30,6 +31,28 @@ def test_build_index_membership_flag_frame_uses_latest_snapshot_membership():
     assert bool(flags.loc[(flags["time"] == pd.Timestamp("2026-01-09")) & (flags["symbol"] == "BBB.SZ"), "in_csi300"].iloc[0])
     assert bool(flags.loc[(flags["time"] == pd.Timestamp("2026-01-16")) & (flags["symbol"] == "AAA.SH"), "in_csi300"].iloc[0])
     assert flags.loc[(flags["time"] == pd.Timestamp("2026-01-16")) & (flags["symbol"] == "BBB.SZ")].empty
+
+
+def test_build_index_membership_flag_frame_normalizes_merge_key_precision():
+    weekly_dates = np.array(["2026-01-02", "2026-01-09"], dtype="datetime64[us]")
+    history = pd.DataFrame(
+        {
+            "symbol": ["AAA.SH", "BBB.SZ"],
+            "trade_date": np.array(["2026-01-01", "2026-01-08"], dtype="datetime64[s]"),
+            "weight": [1.0, 1.0],
+        }
+    )
+
+    flags = build_index_membership_flag_frame(
+        weekly_dates=weekly_dates,
+        history_frame=history,
+        flag_column="in_csi300",
+    )
+
+    assert str(flags["time"].dtype) == "datetime64[ns]"
+    assert set(flags["symbol"]) == {"AAA.SH", "BBB.SZ"}
+    assert bool(flags.loc[(flags["time"] == pd.Timestamp("2026-01-02")) & (flags["symbol"] == "AAA.SH"), "in_csi300"].iloc[0])
+    assert bool(flags.loc[(flags["time"] == pd.Timestamp("2026-01-09")) & (flags["symbol"] == "BBB.SZ"), "in_csi300"].iloc[0])
 
 
 def test_attach_universe_flags_sets_false_for_non_members():

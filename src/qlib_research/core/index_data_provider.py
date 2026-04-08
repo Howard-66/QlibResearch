@@ -10,22 +10,20 @@ Routing rules:
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from concurrent.futures import ThreadPoolExecutor
 import logging
 import re
-import threading
 from typing import Any
 
 import pandas as pd
 
-from qlib_research.config import get_fdh
+from qlib_research.config import get_fdh, get_sources_config_path
 from qlib_research.core.fetcher import TushareFetcher
 
 logger = logging.getLogger(__name__)
 
 _CN_INDEX_CODE_PATTERN = re.compile(r"^\d{6}\.(SH|SZ)$", re.IGNORECASE)
-_sync_fdh_client = None
-_sync_fdh_lock = threading.Lock()
 
 
 def is_cn_index_code(ts_code: str | None) -> bool:
@@ -102,23 +100,25 @@ def _run_sync_call(func, *args, **kwargs):
         return future.result()
 
 
-def _get_sync_fdh_client():
-    global _sync_fdh_client
-    if _sync_fdh_client is not None:
-        return _sync_fdh_client
+def _call_sync_fdh_async(async_method_name: str, **kwargs):
+    async def _invoke():
+        from finance_data_hub import FinanceDataHub
+        from finance_data_hub.config import get_settings
 
-    with _sync_fdh_lock:
-        if _sync_fdh_client is None:
-            from finance_data_hub import FinanceDataHub
-            from finance_data_hub.config import get_settings
+        settings = get_settings()
+        fdh = FinanceDataHub(
+            settings=settings,
+            backend="postgresql",
+            router_config_path=str(get_sources_config_path()),
+        )
+        try:
+            await fdh.initialize()
+            return await getattr(fdh, async_method_name)(**kwargs)
+        finally:
+            with suppress(Exception):
+                await fdh.close()
 
-            settings = get_settings()
-            _sync_fdh_client = FinanceDataHub(
-                settings=settings,
-                backend="postgresql",
-                router_config_path="sources.yml",
-            )
-    return _sync_fdh_client
+    return _run_sync_call(lambda: asyncio.run(_invoke()))
 
 
 def _should_try_fdh(
@@ -173,9 +173,8 @@ def fetch_index_daily_with_fallback(
     normalized_code = _normalize_ts_code(ts_code)
     if _should_try_fdh(normalized_code, fetcher, prefer_fdh):
         try:
-            fdh = _get_sync_fdh_client()
-            frame = _run_sync_call(
-                fdh.get_index_daily,
+            frame = _call_sync_fdh_async(
+                "get_index_daily_async",
                 ts_code=normalized_code,
                 start_date=_to_fdh_date(start_date),
                 end_date=_to_fdh_date(end_date),
@@ -238,9 +237,8 @@ def fetch_index_valuation_with_fallback(
     normalized_code = _normalize_ts_code(ts_code)
     if _should_try_fdh(normalized_code, fetcher, prefer_fdh):
         try:
-            fdh = _get_sync_fdh_client()
-            frame = _run_sync_call(
-                fdh.get_index_dailybasic,
+            frame = _call_sync_fdh_async(
+                "get_index_dailybasic_async",
                 ts_code=normalized_code,
                 start_date=_to_fdh_date(start_date),
                 end_date=_to_fdh_date(end_date),
@@ -291,4 +289,3 @@ async def fetch_index_valuation_with_fallback_async(
                 exc,
             )
     return _fallback_fetch_index_valuation(normalized_code, start_date, end_date, fetcher)
-

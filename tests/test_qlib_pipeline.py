@@ -1,8 +1,12 @@
+import sys
+from types import ModuleType
+
 import pandas as pd
 
 from qlib_research.core.qlib_pipeline import (
     apply_industry_normalization,
     exclude_feature_columns,
+    include_feature_columns,
     init_qlib_runtime,
     normalize_feature_name_list,
     resolve_feature_columns,
@@ -89,14 +93,27 @@ def test_feature_exclusion_helpers_resolve_manual_excludes():
         "macro_phase_y",
         "macro_industry_match",
     )
+    assert include_feature_columns(
+        ("pe_ttm", "pb", "macro_phase_y", "macro_industry_match"),
+        included_features=["pb", "macro*"],
+    ) == ("pb", "macro_phase_y", "macro_industry_match")
     assert exclude_feature_columns(
         ("pe_ttm", "pb", "macro_phase_y"),
         excluded_features=["pb", "macro_phase_y"],
     ) == ("pe_ttm",)
+    assert exclude_feature_columns(
+        ("pe_ttm", "pb", "macro_phase_y", "macro_industry_match"),
+        excluded_features="macro*",
+    ) == ("pe_ttm", "pb")
     assert resolve_feature_columns(
         feature_columns=("pe_ttm", "macro_phase_y", "macro_industry_match"),
         excluded_features="macro_phase_y",
     ) == ("pe_ttm", "macro_industry_match")
+    assert resolve_feature_columns(
+        feature_columns=("pe_ttm", "pb", "macro_phase_y", "macro_industry_match"),
+        included_features="macro*,pb",
+        excluded_features="macro_industry_match",
+    ) == ("pb", "macro_phase_y")
 
 
 def test_init_qlib_runtime_skips_reinitialization_when_registered(tmp_path, monkeypatch):
@@ -115,3 +132,27 @@ def test_init_qlib_runtime_skips_reinitialization_when_registered(tmp_path, monk
     assert observed["kwargs"]["skip_if_reg"] is True
     assert observed["kwargs"]["region"] == "cn"
     assert observed["kwargs"]["exp_manager"]["kwargs"]["default_exp_name"] == "demo-exp"
+
+
+def test_init_qlib_runtime_installs_mlflow_compat_shims(tmp_path, monkeypatch):
+    observed: dict[str, object] = {}
+
+    class FakeQlib:
+        def init(self, **kwargs):
+            observed["kwargs"] = kwargs
+
+    protobuf_module = ModuleType("google.protobuf")
+
+    monkeypatch.setattr("qlib_research.core.qlib_pipeline.require_qlib", lambda: FakeQlib())
+    monkeypatch.setattr("qlib_research.core.qlib_pipeline.get_qlib_artifacts_dir", lambda: tmp_path)
+    monkeypatch.setitem(sys.modules, "google.protobuf", protobuf_module)
+    monkeypatch.delitem(sys.modules, "google.protobuf.service", raising=False)
+    monkeypatch.delitem(sys.modules, "pkg_resources", raising=False)
+
+    init_qlib_runtime(exp_name="demo-exp")
+
+    assert "google.protobuf.service" in sys.modules
+    assert hasattr(sys.modules["google.protobuf.service"], "Service")
+    assert "pkg_resources" in sys.modules
+    assert callable(sys.modules["pkg_resources"].resource_filename)
+    assert observed["kwargs"]["exp_manager"]["class"] == "MLflowExpManager"

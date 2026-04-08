@@ -8,12 +8,16 @@ and the screener only consumes the latest published scores.
 from __future__ import annotations
 
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from fnmatch import fnmatchcase
+import importlib.resources as importlib_resources
 import io
 import logging
 import os
 import json
 from pathlib import Path
+import sys
 from typing import Optional, Sequence
+import types
 import warnings
 
 import numpy as np
@@ -60,6 +64,44 @@ def require_qlib():
             "Install pyqlib>=0.9.7,<0.10 before running qlib training."
         ) from exc
     return qlib
+
+
+def _ensure_mlflow_legacy_compatibility() -> None:
+    """Install narrow shims needed by the older MLflow version bundled with qlib."""
+    try:
+        from google.protobuf import service as _service  # type: ignore  # noqa: F401
+    except ImportError:
+        service_module = types.ModuleType("google.protobuf.service")
+
+        class Service:  # pragma: no cover - behavior exercised through qlib.init
+            pass
+
+        class RpcController:  # pragma: no cover - behavior exercised through qlib.init
+            pass
+
+        class RpcChannel:  # pragma: no cover - behavior exercised through qlib.init
+            pass
+
+        class ServiceException(Exception):  # pragma: no cover - compatibility shim
+            pass
+
+        service_module.Service = Service
+        service_module.RpcController = RpcController
+        service_module.RpcChannel = RpcChannel
+        service_module.ServiceException = ServiceException
+        sys.modules["google.protobuf.service"] = service_module
+
+    try:
+        import pkg_resources  # type: ignore  # noqa: F401
+    except ImportError:
+        pkg_resources = types.ModuleType("pkg_resources")
+
+        def resource_filename(package_or_requirement: str, resource_name: str) -> str:
+            package = str(package_or_requirement)
+            return str(importlib_resources.files(package).joinpath(resource_name))
+
+        pkg_resources.resource_filename = resource_filename
+        sys.modules["pkg_resources"] = pkg_resources
 
 
 def load_panel_dataframe(panel_path: str | Path) -> pd.DataFrame:
@@ -357,25 +399,57 @@ def normalize_feature_name_list(values: Sequence[str] | str | None) -> tuple[str
     return tuple(normalized)
 
 
+def _resolve_feature_matchers(
+    feature_columns: Sequence[str],
+    feature_matchers: Sequence[str] | str | None = None,
+) -> tuple[str, ...]:
+    matchers = normalize_feature_name_list(feature_matchers)
+    if not matchers:
+        return tuple()
+
+    unique_columns = tuple(dict.fromkeys(str(column) for column in feature_columns))
+    matched_columns: list[str] = []
+    for matcher in matchers:
+        is_pattern = any(token in matcher for token in ("*", "?", "["))
+        for column in unique_columns:
+            if (is_pattern and fnmatchcase(column, matcher)) or (not is_pattern and column == matcher):
+                if column not in matched_columns:
+                    matched_columns.append(column)
+    return tuple(matched_columns)
+
+
+def include_feature_columns(
+    feature_columns: Sequence[str],
+    included_features: Sequence[str] | str | None = None,
+) -> tuple[str, ...]:
+    selected = tuple(dict.fromkeys(str(column) for column in feature_columns))
+    if not normalize_feature_name_list(included_features):
+        return selected
+    included = set(_resolve_feature_matchers(selected, included_features))
+    return tuple(column for column in selected if column in included)
+
+
 def exclude_feature_columns(
     feature_columns: Sequence[str],
     excluded_features: Sequence[str] | str | None = None,
 ) -> tuple[str, ...]:
-    excluded = set(normalize_feature_name_list(excluded_features))
+    excluded = set(_resolve_feature_matchers(feature_columns, excluded_features))
     return tuple(
-        column for column in dict.fromkeys(feature_columns)
+        column for column in dict.fromkeys(str(column) for column in feature_columns)
         if column not in excluded
     )
 
 
 def resolve_feature_columns(
     feature_columns: Optional[Sequence[str]] = None,
+    included_features: Sequence[str] | str | None = None,
     excluded_features: Sequence[str] | str | None = None,
     default_features: Optional[Sequence[str]] = None,
 ) -> tuple[str, ...]:
     base_features = default_features or FEATURE_COLUMNS
     selected = tuple(base_features) if feature_columns is None else tuple(feature_columns)
-    return exclude_feature_columns(selected, excluded_features=excluded_features)
+    included = include_feature_columns(selected, included_features=included_features)
+    return exclude_feature_columns(included, excluded_features=excluded_features)
 
 
 def get_normalized_feature_candidates(feature_columns: Sequence[str]) -> list[str]:
@@ -562,6 +636,7 @@ def init_qlib_runtime(
     provider_uri: Optional[str | Path | dict[str, str | Path]] = None,
 ):
     """Initialize qlib with a local MLflow tracking path under artifacts."""
+    _ensure_mlflow_legacy_compatibility()
     qlib = require_qlib()
     artifacts_root = Path(artifacts_dir or get_qlib_artifacts_dir()).expanduser().resolve()
     mlruns_dir = artifacts_root / "mlruns"

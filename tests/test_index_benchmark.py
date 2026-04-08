@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 import pandas as pd
 
 from qlib_research.core.index_benchmark import (
@@ -70,6 +72,14 @@ class _FakeFetcher:
         return weekly
 
 
+class _DecimalFakeFetcher(_FakeFetcher):
+    def fetch_index_daily(self, ts_code, start_date, end_date):
+        frame = super().fetch_index_daily(ts_code, start_date, end_date).copy()
+        for column in ("open", "high", "low", "close", "volume"):
+            frame[column] = frame[column].apply(lambda value: Decimal(str(value)))
+        return frame
+
+
 def test_normalize_index_period_accepts_native_aliases():
     assert normalize_index_period("week") == "W"
     assert normalize_index_period("1week") == "W"
@@ -103,6 +113,21 @@ def test_build_index_benchmark_frame_aligns_to_workflow_calendar():
     assert benchmark_frame["datetime"].dt.strftime("%Y-%m-%d").tolist() == ["2026-01-09", "2026-01-16"]
     assert benchmark_frame["benchmark_close"].tolist() == [10.8, 11.5]
     assert benchmark_frame["benchmark_return"].round(6).tolist() == [0.0, round(11.5 / 10.8 - 1.0, 6)]
+    assert benchmark_frame["benchmark_value"].round(2).tolist() == [1_000_000.0, round(1_000_000.0 * 11.5 / 10.8, 2)]
+
+
+def test_build_index_benchmark_frame_coerces_decimal_prices_to_float():
+    calendar = pd.to_datetime(["2026-01-09", "2026-01-16"])
+    benchmark_frame = build_index_benchmark_frame(
+        calendar_dates=calendar,
+        ts_code="000001.SH",
+        period="W",
+        initial_capital=1_000_000.0,
+        fetcher=_DecimalFakeFetcher(),
+    )
+
+    assert str(benchmark_frame["benchmark_close"].dtype) == "float64"
+    assert str(benchmark_frame["benchmark_return"].dtype) == "float64"
     assert benchmark_frame["benchmark_value"].round(2).tolist() == [1_000_000.0, round(1_000_000.0 * 11.5 / 10.8, 2)]
 
 

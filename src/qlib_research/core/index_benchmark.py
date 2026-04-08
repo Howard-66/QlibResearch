@@ -175,6 +175,8 @@ def load_index_technical_frame(
         raise ValueError(f"index bars missing required columns: {missing}")
     if "volume" not in bars.columns:
         bars["volume"] = 0.0
+    for column in ("open", "high", "low", "close", "volume"):
+        bars[column] = pd.to_numeric(bars[column], errors="coerce")
     return bars[["date", "open", "high", "low", "close", "volume"]].dropna(subset=["date", "close"]).sort_values("date")
 
 

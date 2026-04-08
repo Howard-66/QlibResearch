@@ -118,6 +118,20 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="LightGBM threads per recipe. Leave unset to auto-derive in parallel mode and preserve current behavior in serial mode.",
     )
+    parser.add_argument(
+        "--include-feature",
+        "--include-features",
+        action="append",
+        default=None,
+        help="Only keep matching features. Repeat the flag or pass comma-separated values. Supports exact names and glob patterns such as macro*.",
+    )
+    parser.add_argument(
+        "--exclude-feature",
+        "--exclude-features",
+        action="append",
+        default=None,
+        help="Drop matching features. Repeat the flag or pass comma-separated values. Supports exact names and glob patterns such as macro*.",
+    )
     parser.add_argument("--publish-model", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--run-export", choices=["always", "auto_if_missing", "never"], default="auto_if_missing")
     parser.add_argument("--recipe", action="append", default=None, help="Recipe name from the registry; repeat to run multiple recipes.")
@@ -169,6 +183,8 @@ def main() -> None:
         reproducibility_mode=args.reproducibility_mode,
         recipe_parallel_workers=args.recipe_parallel_workers,
         model_num_threads=args.model_num_threads,
+        included_features=tuple(args.include_feature or ()),
+        excluded_features=tuple(args.exclude_feature or ()),
         publish_model=args.publish_model,
         run_export=args.run_export,
     )
