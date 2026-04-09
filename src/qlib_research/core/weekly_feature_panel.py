@@ -501,7 +501,10 @@ def engineer_research_features(panel: pd.DataFrame) -> pd.DataFrame:
         factor_values = pd.to_numeric(result[factor_column], errors="coerce")
         result[output_column] = phase_values * factor_values
 
-    return result.replace([np.inf, -np.inf], np.nan)
+    numeric_columns = result.select_dtypes(include=[np.number]).columns
+    if len(numeric_columns) > 0:
+        result.loc[:, numeric_columns] = result.loc[:, numeric_columns].replace([np.inf, -np.inf], np.nan)
+    return result
 
 
 def _filter_panel_by_universe_profile(

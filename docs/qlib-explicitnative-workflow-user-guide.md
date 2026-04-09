@@ -26,7 +26,7 @@
 
 ```bash
 uv run python scripts/evaluate_native_weekly.py \
-  --panel artifacts/panels/csi300_weekly.csv \
+  --panel artifacts/panels/csi300_weekly.parquet \
   --output-dir artifacts/native_workflow/csi300 \
   --universe-profile csi300 \
   --benchmark-mode auto \
@@ -109,7 +109,7 @@ uv run python scripts/evaluate_native_weekly.py --exclude-feature macro_industry
 
 ```bash
 uv run python scripts/evaluate_native_weekly.py \
-  --panel data/qlib_artifacts/panels/csi300_weekly.csv \
+  --panel data/qlib_artifacts/panels/csi300_weekly.parquet \
   --output-dir data/qlib_artifacts/native_workflow/csi300 \
   --universe-profile csi300 \
   --benchmark-mode auto \

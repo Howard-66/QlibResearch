@@ -18,7 +18,7 @@ from qlib_research.core.notebook_workflow import run_convergence_workflow
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run QlibResearch convergence workflow")
-    parser.add_argument("--panel", default="artifacts/panels/csi300500_weekly.csv")
+    parser.add_argument("--panel", default="artifacts/panels/csi300500_weekly.parquet")
     parser.add_argument("--output-dir", default="artifacts/evaluations/csi300500_convergence")
     parser.add_argument("--universe-profile", default="merged_csi300_500")
     parser.add_argument("--selection-mode", choices=["full", "group_prune", "feature_prune", "final_compare"], default="final_compare")

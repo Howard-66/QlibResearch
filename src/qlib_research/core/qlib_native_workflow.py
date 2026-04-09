@@ -8,7 +8,7 @@ native backtests, validation comparisons, and artifact persistence.
 
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
 from dataclasses import replace
 import json
@@ -119,7 +119,7 @@ class NativeResearchRecipe:
 @dataclass(frozen=True)
 class NativeWorkflowConfig:
     universe_profile: str = "csi300"
-    panel_path: str | Path = "artifacts/panels/csi300_weekly.csv"
+    panel_path: str | Path = "artifacts/panels/csi300_weekly.parquet"
     execution_panel_path: str | Path | None = None
     output_dir: str | Path = "artifacts/native_workflow/csi300"
     start_date: str | None = "2016-01-01"
@@ -238,6 +238,44 @@ def _emit_native_workflow_progress(
     if progress_callback is None:
         return
     progress_callback({"event": event, **payload})
+
+
+PARALLEL_PROGRESS_HEARTBEAT_SECONDS = 30.0
+
+
+def _build_parallel_recipe_heartbeat(
+    pending_futures: set[Any],
+    future_to_meta: dict[Any, dict[str, Any]],
+    *,
+    completed: int,
+    total: int,
+    now: float,
+    max_listed_recipes: int = 3,
+) -> dict[str, Any]:
+    active_rows: list[dict[str, Any]] = []
+    for future in pending_futures:
+        meta = future_to_meta.get(future)
+        if meta is None:
+            continue
+        elapsed = max(0.0, now - float(meta["started_at"]))
+        active_rows.append(
+            {
+                "recipe": str(meta["recipe"]),
+                "index": int(meta["index"]),
+                "elapsed": elapsed,
+            }
+        )
+    active_rows.sort(key=lambda row: row["elapsed"], reverse=True)
+    listed = active_rows[:max_listed_recipes]
+    return {
+        "active_recipe_count": len(active_rows),
+        "active_recipes": [row["recipe"] for row in listed],
+        "active_recipe_elapsed_seconds": [row["elapsed"] for row in listed],
+        "oldest_recipe": listed[0]["recipe"] if listed else None,
+        "oldest_recipe_elapsed": listed[0]["elapsed"] if listed else 0.0,
+        "completed": completed,
+        "total": total,
+    }
 
 
 def _resolve_recipe_parallel_workers(requested_workers: int, recipe_count: int) -> int:
@@ -372,16 +410,39 @@ def _ensure_panel(
     if not path.exists():
         raise FileNotFoundError(f"Feature panel not found: {path}")
     panel = load_panel_dataframe(path)
-    if not filter_to_universe_membership:
-        return engineer_research_features(panel)
     return panel
+
+
+def _materialize_panel_artifact(
+    path: Path,
+    *,
+    universe_profile: str,
+    start_date: str | None,
+    end_date: str | None,
+    batch_size: int,
+    run_export: RunExportMode,
+    filter_to_universe_membership: bool,
+) -> Path:
+    if run_export == "always" or (run_export == "auto_if_missing" and not path.exists()):
+        export_weekly_feature_panel(
+            output_path=path,
+            universe_profile=universe_profile,
+            start_date=start_date,
+            end_date=end_date,
+            batch_size=batch_size,
+            filter_to_universe_membership=filter_to_universe_membership,
+            include_derived_features=True,
+        )
+    if not path.exists():
+        raise FileNotFoundError(f"Feature panel not found: {path}")
+    return path
 
 
 def _prepare_execution_panel(config: NativeWorkflowConfig, execution_path: Path | None) -> tuple[pd.DataFrame, Path | None]:
     if config.universe_exit_policy != "retain_quotes_for_existing_positions":
         return pd.DataFrame(), execution_path
     if execution_path is None:
-        execution_path = Path(config.output_dir).expanduser().resolve() / f"{config.universe_profile}_execution_panel.csv"
+        execution_path = Path(config.output_dir).expanduser().resolve() / f"{config.universe_profile}_execution_panel.parquet"
     execution_panel = _ensure_panel(
         execution_path,
         universe_profile=config.universe_profile,
@@ -392,6 +453,45 @@ def _prepare_execution_panel(config: NativeWorkflowConfig, execution_path: Path 
         filter_to_universe_membership=False,
     )
     return execution_panel, execution_path
+
+
+def _prime_parallel_workflow_inputs(config: NativeWorkflowConfig) -> NativeWorkflowConfig:
+    """
+    Materialize shared panel inputs before spawning parallel recipe workers.
+
+    Without this preflight step, each worker can race to create the same
+    execution panel path under ``auto_if_missing`` / ``always`` export modes,
+    which may leave readers observing a partially-written parquet file.
+    """
+    panel_path, execution_path, output_dir = _resolve_paths(config)
+    _materialize_panel_artifact(
+        panel_path,
+        universe_profile=config.universe_profile,
+        start_date=config.start_date,
+        end_date=config.end_date,
+        batch_size=config.batch_size,
+        run_export=config.run_export,
+        filter_to_universe_membership=True,
+    )
+    if config.universe_exit_policy == "retain_quotes_for_existing_positions":
+        if execution_path is None:
+            execution_path = output_dir / f"{config.universe_profile}_execution_panel.parquet"
+        _materialize_panel_artifact(
+            execution_path,
+            universe_profile=config.universe_profile,
+            start_date=config.start_date,
+            end_date=config.end_date,
+            batch_size=config.batch_size,
+            run_export=config.run_export,
+            filter_to_universe_membership=False,
+        )
+    return replace(
+        config,
+        panel_path=panel_path,
+        execution_panel_path=execution_path,
+        output_dir=output_dir,
+        run_export="never",
+    )
 
 
 def _winsorize_series(series: pd.Series, lower: float = 0.02, upper: float = 0.98) -> pd.Series:
@@ -1323,6 +1423,8 @@ def run_native_research_workflow(
         recipe_parallel_workers=resolved_parallel_workers,
         model_num_threads=resolved_model_num_threads,
     )
+    if resolved_parallel_workers > 1:
+        effective_config = _prime_parallel_workflow_inputs(effective_config)
     artifacts: dict[str, NativeRecipeArtifacts] = {}
     if resolved_parallel_workers <= 1:
         total = len(selected_recipes)
@@ -1377,23 +1479,46 @@ def run_native_research_workflow(
                     model_num_threads=resolved_model_num_threads,
                 )
             completed = 0
-            for future in as_completed(future_to_meta):
-                meta = future_to_meta[future]
-                recipe_name, artifact = future.result()
-                artifacts[recipe_name] = artifact
-                completed += 1
-                _emit_native_workflow_progress(
-                    progress_callback,
-                    "recipe_done",
-                    recipe=recipe_name,
-                    index=meta["index"],
-                    completed=completed,
-                    total=total,
-                    elapsed=time.perf_counter() - float(meta["started_at"]),
-                    execution_mode="parallel",
-                    recipe_parallel_workers=resolved_parallel_workers,
-                    model_num_threads=resolved_model_num_threads,
+            pending = set(future_to_meta)
+            while pending:
+                done, pending = wait(
+                    pending,
+                    timeout=PARALLEL_PROGRESS_HEARTBEAT_SECONDS,
+                    return_when=FIRST_COMPLETED,
                 )
+                if not done:
+                    _emit_native_workflow_progress(
+                        progress_callback,
+                        "recipe_heartbeat",
+                        execution_mode="parallel",
+                        recipe_parallel_workers=resolved_parallel_workers,
+                        model_num_threads=resolved_model_num_threads,
+                        **_build_parallel_recipe_heartbeat(
+                            pending,
+                            future_to_meta,
+                            completed=completed,
+                            total=total,
+                            now=time.perf_counter(),
+                        ),
+                    )
+                    continue
+                for future in done:
+                    meta = future_to_meta[future]
+                    recipe_name, artifact = future.result()
+                    artifacts[recipe_name] = artifact
+                    completed += 1
+                    _emit_native_workflow_progress(
+                        progress_callback,
+                        "recipe_done",
+                        recipe=recipe_name,
+                        index=meta["index"],
+                        completed=completed,
+                        total=total,
+                        elapsed=time.perf_counter() - float(meta["started_at"]),
+                        execution_mode="parallel",
+                        recipe_parallel_workers=resolved_parallel_workers,
+                        model_num_threads=resolved_model_num_threads,
+                    )
     artifacts = {name: artifacts[name] for name in selected_names}
     output_dir = Path(config.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)

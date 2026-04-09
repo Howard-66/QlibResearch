@@ -17,7 +17,7 @@ from qlib_research.core.notebook_workflow import train_and_publish_weekly_snapsh
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train/publish a weekly qlib score snapshot")
-    parser.add_argument("--panel", default="artifacts/panels/weekly_features.csv")
+    parser.add_argument("--panel", default="artifacts/panels/weekly_features.parquet")
     parser.add_argument("--model-id", required=True)
     parser.add_argument("--feature-date", required=False, default=None)
     parser.add_argument("--feature-config", default=None)

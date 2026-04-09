@@ -53,13 +53,28 @@ def _build_workflow_progress_callback():
                     f"elapsed={float(payload.get('elapsed', 0.0)):.1f}s"
                 ),
             )
+        elif event == "recipe_heartbeat":
+            active_recipes = list(payload.get("active_recipes") or [])
+            active_elapsed = list(payload.get("active_recipe_elapsed_seconds") or [])
+            active_pairs = [
+                f"{name}:{float(elapsed):.0f}s"
+                for name, elapsed in zip(active_recipes, active_elapsed, strict=False)
+            ]
+            detail = (
+                f"completed={payload.get('completed')}/{payload.get('total')}, "
+                f"active={payload.get('active_recipe_count')}, "
+                f"oldest={payload.get('oldest_recipe')}:{float(payload.get('oldest_recipe_elapsed', 0.0)):.0f}s"
+            )
+            if active_pairs:
+                detail = f"{detail}, running={active_pairs}"
+            _emit_stage("2/4 Recipes Running", detail)
 
     return _progress
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run QlibResearch native weekly research workflow")
-    parser.add_argument("--panel", default="artifacts/panels/csi300_weekly.csv")
+    parser.add_argument("--panel", default="artifacts/panels/csi300_weekly.parquet")
     parser.add_argument("--execution-panel", default=None)
     parser.add_argument("--output-dir", default="artifacts/native_workflow/csi300")
     parser.add_argument("--universe-profile", default="csi300")

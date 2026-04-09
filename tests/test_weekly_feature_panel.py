@@ -1,6 +1,7 @@
 import asyncio
 import threading
 
+import numpy as np
 import pandas as pd
 
 from qlib_research.core.qlib_pipeline import LABEL_COLUMN, build_training_frame
@@ -415,3 +416,28 @@ def test_engineer_research_features_adds_cross_sectional_and_macro_interaction_f
     assert features["macro_reflation_x_mom_4w"].notna().any()
     assert features["industry_npm_ttm_rank_pct"].notna().any()
     assert features["buffett_moat_score"].notna().any()
+
+
+def test_engineer_research_features_handles_object_columns_with_array_values():
+    panel = pd.DataFrame(
+        {
+            "symbol": ["AAA.SH", "AAA.SH", "AAA.SH", "AAA.SH"],
+            "time": pd.to_datetime(["2026-01-02", "2026-01-09", "2026-01-16", "2026-01-23"]),
+            "datetime": pd.to_datetime(["2026-01-02", "2026-01-09", "2026-01-16", "2026-01-23"]),
+            "close": [10.0, 11.0, 12.0, 13.0],
+            "amount": [100.0, 105.0, 110.0, 115.0],
+            "volume": [10.0, 11.0, 12.0, 13.0],
+            "l1_name": ["Tech", "Tech", "Tech", "Tech"],
+            "macro_phase_reflation": [1, 1, 1, 1],
+            "macro_phase_recovery": [0, 0, 0, 0],
+            "macro_phase_overheat": [0, 0, 0, 0],
+            "macro_phase_stagflation": [0, 0, 0, 0],
+            "macro_industry_match": [1, 1, 1, 1],
+            "opaque_object": [np.array([1, 2]), np.array([1, 2]), np.array([1, 2]), np.array([1, 2])],
+        }
+    )
+
+    features = engineer_research_features(panel)
+
+    assert "mom_1w" in features.columns
+    assert "opaque_object" in features.columns

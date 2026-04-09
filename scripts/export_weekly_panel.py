@@ -17,7 +17,7 @@ from qlib_research.core.notebook_workflow import export_or_load_panel
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export weekly feature panel from FinanceDataHub")
-    parser.add_argument("--output", default="artifacts/panels/weekly_features.csv")
+    parser.add_argument("--output", default="artifacts/panels/weekly_features.parquet")
     parser.add_argument("--start-date", default=None)
     parser.add_argument("--end-date", default=None)
     parser.add_argument("--symbols", nargs="*", default=None)

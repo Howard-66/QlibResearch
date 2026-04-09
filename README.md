@@ -18,19 +18,19 @@ cp .env.example .env
 导出 panel：
 
 ```bash
-uv run python scripts/export_weekly_panel.py --output artifacts/panels/watchlist_weekly.csv --universe-profile watchlist
+uv run python scripts/export_weekly_panel.py --output artifacts/panels/watchlist_weekly.parquet --universe-profile watchlist
 ```
 
 运行 native workflow：
 
 ```bash
-uv run python scripts/evaluate_native_weekly.py --panel artifacts/panels/csi300_weekly.csv --recipe baseline
+uv run python scripts/evaluate_native_weekly.py --panel artifacts/panels/csi300_weekly.parquet --recipe baseline
 ```
 
 发布并同步模型：
 
 ```bash
-uv run python scripts/train_publish_snapshot.py --panel artifacts/panels/watchlist_weekly.csv --model-id watchlist-weekly-lgbm-v1
+uv run python scripts/train_publish_snapshot.py --panel artifacts/panels/watchlist_weekly.parquet --model-id watchlist-weekly-lgbm-v1
 uv run python scripts/sync_to_valueinvesting.py --model-id watchlist-weekly-lgbm-v1 --set-latest --dry-run
 ```
 
