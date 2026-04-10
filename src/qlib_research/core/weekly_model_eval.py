@@ -181,8 +181,8 @@ def select_evaluation_dates(
         for index, date in enumerate(label_ready_dates)
         if index >= minimum_history
     ]
-    if step_weeks > 1:
-        eligible = eligible[::step_weeks]
+    if step_weeks > 1 and eligible:
+        eligible = list(reversed(list(reversed(eligible))[::step_weeks]))
     if eval_count > 0:
         eligible = eligible[-eval_count:]
     return eligible

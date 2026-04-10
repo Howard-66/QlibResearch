@@ -97,6 +97,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-count", type=int, default=52)
     parser.add_argument("--train-weeks", type=int, default=260)
     parser.add_argument("--valid-weeks", type=int, default=52)
+    parser.add_argument(
+        "--rolling-recent-weeks",
+        type=int,
+        default=52,
+        help="Trailing calendar weeks to keep for the quick rolling backtest. Use 0 to disable the trailing-window cap.",
+    )
     parser.add_argument("--step-weeks", type=int, default=1)
     parser.add_argument("--walk-forward-enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--walk-forward-start-date", default="2016-01-01")
@@ -177,6 +183,7 @@ def main() -> None:
         eval_count=args.eval_count,
         train_weeks=args.train_weeks,
         valid_weeks=args.valid_weeks,
+        rolling_recent_weeks=args.rolling_recent_weeks,
         step_weeks=args.step_weeks,
         walk_forward_enabled=args.walk_forward_enabled,
         walk_forward_start_date=args.walk_forward_start_date,

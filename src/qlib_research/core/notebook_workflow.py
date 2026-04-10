@@ -7,6 +7,7 @@ implementation paths as the CLI scripts.
 
 from __future__ import annotations
 
+from dataclasses import fields
 import importlib.metadata
 import json
 import math
@@ -165,6 +166,45 @@ def _summarize_date_range(frame: pd.DataFrame, *candidate_columns: str) -> dict[
     }
 
 
+_NATIVE_WORKFLOW_CONFIG_ALIASES = {
+    "panel": "panel_path",
+    "execution_panel": "execution_panel_path",
+    "include_feature": "included_features",
+    "include_features": "included_features",
+    "exclude_feature": "excluded_features",
+    "exclude_features": "excluded_features",
+}
+
+
+def _normalize_native_workflow_overrides(
+    config_overrides: dict[str, Any] | None,
+) -> dict[str, Any]:
+    from qlib_research.core.qlib_native_workflow import NativeWorkflowConfig
+
+    normalized: dict[str, Any] = {}
+    valid_fields = {field.name for field in fields(NativeWorkflowConfig)}
+
+    for raw_key, raw_value in (config_overrides or {}).items():
+        normalized_key = _NATIVE_WORKFLOW_CONFIG_ALIASES.get(str(raw_key).replace("-", "_"), str(raw_key).replace("-", "_"))
+        normalized_value = raw_value
+        if normalized_key in {"included_features", "excluded_features"}:
+            normalized_value = tuple(normalize_feature_name_list(raw_value))
+
+        if normalized_key in normalized and normalized[normalized_key] != normalized_value:
+            raise ValueError(
+                f"Conflicting native workflow overrides provided for '{normalized_key}': "
+                f"{normalized[normalized_key]!r} vs {normalized_value!r}"
+            )
+        normalized[normalized_key] = normalized_value
+
+    unknown_keys = sorted(key for key in normalized if key not in valid_fields)
+    if unknown_keys:
+        unknown_keys_display = ", ".join(unknown_keys)
+        raise TypeError(f"Unexpected native workflow override(s): {unknown_keys_display}")
+
+    return normalized
+
+
 def build_native_workflow_cli_command(
     *,
     config_overrides: dict[str, Any] | None = None,
@@ -172,7 +212,8 @@ def build_native_workflow_cli_command(
 ) -> str:
     from qlib_research.core.qlib_native_workflow import NativeWorkflowConfig
 
-    config = NativeWorkflowConfig(**(config_overrides or {}))
+    resolved_overrides = _normalize_native_workflow_overrides(config_overrides)
+    config = NativeWorkflowConfig(**resolved_overrides)
     command_lines = [
         "uv run python scripts/evaluate_native_weekly.py",
         f"  --panel {shlex.quote(str(config.panel_path))}",
@@ -188,6 +229,7 @@ def build_native_workflow_cli_command(
         f"  --eval-count {int(config.eval_count)}",
         f"  --train-weeks {int(config.train_weeks)}",
         f"  --valid-weeks {int(config.valid_weeks)}",
+        f"  --rolling-recent-weeks {int(config.rolling_recent_weeks)}",
         f"  --step-weeks {int(config.step_weeks)}",
         f"  {'--walk-forward-enabled' if config.walk_forward_enabled else '--no-walk-forward-enabled'}",
         f"  --walk-forward-eval-count {int(config.walk_forward_eval_count)}",
@@ -1666,6 +1708,11 @@ def load_native_workflow_artifacts(
     *,
     recipe_names: Sequence[str] | None = None,
 ) -> dict[str, Any]:
+    from qlib_research.core.qlib_native_workflow import (
+        build_annual_return_heatmap_frame,
+        build_monthly_return_heatmap_frame,
+    )
+
     resolved_output_dir = _resolve_path(output_dir)
     summary_payload = _safe_read_json(resolved_output_dir / "native_workflow_summary.json", {})
     selected_recipe_names = _resolve_native_recipe_names(resolved_output_dir, recipe_names)
@@ -1728,6 +1775,12 @@ def load_native_workflow_artifacts(
             name: _safe_read_csv(recipe_dir / filename)
             for name, filename in NATIVE_RECIPE_CSV_FILES.items()
         }
+        for bundle_name in ("rolling", "walk_forward"):
+            native_report = frames[f"{bundle_name}_native_report"]
+            if native_report.empty:
+                continue
+            frames[f"{bundle_name}_native_monthly_return_heatmap"] = build_monthly_return_heatmap_frame(native_report)
+            frames[f"{bundle_name}_native_annual_return_heatmap"] = build_annual_return_heatmap_frame(native_report)
         manifest = _safe_read_json(recipe_dir / "native_workflow_manifest.json", {})
         recipe_frames[recipe_name] = {
             **frames,
@@ -1822,12 +1875,13 @@ def run_native_notebook_workflow(
 ) -> dict[str, Any]:
     from qlib_research.core.qlib_native_workflow import NativeWorkflowConfig, run_native_research_workflow
 
-    config = NativeWorkflowConfig(**(config_overrides or {}))
+    resolved_overrides = _normalize_native_workflow_overrides(config_overrides)
+    config = NativeWorkflowConfig(**resolved_overrides)
     resolved_output_dir = _resolve_path(config.output_dir)
     workflow_summary = _safe_read_json(
         resolved_output_dir / "native_workflow_summary.json",
         {
-            "config": sanitize_for_json(config_overrides or {}),
+            "config": sanitize_for_json(resolved_overrides),
             "recipe_registry": {"executed_recipes": list(recipe_names or [])},
             "promotion_gate": {},
             "output_dir": str(resolved_output_dir),
@@ -1845,7 +1899,7 @@ def run_native_notebook_workflow(
     artifact_view = load_native_workflow_artifacts(resolved_output_dir, recipe_names=recipe_names)
     return {
         "config": config,
-        "cli_command": build_native_workflow_cli_command(config_overrides=config_overrides, recipe_names=recipe_names),
+        "cli_command": build_native_workflow_cli_command(config_overrides=resolved_overrides, recipe_names=recipe_names),
         "ran_workflow": run_workflow,
         "output_dir": resolved_output_dir,
         "workflow_summary": workflow_summary,

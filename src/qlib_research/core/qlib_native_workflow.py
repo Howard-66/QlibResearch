@@ -130,6 +130,7 @@ class NativeWorkflowConfig:
     train_weeks: int = 260
     valid_weeks: int = 52
     eval_count: int = 52
+    rolling_recent_weeks: int = 52
     step_weeks: int = 1
     walk_forward_enabled: bool = True
     walk_forward_start_date: str | None = "2016-01-01"
@@ -560,6 +561,7 @@ def select_evaluation_dates_for_label(
     train_weeks: int,
     valid_weeks: int,
     eval_count: int,
+    recent_weeks: int | None = None,
     step_weeks: int = 1,
     start_date: str | None = None,
     end_date: str | None = None,
@@ -577,8 +579,11 @@ def select_evaluation_dates_for_label(
         for index, date in enumerate(label_ready_dates)
         if index >= minimum_history
     ]
-    if step_weeks > 1:
-        eligible = eligible[::step_weeks]
+    if recent_weeks is not None and int(recent_weeks) > 0 and eligible:
+        window_anchor = eligible[-1] - pd.Timedelta(weeks=max(int(recent_weeks) - 1, 0))
+        eligible = [date for date in eligible if date >= window_anchor]
+    if step_weeks > 1 and eligible:
+        eligible = list(reversed(list(reversed(eligible))[::step_weeks]))
     if eval_count > 0:
         eligible = eligible[-eval_count:]
     return eligible
@@ -918,13 +923,11 @@ def build_monthly_return_heatmap_frame(report_frame: pd.DataFrame, value_column:
     frame = frame.dropna(subset=["datetime", value_column]).sort_values("datetime")
     if frame.empty:
         return pd.DataFrame()
-    frame["year"] = frame["datetime"].dt.year
-    frame["month"] = frame["datetime"].dt.month
-    monthly = (
-        frame.groupby(["year", "month"], as_index=False)[value_column]
-        .agg(period_start="first", period_end="last")
-    )
-    monthly["return"] = (monthly["period_end"] / monthly["period_start"]) - 1.0
+    month_end_values = frame.groupby(frame["datetime"].dt.to_period("M"))[value_column].last()
+    monthly_return = month_end_values.pct_change()
+    monthly = monthly_return.rename("return").reset_index()
+    monthly["year"] = monthly["datetime"].dt.year
+    monthly["month"] = monthly["datetime"].dt.month
     heatmap = monthly.pivot(index="year", columns="month", values="return").sort_index()
     if heatmap.empty:
         return pd.DataFrame()
@@ -942,14 +945,12 @@ def build_annual_return_heatmap_frame(report_frame: pd.DataFrame, value_column: 
     frame = frame.dropna(subset=["datetime", value_column]).sort_values("datetime")
     if frame.empty:
         return pd.DataFrame()
-    frame["year"] = frame["datetime"].dt.year.astype(str)
-    annual = (
-        frame.groupby("year", as_index=False)[value_column]
-        .agg(period_start="first", period_end="last")
-    )
-    annual["return"] = (annual["period_end"] / annual["period_start"]) - 1.0
+    year_end_values = frame.groupby(frame["datetime"].dt.to_period("Y"))[value_column].last()
+    annual_return = year_end_values.pct_change()
+    annual = annual_return.rename("return").reset_index()
     if annual.empty:
         return pd.DataFrame()
+    annual["year"] = annual["datetime"].dt.year.astype(str)
     return pd.DataFrame([annual["return"].tolist()], index=["annual_return"], columns=annual["year"].tolist())
 
 
@@ -1144,6 +1145,7 @@ def run_native_recipe(
         train_weeks=config.train_weeks,
         valid_weeks=config.valid_weeks,
         eval_count=config.eval_count,
+        recent_weeks=config.rolling_recent_weeks,
         step_weeks=config.step_weeks,
     )
     rolling_bundle = collect_prediction_bundle(
