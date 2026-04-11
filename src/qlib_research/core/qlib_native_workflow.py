@@ -945,12 +945,16 @@ def build_annual_return_heatmap_frame(report_frame: pd.DataFrame, value_column: 
     frame = frame.dropna(subset=["datetime", value_column]).sort_values("datetime")
     if frame.empty:
         return pd.DataFrame()
-    year_end_values = frame.groupby(frame["datetime"].dt.to_period("Y"))[value_column].last()
-    annual_return = year_end_values.pct_change()
-    annual = annual_return.rename("return").reset_index()
+    frame["year"] = frame["datetime"].dt.year.astype(str)
+    annual = (
+        frame.groupby("year", as_index=False)[value_column]
+        .agg(period_first="first", period_end="last")
+    )
+    annual["period_start"] = annual["period_end"].shift(1)
+    annual["period_start"] = annual["period_start"].fillna(annual["period_first"])
+    annual["return"] = (annual["period_end"] / annual["period_start"]) - 1.0
     if annual.empty:
         return pd.DataFrame()
-    annual["year"] = annual["datetime"].dt.year.astype(str)
     return pd.DataFrame([annual["return"].tolist()], index=["annual_return"], columns=annual["year"].tolist())
 
 

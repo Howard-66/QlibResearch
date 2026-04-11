@@ -207,7 +207,7 @@ def test_build_annual_return_heatmap_uses_previous_year_end_values():
 
     heatmap = build_annual_return_heatmap_frame(report)
 
-    assert pd.isna(heatmap.loc["annual_return", "2022"])
+    assert heatmap.loc["annual_return", "2022"] == pytest.approx(110.0 / 100.0 - 1.0)
     assert heatmap.loc["annual_return", "2023"] == pytest.approx(132.0 / 110.0 - 1.0)
 
 
