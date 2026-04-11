@@ -76,6 +76,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run QlibResearch native weekly research workflow")
     parser.add_argument("--panel", default="artifacts/panels/csi300_weekly.parquet")
     parser.add_argument("--execution-panel", default=None)
+    parser.add_argument("--feature-spec", default=None)
     parser.add_argument("--output-dir", default="artifacts/native_workflow/csi300")
     parser.add_argument("--universe-profile", default="csi300")
     parser.add_argument("--start-date", default="2016-01-01")
@@ -167,6 +168,7 @@ def main() -> None:
         universe_profile=args.universe_profile,
         panel_path=args.panel,
         execution_panel_path=args.execution_panel,
+        feature_spec_path=args.feature_spec,
         output_dir=args.output_dir,
         start_date=args.start_date,
         end_date=args.end_date,

@@ -23,6 +23,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--symbols", nargs="*", default=None)
     parser.add_argument("--universe-profile", default=None)
     parser.add_argument("--batch-size", type=int, default=300)
+    parser.add_argument(
+        "--enrichment-scope",
+        choices=["none", "symbol_local", "research_full"],
+        default="research_full",
+        help="Panel enrichment scope. Defaults to the full research feature layer.",
+    )
     return parser.parse_args()
 
 
@@ -37,6 +43,7 @@ def main() -> None:
         universe_profile=args.universe_profile,
         run_export="always",
         return_panel=False,
+        enrichment_scope=args.enrichment_scope,
     )
     print(f"Exported weekly panel to {result['path']}")
 

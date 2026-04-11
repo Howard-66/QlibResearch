@@ -26,13 +26,18 @@ from qlib_research.core.qlib_pipeline import (
     LABEL_COLUMN,
     apply_industry_normalization,
     build_training_frame,
+    compute_feature_fill_values,
     init_qlib_runtime,
     load_panel_dataframe,
     normalize_feature_name_list,
     resolve_feature_columns,
     suppress_external_output,
 )
-from qlib_research.core.weekly_feature_panel import export_weekly_feature_panel
+from qlib_research.core.weekly_feature_panel import (
+    ensure_panel_enrichment,
+    export_weekly_feature_panel,
+    resolve_panel_enrichment_scope,
+)
 from qlib_research.io.artifacts import build_portfolio_targets, publish_portfolio_targets, publish_score_snapshot
 
 from qlib_research.core.weekly_model_eval import (
@@ -41,6 +46,8 @@ from qlib_research.core.weekly_model_eval import (
     compare_recipe_evaluations,
     ensure_output_dir,
     evaluate_recipe,
+    build_feature_outlier_audit,
+    build_feature_redundancy_report,
     passes_promotion_gate,
     prefilter_feature_columns,
     prune_feature_groups,
@@ -59,6 +66,8 @@ ARTIFACT_CSV_FILES = {
     "equity_curve": "equity_curve.csv",
     "feature_prefilter": "feature_prefilter.csv",
     "feature_corr_candidates": "feature_corr_candidates.csv",
+    "feature_redundancy": "feature_redundancy.csv",
+    "feature_outlier_audit": "feature_outlier_audit.csv",
     "feature_group_prune": "feature_group_prune.csv",
     "tuning_results": "tuning_results.csv",
 }
@@ -66,6 +75,7 @@ ARTIFACT_CSV_FILES = {
 ARTIFACT_JSON_FILES = {
     "comparison": "comparison.json",
     "selected_recipe": "selected_recipe.json",
+    "feature_spec": "feature_spec.json",
     "stage_summary_json": "stage_summary.json",
     "feature_prune_log": "feature_prune_log.json",
     "progress": "progress.json",
@@ -75,6 +85,8 @@ NATIVE_RECIPE_CSV_FILES = {
     "latest_score_frame": "latest_score_frame.csv",
     "feature_prefilter": "feature_prefilter.csv",
     "feature_corr_candidates": "feature_corr_candidates.csv",
+    "feature_redundancy": "feature_redundancy.csv",
+    "feature_outlier_audit": "feature_outlier_audit.csv",
     "signal_diagnostics": "signal_diagnostics.csv",
     "portfolio_diagnostics": "portfolio_diagnostics.csv",
     "slice_regime_summary": "slice_regime_summary.csv",
@@ -169,6 +181,7 @@ def _summarize_date_range(frame: pd.DataFrame, *candidate_columns: str) -> dict[
 _NATIVE_WORKFLOW_CONFIG_ALIASES = {
     "panel": "panel_path",
     "execution_panel": "execution_panel_path",
+    "feature_spec": "feature_spec_path",
     "include_feature": "included_features",
     "include_features": "included_features",
     "exclude_feature": "excluded_features",
@@ -248,6 +261,8 @@ def build_native_workflow_cli_command(
     ]
     if config.execution_panel_path:
         command_lines.append(f"  --execution-panel {shlex.quote(str(config.execution_panel_path))}")
+    if config.feature_spec_path:
+        command_lines.append(f"  --feature-spec {shlex.quote(str(config.feature_spec_path))}")
     if config.start_date:
         command_lines.append(f"  --start-date {shlex.quote(str(config.start_date))}")
     if config.end_date:
@@ -349,6 +364,7 @@ def export_or_load_panel(
     symbols: Sequence[str] | None = None,
     batch_size: int = 300,
     return_panel: bool = True,
+    enrichment_scope: str | None = None,
 ) -> dict[str, Any]:
     resolved_path = _resolve_path(panel_path)
     export_performed = False
@@ -361,6 +377,7 @@ def export_or_load_panel(
             end_date=end_date,
             batch_size=batch_size,
             universe_profile=universe_profile,
+            enrichment_scope=enrichment_scope,
         )
         export_performed = True
     elif run_export == "auto_if_missing":
@@ -372,6 +389,7 @@ def export_or_load_panel(
                 end_date=end_date,
                 batch_size=batch_size,
                 universe_profile=universe_profile,
+                enrichment_scope=enrichment_scope,
             )
             export_performed = True
     elif run_export is False or run_export == "never":
@@ -433,16 +451,34 @@ def build_selected_recipe_payload(
     promotion_gate_passed: bool,
     evaluation_scope: str,
     excluded_features: Sequence[str] | str | None = None,
+    calibration_window: dict[str, Any] | None = None,
+    panel_enrichment_scope: str = "research_full",
+    redundant_features: Sequence[str] | str | None = None,
 ) -> dict[str, object]:
+    excluded = list(normalize_feature_name_list(excluded_features))
+    redundant = list(normalize_feature_name_list(redundant_features))
     return {
+        "version": "1.0",
         "model_id_suggestion": f"{evaluation_scope.replace('_', '')}-weekly-lgbm-small-stable",
         "selected_features": list(recipe.feature_columns),
         "selected_feature_groups": list(recipe.feature_groups),
         "industry_normalization": recipe.industry_normalization,
+        "normalization_policy": {
+            "default": recipe.industry_normalization,
+            "selected_features": list(recipe.feature_columns),
+        },
+        "outlier_policy": {
+            "default": "audit_only",
+        },
         "tuned_params": recipe.model_params,
         "evaluation_scope": evaluation_scope,
         "promotion_gate_passed": promotion_gate_passed,
-        "excluded_features": list(normalize_feature_name_list(excluded_features)),
+        "excluded_features": excluded,
+        "redundant_features": redundant,
+        "panel_requirements": {
+            "enrichment_scope": panel_enrichment_scope,
+        },
+        "calibration_window": calibration_window or {},
     }
 
 
@@ -672,6 +708,8 @@ class WorkflowProgressReporter:
         *,
         feature_stats: pd.DataFrame,
         corr_marks: pd.DataFrame,
+        feature_redundancy: pd.DataFrame | None,
+        feature_outlier_audit: pd.DataFrame | None,
         evaluations: list[Any],
         group_prune_log: pd.DataFrame,
         feature_prune_log: list[dict[str, Any]],
@@ -688,6 +726,8 @@ class WorkflowProgressReporter:
             output_dir=self.output_dir,
             feature_stats=feature_stats,
             corr_marks=corr_marks,
+            feature_redundancy=feature_redundancy,
+            feature_outlier_audit=feature_outlier_audit,
             summary=summary,
             slice_summary=slice_summary,
             details=details,
@@ -906,6 +946,8 @@ def _write_artifact_bundle(
     output_dir: Path,
     feature_stats: pd.DataFrame,
     corr_marks: pd.DataFrame,
+    feature_redundancy: pd.DataFrame | None = None,
+    feature_outlier_audit: pd.DataFrame | None = None,
     summary: pd.DataFrame,
     slice_summary: pd.DataFrame,
     details: pd.DataFrame,
@@ -921,6 +963,14 @@ def _write_artifact_bundle(
 ) -> None:
     feature_stats.to_csv(_artifact_path(output_dir, "feature_prefilter.csv", partial=partial), index=False)
     corr_marks.to_csv(_artifact_path(output_dir, "feature_corr_candidates.csv", partial=partial), index=False)
+    (feature_redundancy if feature_redundancy is not None else pd.DataFrame()).to_csv(
+        _artifact_path(output_dir, "feature_redundancy.csv", partial=partial),
+        index=False,
+    )
+    (feature_outlier_audit if feature_outlier_audit is not None else pd.DataFrame()).to_csv(
+        _artifact_path(output_dir, "feature_outlier_audit.csv", partial=partial),
+        index=False,
+    )
     summary.to_csv(_artifact_path(output_dir, "summary.csv", partial=partial), index=False)
     slice_summary.to_csv(_artifact_path(output_dir, "slice_summary.csv", partial=partial), index=False)
     details.to_csv(_artifact_path(output_dir, "details.csv", partial=partial), index=False)
@@ -941,6 +991,10 @@ def _write_artifact_bundle(
     )
     _write_json(
         _artifact_path(output_dir, "selected_recipe.json", partial=partial),
+        selected_recipe_payload,
+    )
+    _write_json(
+        _artifact_path(output_dir, "feature_spec.json", partial=partial),
         selected_recipe_payload,
     )
 
@@ -1015,8 +1069,9 @@ def run_convergence_workflow(
         if not eval_dates:
             raise ValueError("No eligible evaluation dates selected")
 
+        calibration_panel = panel.loc[pd.to_datetime(panel["datetime"]) <= pd.Timestamp(eval_dates[0])].copy()
         filtered_features, feature_stats, corr_marks = prefilter_feature_columns(
-            panel=panel,
+            panel=calibration_panel,
             feature_columns=resolve_feature_columns(
                 FULL_POSTFIX_BASELINE_FEATURE_COLUMNS,
                 excluded_features=resolved_excluded_features,
@@ -1025,6 +1080,25 @@ def run_convergence_workflow(
         )
         if not filtered_features:
             raise ValueError("No usable feature columns remain after prefilter/excluded_features")
+        calibration_window = {
+            "start": str(calibration_panel["datetime"].min().date()),
+            "end": str(calibration_panel["datetime"].max().date()),
+        }
+        feature_redundancy = build_feature_redundancy_report(
+            calibration_panel,
+            filtered_features,
+            end_date=calibration_window["end"],
+        )
+        redundant_feature_names = tuple(
+            dict.fromkeys(
+                feature_redundancy.get("right_feature", pd.Series(dtype=object)).astype(str).tolist()
+            )
+        )
+        feature_outlier_audit = build_feature_outlier_audit(
+            calibration_panel,
+            filtered_features,
+            end_date=calibration_window["end"],
+        )
         feature_groups = groups_for_features(filtered_features)
         full_recipe = ModelRecipe(
             name="full_postfix_baseline",
@@ -1102,10 +1176,14 @@ def run_convergence_workflow(
             promotion_gate_passed=False,
             evaluation_scope=universe_profile,
             excluded_features=resolved_excluded_features,
+            calibration_window=calibration_window,
+            redundant_features=redundant_feature_names,
         )
         progress.write_partial_artifacts(
             feature_stats=feature_stats,
             corr_marks=corr_marks,
+            feature_redundancy=feature_redundancy,
+            feature_outlier_audit=feature_outlier_audit,
             evaluations=evaluations,
             group_prune_log=group_prune_log,
             feature_prune_log=feature_prune_log,
@@ -1180,10 +1258,14 @@ def run_convergence_workflow(
                 promotion_gate_passed=False,
                 evaluation_scope=universe_profile,
                 excluded_features=resolved_excluded_features,
+                calibration_window=calibration_window,
+                redundant_features=redundant_feature_names,
             )
             progress.write_partial_artifacts(
                 feature_stats=feature_stats,
                 corr_marks=corr_marks,
+                feature_redundancy=feature_redundancy,
+                feature_outlier_audit=feature_outlier_audit,
                 evaluations=evaluations,
                 group_prune_log=group_prune_log,
                 feature_prune_log=feature_prune_log,
@@ -1260,10 +1342,14 @@ def run_convergence_workflow(
                 promotion_gate_passed=False,
                 evaluation_scope=universe_profile,
                 excluded_features=resolved_excluded_features,
+                calibration_window=calibration_window,
+                redundant_features=redundant_feature_names,
             )
             progress.write_partial_artifacts(
                 feature_stats=feature_stats,
                 corr_marks=corr_marks,
+                feature_redundancy=feature_redundancy,
+                feature_outlier_audit=feature_outlier_audit,
                 evaluations=evaluations,
                 group_prune_log=group_prune_log,
                 feature_prune_log=feature_prune_log,
@@ -1346,10 +1432,14 @@ def run_convergence_workflow(
             promotion_gate_passed=bool(promotion_gate["promotion_gate_passed"]),
             evaluation_scope=universe_profile,
             excluded_features=resolved_excluded_features,
+            calibration_window=calibration_window,
+            redundant_features=redundant_feature_names,
         )
         progress.write_partial_artifacts(
             feature_stats=feature_stats,
             corr_marks=corr_marks,
+            feature_redundancy=feature_redundancy,
+            feature_outlier_audit=feature_outlier_audit,
             evaluations=evaluations,
             group_prune_log=group_prune_log,
             feature_prune_log=feature_prune_log,
@@ -1378,6 +1468,8 @@ def run_convergence_workflow(
             output_dir=resolved_output_dir,
             feature_stats=feature_stats,
             corr_marks=corr_marks,
+            feature_redundancy=feature_redundancy,
+            feature_outlier_audit=feature_outlier_audit,
             summary=summary,
             slice_summary=slice_summary,
             details=details,
@@ -1533,12 +1625,14 @@ def load_feature_config(feature_config: str | Path | dict[str, Any] | None) -> d
     if feature_config is None:
         return {}
     if isinstance(feature_config, dict):
-        return dict(feature_config)
+        payload = dict(feature_config)
+        return dict(payload.get("feature_spec") or payload.get("selected_recipe") or payload)
 
     config_path = _resolve_path(feature_config)
     if not config_path.exists():
         raise FileNotFoundError(f"Feature config not found: {config_path}")
-    return json.loads(config_path.read_text(encoding="utf-8"))
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    return dict(payload.get("feature_spec") or payload.get("selected_recipe") or payload)
 
 
 def train_and_publish_weekly_snapshot(
@@ -1564,6 +1658,10 @@ def train_and_publish_weekly_snapshot(
         raise ValueError("Feature panel is empty, cannot train/publish scores")
 
     config = load_feature_config(feature_config)
+    required_enrichment_scope = resolve_panel_enrichment_scope(
+        enrichment_scope=(config.get("panel_requirements") or {}).get("enrichment_scope", "research_full")
+    )
+    panel = ensure_panel_enrichment(panel, required_enrichment_scope)
     resolved_excluded_features = normalize_feature_name_list(
         (
             *normalize_feature_name_list(config.get("excluded_features")),
@@ -1588,13 +1686,19 @@ def train_and_publish_weekly_snapshot(
         feature_columns=selected_features,
         method=industry_normalization,
     )
+    segments = build_segments(training_panel, feature_date=resolved_feature_date)
+    train_start, train_end = segments["train"]
+    train_panel = training_panel.loc[
+        pd.to_datetime(training_panel["datetime"]).between(pd.Timestamp(train_start), pd.Timestamp(train_end))
+    ].copy()
+    fill_values = compute_feature_fill_values(train_panel, feature_columns=selected_features)
 
     qlib_frame, feature_columns = build_training_frame(
         training_panel,
         feature_columns=selected_features,
         label_column=LABEL_COLUMN,
+        fill_values=fill_values,
     )
-    segments = build_segments(training_panel, feature_date=resolved_feature_date)
 
     loader = StaticDataLoader(qlib_frame)
     handler = DataHandlerLP(data_loader=loader, infer_processors=[], learn_processors=[])

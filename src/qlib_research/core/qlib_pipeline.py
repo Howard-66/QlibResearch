@@ -8,6 +8,7 @@ and the screener only consumes the latest published scores.
 from __future__ import annotations
 
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from dataclasses import dataclass
 from fnmatch import fnmatchcase
 import importlib.resources as importlib_resources
 import io
@@ -16,7 +17,7 @@ import os
 import json
 from pathlib import Path
 import sys
-from typing import Optional, Sequence
+from typing import Literal, Optional, Sequence
 import types
 import warnings
 
@@ -363,12 +364,175 @@ INDUSTRY_NORMALIZED_GROUPS = {
     "valuation_percentile",
     "industry_valuation_context",
     "quality_summary",
-    "fscore_components",
     "ttm_profitability",
     "derived_valuation_delta",
     "derived_quality_delta",
 }
 LABEL_COLUMN = "label_excess_return_4w"
+
+FeatureType = Literal["continuous", "flag", "percentile", "rank", "interaction", "macro"]
+DerivationLayer = Literal["raw", "symbol_local", "research_cross_sectional"]
+NormalizationPolicy = Literal["raw", "robust_industry"]
+OutlierPolicy = Literal["audit_only", "eligible", "skip"]
+
+
+@dataclass(frozen=True)
+class FeaturePolicy:
+    feature_type: FeatureType
+    derivation_layer: DerivationLayer
+    normalization_policy: NormalizationPolicy
+    outlier_policy: OutlierPolicy
+
+
+def _build_feature_policy_registry() -> dict[str, FeaturePolicy]:
+    registry: dict[str, FeaturePolicy] = {}
+
+    raw_continuous_groups = {
+        "technical_core",
+        "technical_flow",
+        "valuation_absolute",
+        "industry_valuation_context",
+        "quality_summary",
+        "ttm_profitability",
+        "buffett_moat",
+    }
+    symbol_local_groups = {
+        "derived_momentum",
+        "derived_volatility",
+        "derived_liquidity",
+        "derived_valuation_delta",
+        "derived_quality_delta",
+    }
+
+    for group_name, columns in FEATURE_GROUP_COLUMNS.items():
+        for column in columns:
+            feature_type: FeatureType = "continuous"
+            derivation_layer: DerivationLayer = "raw"
+            normalization_policy: NormalizationPolicy = "raw"
+            outlier_policy: OutlierPolicy = "eligible"
+
+            if group_name in raw_continuous_groups:
+                derivation_layer = "raw"
+            elif group_name in symbol_local_groups:
+                derivation_layer = "symbol_local"
+            elif group_name == "industry_relative":
+                feature_type = "rank"
+                derivation_layer = "research_cross_sectional"
+                outlier_policy = "skip"
+            elif group_name == "macro_interactions":
+                feature_type = "interaction"
+                derivation_layer = "research_cross_sectional"
+                outlier_policy = "skip"
+            elif group_name == "valuation_percentile":
+                feature_type = "percentile"
+                normalization_policy = "raw"
+                outlier_policy = "skip"
+            elif group_name in {"macro_cycle_numeric", "macro_cycle_flags"}:
+                feature_type = "macro"
+                normalization_policy = "raw"
+                outlier_policy = "skip"
+
+            if group_name in INDUSTRY_NORMALIZED_GROUPS and feature_type == "continuous":
+                normalization_policy = "robust_industry"
+
+            registry[column] = FeaturePolicy(
+                feature_type=feature_type,
+                derivation_layer=derivation_layer,
+                normalization_policy=normalization_policy,
+                outlier_policy=outlier_policy,
+            )
+
+    flag_columns = {
+        "volume_confirmed",
+        "f_roa",
+        "f_cfo",
+        "f_delta_roa",
+        "f_accrual",
+        "f_delta_lever",
+        "f_delta_liquid",
+        "f_eq_offer",
+        "f_delta_margin",
+        "f_delta_turn",
+        "buffett_gpm_flag",
+        "buffett_npm_stable_flag",
+        "buffett_roa_flag",
+        "buffett_cashflow_flag",
+        "buffett_npm_flag",
+        "buffett_moat_pass",
+        "macro_phase_changed",
+        "macro_phase_reflation",
+        "macro_phase_recovery",
+        "macro_phase_overheat",
+        "macro_phase_stagflation",
+        "macro_industry_match",
+    }
+    for column in flag_columns:
+        existing = registry.get(column)
+        registry[column] = FeaturePolicy(
+            feature_type="flag",
+            derivation_layer=existing.derivation_layer if existing else "raw",
+            normalization_policy="raw",
+            outlier_policy="skip",
+        )
+
+    registry["signal_grade_num"] = FeaturePolicy(
+        feature_type="rank",
+        derivation_layer="raw",
+        normalization_policy="raw",
+        outlier_policy="skip",
+    )
+
+    for column in {
+        "core_indicator_pct_1250d",
+        "core_indicator_industry_pct",
+    }:
+        if column in registry:
+            registry[column] = FeaturePolicy(
+                feature_type="percentile",
+                derivation_layer=registry[column].derivation_layer,
+                normalization_policy="raw",
+                outlier_policy="skip",
+            )
+
+    for column in {
+        "industry_pe_ttm_pct_rank_pct",
+        "industry_f_score_rank_pct",
+        "industry_npm_ttm_rank_pct",
+    }:
+        if column in registry:
+            registry[column] = FeaturePolicy(
+                feature_type="rank",
+                derivation_layer="research_cross_sectional",
+                normalization_policy="raw",
+                outlier_policy="skip",
+            )
+
+    for column in {
+        "buffett_npm_flag",
+        "buffett_moat_coverage",
+        "buffett_moat_score",
+        "buffett_moat_pass",
+    }:
+        if column in registry:
+            policy = registry[column]
+            registry[column] = FeaturePolicy(
+                feature_type=policy.feature_type,
+                derivation_layer="research_cross_sectional",
+                normalization_policy="raw",
+                outlier_policy="skip" if policy.feature_type != "continuous" else "audit_only",
+            )
+
+    for column in MACRO_INTERACTION_COLUMNS:
+        registry[column] = FeaturePolicy(
+            feature_type="interaction",
+            derivation_layer="research_cross_sectional",
+            normalization_policy="raw",
+            outlier_policy="skip",
+        )
+    return registry
+
+
+FEATURE_POLICY_REGISTRY = _build_feature_policy_registry()
 
 
 def compose_feature_columns(group_names: Sequence[str]) -> tuple[str, ...]:
@@ -452,14 +616,81 @@ def resolve_feature_columns(
     return exclude_feature_columns(included, excluded_features=excluded_features)
 
 
+def get_feature_policy(column: str) -> FeaturePolicy:
+    return FEATURE_POLICY_REGISTRY.get(
+        str(column),
+        FeaturePolicy(
+            feature_type="continuous",
+            derivation_layer="raw",
+            normalization_policy="raw",
+            outlier_policy="audit_only",
+        ),
+    )
+
+
+def get_feature_policy_registry() -> dict[str, FeaturePolicy]:
+    return dict(FEATURE_POLICY_REGISTRY)
+
+
 def get_normalized_feature_candidates(feature_columns: Sequence[str]) -> list[str]:
-    normalized_candidates = {
+    return [
         column
-        for group_name, columns in FEATURE_GROUP_COLUMNS.items()
-        if group_name in INDUSTRY_NORMALIZED_GROUPS
-        for column in columns
+        for column in feature_columns
+        if get_feature_policy(column).normalization_policy == "robust_industry"
+    ]
+
+
+def get_outlier_audit_candidates(feature_columns: Sequence[str]) -> list[str]:
+    return [
+        column
+        for column in feature_columns
+        if get_feature_policy(column).outlier_policy in {"audit_only", "eligible"}
+    ]
+
+
+def _prepare_training_inputs(
+    panel: pd.DataFrame,
+    feature_columns: Optional[Sequence[str]] = None,
+) -> tuple[pd.DataFrame, list[str], pd.Series]:
+    frame = panel.copy()
+    frame["datetime"] = pd.to_datetime(frame["datetime"])
+    frame["instrument"] = frame["instrument"].astype(str)
+    frame["signal_grade_num"] = frame.get("signal_grade", pd.Series(index=frame.index)).map({
+        "F": 0,
+        "D": 1,
+        "C": 2,
+        "B": 3,
+        "A": 4,
+    }).fillna(0)
+
+    candidates = list(FEATURE_COLUMNS if feature_columns is None else feature_columns)
+    available = [
+        col for col in candidates
+        if col in frame.columns
+        and (
+            pd.api.types.is_numeric_dtype(frame[col])
+            or pd.api.types.is_bool_dtype(frame[col])
+        )
+    ]
+    if not available:
+        raise ValueError("No numeric feature columns available for qlib training")
+    feature_frame = frame[available].apply(pd.to_numeric, errors="coerce")
+    valid_rows = feature_frame.notna().any(axis=1)
+    if not valid_rows.any():
+        raise ValueError("No usable feature rows available for qlib training")
+    return frame, available, valid_rows
+
+
+def compute_feature_fill_values(
+    panel: pd.DataFrame,
+    feature_columns: Optional[Sequence[str]] = None,
+) -> dict[str, float]:
+    frame, available, valid_rows = _prepare_training_inputs(panel, feature_columns=feature_columns)
+    feature_frame = frame.loc[valid_rows, available].apply(pd.to_numeric, errors="coerce")
+    return {
+        column: 0.0 if pd.isna(feature_frame[column].median()) else float(feature_frame[column].median())
+        for column in available
     }
-    return [column for column in feature_columns if column in normalized_candidates]
 
 
 def _robust_scale_frame(
@@ -571,44 +802,24 @@ def build_training_frame(
     panel: pd.DataFrame,
     feature_columns: Optional[Sequence[str]] = None,
     label_column: str = LABEL_COLUMN,
+    fill_values: dict[str, float] | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     """Convert a feature panel into qlib's feature/label dataframe layout."""
-    frame = panel.copy()
-    frame["datetime"] = pd.to_datetime(frame["datetime"])
-    frame["instrument"] = frame["instrument"].astype(str)
-    frame["signal_grade_num"] = frame.get("signal_grade", pd.Series(index=frame.index)).map({
-        "F": 0,
-        "D": 1,
-        "C": 2,
-        "B": 3,
-        "A": 4,
-    }).fillna(0)
-
-    candidates = list(FEATURE_COLUMNS if feature_columns is None else feature_columns)
-    available = [
-        col for col in candidates
-        if col in frame.columns
-        and (
-            pd.api.types.is_numeric_dtype(frame[col])
-            or pd.api.types.is_bool_dtype(frame[col])
-        )
-    ]
-    if not available:
-        raise ValueError("No numeric feature columns available for qlib training")
+    frame, available, valid_rows = _prepare_training_inputs(panel, feature_columns=feature_columns)
     if label_column not in frame.columns:
         raise ValueError(f"Required label column missing: {label_column}")
 
     qlib_frame = frame[["datetime", "instrument", *available, label_column]].copy()
     feature_frame = qlib_frame[available].apply(pd.to_numeric, errors="coerce")
-    valid_rows = feature_frame.notna().any(axis=1)
-    if not valid_rows.any():
-        raise ValueError("No usable feature rows available for qlib training")
     feature_frame = feature_frame.loc[valid_rows]
     label_series = pd.to_numeric(qlib_frame.loc[valid_rows, label_column], errors="coerce")
 
     for column in available:
-        median = feature_frame[column].median()
-        fill_value = 0.0 if pd.isna(median) else float(median)
+        if fill_values is None:
+            median = feature_frame[column].median()
+            fill_value = 0.0 if pd.isna(median) else float(median)
+        else:
+            fill_value = float(fill_values.get(column, 0.0))
         feature_frame[column] = feature_frame[column].fillna(fill_value)
 
     qlib_frame = qlib_frame.loc[valid_rows, ["datetime", "instrument"]].copy()

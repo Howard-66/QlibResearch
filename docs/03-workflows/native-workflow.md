@@ -79,6 +79,23 @@ panel 构建阶段会做一些基础层面的整理和派生：
 
 这一步更接近“特征工程”和“基础清洗”，不是统一意义上的异常值截尾或标准化。
 
+#### 当前实现新增的 enrichment scope
+
+现在 panel 导出和消费已经显式区分 3 个富化层级：
+
+- `none`
+  - 只保留原始 weekly panel 和 label 所需基础字段
+- `symbol_local`
+  - 只计算单证券自身历史可确定的派生特征
+  - 典型包括：`mom_*`、`rev_*`、`volatility_*`、`downside_volatility_*`、`amount_change_4w`、`volume_change_4w`、`amount_zscore_4w`、估值和质量 delta
+- `research_full`
+  - 在 `symbol_local` 之上，继续补 universe-scoped 的研究语义特征
+  - 典型包括：行业分位、行业相对 rank、`buffett_*` 组合信号、`macro_*_x_*` 交互项
+
+native workflow 现在会先检测 panel 已经富化到哪一层，只补缺失层，不再对已经包含研究派生特征的 panel 重复调用 `engineer_research_features`。
+
+导出时还会写 sidecar metadata，用于记录 `panel_enrichment_scope`。
+
 相关位置：
 
 - [src/qlib_research/core/weekly_feature_panel.py](/Volumes/Repository/Projects/TradingNexus/QlibResearch/src/qlib_research/core/weekly_feature_panel.py:348)
@@ -154,6 +171,19 @@ panel 构建阶段会做一些基础层面的整理和派生：
 
 而不是“高相关自动去冗余”。
 
+#### 当前实现新增的研究诊断
+
+除了保留原有的 `feature_corr_candidates.csv`，现在还会额外输出：
+
+- `feature_redundancy.csv`
+  - 基于校准窗口构建的高相关冗余报告
+  - 包含相关对和相关簇 `cluster_id`
+- `feature_outlier_audit.csv`
+  - 只做诊断，不默认裁尾
+  - 默认跳过 flag、rank、percentile、macro flag、interaction 类特征
+
+这些产物用于研究期裁剪和冻结 `feature_spec.json`，不会在 native 默认主链路里自动删列。
+
 相关位置：
 
 - [src/qlib_research/core/weekly_model_eval.py](/Volumes/Repository/Projects/TradingNexus/QlibResearch/src/qlib_research/core/weekly_model_eval.py:774)
@@ -181,6 +211,20 @@ panel 构建阶段会做一些基础层面的整理和派生：
 - 结果是 `(value - center) / scale`
 
 这一步对异常值更稳健，因为它不是用均值和标准差，而是用中位数和四分位距。
+
+#### 当前实现新增的 feature policy registry
+
+现在标准化候选列不再只靠隐式 group 规则，而是由显式的 feature policy registry 决定：
+
+- 哪些列允许 `robust_industry`
+- 哪些列必须保持 `raw`
+- 哪些列只允许 outlier audit，不允许默认裁尾
+
+默认策略是：
+
+- 不对全部 feature 统一标准化
+- 不对 flag、binary、rank、percentile、macro regime、interaction 做行业标准化
+- 继续保留“选择性行业内鲁棒标准化”的总体方向
 
 相关位置：
 
@@ -226,6 +270,8 @@ panel 构建阶段会做一些基础层面的整理和派生：
 这是当前 native workflow 中最明确、最直接的特征空值处理方式。
 
 注意这里用的是训练集统计量，而不是全样本统计量，这样时序上更合理。
+
+同样的 train-only median 口径现在也已经同步到 `train_and_publish_weekly_snapshot()`，避免 native workflow 和 snapshot 路径继续使用不同的补空统计量。
 
 相关位置：
 
@@ -314,13 +360,27 @@ panel 构建阶段会做一些基础层面的整理和派生：
 - `walk_forward_feature_importance.csv`
 - `feature_prefilter.csv`
 - `feature_corr_candidates.csv`
+- `feature_redundancy.csv`
+- `feature_outlier_audit.csv`
 - `portfolio_diagnostics.csv`
 - `signal_diagnostics.csv`
 - `portfolio_targets.csv`
 - `native_workflow_manifest.json`
+
+如果使用 convergence workflow 产出冻结配置，还会额外得到：
+
+- `feature_spec.json`
+  - 包含 `selected_features`
+  - `excluded_features`
+  - `redundant_features`
+  - `industry_normalization`
+  - `outlier_policy`
+  - `panel_requirements.enrichment_scope`
+  - `calibration_window`
 
 ## 相关阅读
 
 - [qlib 原生工作流输出结果解读指南](/Volumes/Repository/Projects/TradingNexus/QlibResearch/docs/qlib-native-workflow-node-guide.md)
 - [CLI quickstart](/Volumes/Repository/Projects/TradingNexus/QlibResearch/docs/02-getting-started/cli-quickstart.md)
 - [panel export](/Volumes/Repository/Projects/TradingNexus/QlibResearch/docs/03-workflows/panel-export.md)
+- [FDH 适配边界说明](/Volumes/Repository/Projects/TradingNexus/QlibResearch/docs/05-architecture/fdh-adaptation-guide.md)

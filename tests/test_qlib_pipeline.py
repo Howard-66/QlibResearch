@@ -5,7 +5,10 @@ import pandas as pd
 
 from qlib_research.core.qlib_pipeline import (
     apply_industry_normalization,
+    build_training_frame,
+    compute_feature_fill_values,
     exclude_feature_columns,
+    get_normalized_feature_candidates,
     include_feature_columns,
     init_qlib_runtime,
     normalize_feature_name_list,
@@ -85,6 +88,43 @@ def test_apply_industry_normalization_keeps_macro_features_raw():
         panel["macro_credit_impulse"],
         check_names=False,
     )
+
+
+def test_normalized_feature_candidates_skip_flag_and_rank_features():
+    candidates = get_normalized_feature_candidates(
+        [
+            "pe_ttm",
+            "f_roa",
+            "macro_phase_reflation",
+            "industry_mom_4w_rank_pct",
+            "current_ratio_delta_8w",
+        ]
+    )
+
+    assert candidates == ["pe_ttm", "current_ratio_delta_8w"]
+
+
+def test_build_training_frame_honors_explicit_fill_values():
+    panel = pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(["2026-01-02", "2026-01-09", "2026-01-16"]),
+            "instrument": ["AAA.SH", "AAA.SH", "AAA.SH"],
+            "pe_ttm": [10.0, None, 12.0],
+            "pb": [1.0, 1.1, 1.2],
+            "label_excess_return_4w": [0.01, 0.02, 0.03],
+        }
+    )
+
+    fill_values = compute_feature_fill_values(panel.iloc[[0, 2]], feature_columns=["pe_ttm", "pb"])
+    qlib_frame, used = build_training_frame(
+        panel,
+        feature_columns=["pe_ttm", "pb"],
+        fill_values=fill_values,
+    )
+
+    assert used == ["pe_ttm", "pb"]
+    assert qlib_frame.loc[(pd.Timestamp("2026-01-09"), "AAA.SH"), ("feature", "pe_ttm")] == 11.0
+    assert qlib_frame.loc[(pd.Timestamp("2026-01-09"), "AAA.SH"), ("feature", "pb")] == 1.1
 
 
 def test_feature_exclusion_helpers_resolve_manual_excludes():

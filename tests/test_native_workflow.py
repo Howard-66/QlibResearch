@@ -50,6 +50,8 @@ def test_evaluate_native_weekly_parse_args_accepts_feature_matchers(monkeypatch)
             "pb,pe_ttm",
             "--exclude-feature",
             "macro_industry_match",
+            "--feature-spec",
+            "artifacts/native_workflow/csi300/feature_spec.json",
         ],
     )
 
@@ -57,8 +59,37 @@ def test_evaluate_native_weekly_parse_args_accepts_feature_matchers(monkeypatch)
 
     assert args.include_feature == ["macro*", "pb,pe_ttm"]
     assert args.exclude_feature == ["macro_industry_match"]
+    assert args.feature_spec.endswith("feature_spec.json")
     assert args.panel.endswith(".parquet")
     assert args.rolling_recent_weeks == 52
+
+
+def test_build_native_recipe_registry_uses_feature_spec(tmp_path):
+    feature_spec = tmp_path / "feature_spec.json"
+    feature_spec.write_text(
+        """{
+  "selected_features": ["pb", "pe_ttm"],
+  "selected_feature_groups": ["valuation_absolute"],
+  "industry_normalization": "none",
+  "excluded_features": ["macro_industry_match"],
+  "tuned_params": {"num_boost_round": 123}
+}""",
+        encoding="utf-8",
+    )
+
+    registry = build_native_recipe_registry(
+        NativeWorkflowConfig(
+            feature_spec_path=feature_spec,
+            included_features=("macro*",),
+        )
+    )
+
+    baseline = registry["baseline"]
+    assert baseline.feature_groups == ("valuation_absolute",)
+    assert baseline.included_features == ("pb", "pe_ttm")
+    assert baseline.excluded_features == ("macro_industry_match",)
+    assert baseline.industry_normalization == "none"
+    assert baseline.model_params["num_boost_round"] == 123
 
 
 def test_run_native_notebook_workflow_accepts_cli_style_overrides(tmp_path):

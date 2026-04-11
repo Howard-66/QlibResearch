@@ -6,6 +6,8 @@ from qlib_research.core.weekly_model_eval import (
     ModelRecipe,
     RecipeEvaluation,
     build_backtest_price_frames,
+    build_feature_outlier_audit,
+    build_feature_redundancy_report,
     build_signal_matrix,
     default_weekly_net_backtest_config,
     get_or_prepare_model_input,
@@ -223,8 +225,9 @@ def test_get_or_prepare_model_input_reuses_cached_training_frame(monkeypatch):
     build_calls: list[tuple[pd.Timestamp, ...]] = []
     segment_calls: list[pd.Timestamp] = []
 
-    def fake_build_training_frame(frame, feature_columns, label_column):
+    def fake_build_training_frame(frame, feature_columns, label_column, fill_values=None):
         build_calls.append(tuple(pd.to_datetime(frame["datetime"])))
+        assert fill_values == {"feature_a": 1.5}
         qlib_frame = pd.DataFrame(
             {
                 "feature_a": [1.0],
@@ -245,6 +248,10 @@ def test_get_or_prepare_model_input_reuses_cached_training_frame(monkeypatch):
             "test": ("2026-01-23", "2026-01-23"),
         }
 
+    monkeypatch.setattr(
+        "qlib_research.core.weekly_model_eval.compute_feature_fill_values",
+        lambda frame, feature_columns=None: {"feature_a": 1.5},
+    )
     monkeypatch.setattr("qlib_research.core.weekly_model_eval.build_training_frame", fake_build_training_frame)
     monkeypatch.setattr("qlib_research.core.weekly_model_eval.build_rolling_segments", fake_build_rolling_segments)
 
@@ -275,6 +282,47 @@ def test_get_or_prepare_model_input_reuses_cached_training_frame(monkeypatch):
     assert len(segment_calls) == 1
     assert prepared_a is prepared_b
     assert prepared_b.used_features == ["feature_a"]
+
+
+def test_feature_redundancy_report_uses_requested_window():
+    panel = pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(["2026-01-02", "2026-01-09", "2026-01-16", "2026-01-23"]),
+            "feature_a": [1.0, 2.0, 3.0, 4.0],
+            "feature_b": [2.0, 4.0, 6.0, 8.0],
+            "feature_c": [1.0, 1.0, 2.0, 3.0],
+        }
+    )
+
+    redundancy = build_feature_redundancy_report(
+        panel,
+        ["feature_a", "feature_b", "feature_c"],
+        end_date="2026-01-16",
+        corr_threshold=0.95,
+    )
+
+    assert not redundancy.empty
+    assert redundancy.iloc[0]["left_feature"] == "feature_a"
+    assert redundancy.iloc[0]["right_feature"] == "feature_b"
+    assert redundancy.iloc[0]["window_end"] == "2026-01-16"
+
+
+def test_feature_outlier_audit_skips_flag_and_rank_columns():
+    panel = pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(["2026-01-02", "2026-01-09", "2026-01-16", "2026-01-23"]),
+            "pe_ttm": [10.0, 11.0, 12.0, 100.0],
+            "macro_phase_reflation": [1, 0, 1, 0],
+            "industry_mom_4w_rank_pct": [0.1, 0.2, 0.3, 0.4],
+        }
+    )
+
+    audit = build_feature_outlier_audit(
+        panel,
+        ["pe_ttm", "macro_phase_reflation", "industry_mom_4w_rank_pct"],
+    )
+
+    assert audit["feature"].tolist() == ["pe_ttm"]
 
 
 def make_evaluation(

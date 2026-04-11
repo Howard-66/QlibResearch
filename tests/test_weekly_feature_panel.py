@@ -10,8 +10,13 @@ from qlib_research.core.weekly_feature_panel import (
     _harmonize_feature_columns,
     _merge_asof_by_symbol,
     build_weekly_feature_panel,
+    detect_panel_enrichment_scope,
+    ensure_panel_enrichment,
+    engineer_cross_sectional_research_features,
     engineer_research_features,
+    engineer_symbol_local_features,
     export_weekly_feature_panel,
+    load_feature_panel_enrichment_scope,
 )
 
 
@@ -202,6 +207,93 @@ def test_export_weekly_feature_panel_supports_running_event_loop(tmp_path, monke
     assert observed["result"] == (tmp_path / "panel.csv").resolve()
     exported = pd.read_csv(tmp_path / "panel.csv")
     assert exported["symbol"].tolist() == ["AAA.SH"]
+    assert load_feature_panel_enrichment_scope(tmp_path / "panel.csv") == "research_full"
+
+
+def test_engineer_symbol_local_and_cross_sectional_features_are_split():
+    panel = pd.DataFrame(
+        {
+            "symbol": ["AAA.SH", "AAA.SH", "BBB.SZ", "BBB.SZ"],
+            "time": pd.to_datetime(["2026-01-02", "2026-01-09", "2026-01-02", "2026-01-09"]),
+            "datetime": pd.to_datetime(["2026-01-02", "2026-01-09", "2026-01-02", "2026-01-09"]),
+            "close": [10.0, 11.0, 20.0, 18.0],
+            "amount": [100.0, 120.0, 90.0, 95.0],
+            "volume": [10.0, 12.0, 9.0, 8.0],
+            "l1_name": ["Tech", "Tech", "Tech", "Tech"],
+            "npm_ttm": [12.0, 12.5, 10.0, 9.5],
+            "f_score": [7.0, 8.0, 5.0, 6.0],
+            "pe_ttm_pct_1250d": [0.2, 0.3, 0.5, 0.4],
+            "buffett_npm_stable_flag": [1.0, 1.0, 0.0, 1.0],
+            "buffett_gpm_flag": [1.0, 1.0, 1.0, 1.0],
+            "buffett_roa_flag": [1.0, 1.0, 1.0, 1.0],
+            "buffett_cashflow_flag": [1.0, 1.0, 1.0, 1.0],
+            "macro_phase_reflation": [1, 0, 1, 0],
+            "macro_phase_recovery": [0, 1, 0, 1],
+            "macro_phase_overheat": [0, 0, 0, 0],
+            "macro_phase_stagflation": [0, 0, 0, 0],
+            "macro_industry_match": [1, 1, 0, 0],
+            "pe_ttm": [10.0, 11.0, 12.0, 13.0],
+        }
+    )
+
+    symbol_local = engineer_symbol_local_features(panel)
+    assert "mom_1w" in symbol_local.columns
+    assert "industry_mom_4w_rank_pct" not in symbol_local.columns
+    assert detect_panel_enrichment_scope(symbol_local) == "symbol_local"
+
+    research_full = engineer_cross_sectional_research_features(symbol_local)
+    assert "industry_mom_4w_rank_pct" in research_full.columns
+    assert "macro_reflation_x_mom_4w" in research_full.columns
+    assert detect_panel_enrichment_scope(research_full) == "research_full"
+
+    wrapped = engineer_research_features(panel)
+    assert set(research_full.columns).issubset(set(wrapped.columns))
+
+
+def test_ensure_panel_enrichment_only_computes_missing_layer(monkeypatch):
+    panel = pd.DataFrame(
+        {
+            "symbol": ["AAA.SH", "AAA.SH"],
+            "time": pd.to_datetime(["2026-01-02", "2026-01-09"]),
+            "datetime": pd.to_datetime(["2026-01-02", "2026-01-09"]),
+            "close": [10.0, 11.0],
+            "l1_name": ["Tech", "Tech"],
+            "f_score": [7.0, 8.0],
+            "pe_ttm_pct_1250d": [0.2, 0.3],
+            "npm_ttm": [12.0, 12.5],
+            "buffett_npm_stable_flag": [1.0, 1.0],
+            "buffett_gpm_flag": [1.0, 1.0],
+            "buffett_roa_flag": [1.0, 1.0],
+            "buffett_cashflow_flag": [1.0, 1.0],
+            "macro_phase_reflation": [1, 0],
+            "macro_phase_recovery": [0, 1],
+            "macro_phase_overheat": [0, 0],
+            "macro_phase_stagflation": [0, 0],
+            "macro_industry_match": [1, 1],
+        }
+    )
+    calls: list[str] = []
+    original_symbol_local = engineer_symbol_local_features
+    original_cross = engineer_cross_sectional_research_features
+
+    def tracking_symbol_local(frame):
+        calls.append("symbol_local")
+        return original_symbol_local(frame)
+
+    def tracking_cross(frame):
+        calls.append("research_full")
+        return original_cross(frame)
+
+    monkeypatch.setattr("qlib_research.core.weekly_feature_panel.engineer_symbol_local_features", tracking_symbol_local)
+    monkeypatch.setattr("qlib_research.core.weekly_feature_panel.engineer_cross_sectional_research_features", tracking_cross)
+
+    enriched = ensure_panel_enrichment(panel, "research_full")
+    assert detect_panel_enrichment_scope(enriched) == "research_full"
+    assert calls == ["symbol_local", "research_full"]
+
+    calls.clear()
+    ensure_panel_enrichment(enriched, "research_full")
+    assert calls == []
 
 
 def test_filter_panel_by_universe_profile_restricts_csi300_rows():

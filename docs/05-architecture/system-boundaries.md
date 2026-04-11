@@ -5,3 +5,7 @@
 `ValueInvesting`：在线智能选股、组合管理、前端展示、已发布模型消费。
 
 第一阶段不共享运行时模块，只通过文件契约交付。
+
+与 `FinanceDataHub` 的特征下沉边界，见：
+
+- [FDH Adaptation Guide](/Volumes/Repository/Projects/TradingNexus/QlibResearch/docs/05-architecture/fdh-adaptation-guide.md)

@@ -20,6 +20,8 @@ from qlib_research.core.qlib_pipeline import (
     LABEL_COLUMN,
     apply_industry_normalization,
     build_training_frame,
+    compute_feature_fill_values,
+    get_outlier_audit_candidates,
     suppress_external_output,
 )
 
@@ -312,17 +314,23 @@ def get_or_prepare_model_input(
     )
     training_panel = panel.loc[pd.to_datetime(panel["datetime"]) <= feature_date].copy()
     label_ready_dates = sorted(pd.to_datetime(training_panel.loc[training_panel[LABEL_COLUMN].notna(), "datetime"]).dropna().unique())
-    qlib_frame, used_features = build_training_frame(
-        training_panel,
-        feature_columns=feature_columns,
-        label_column=LABEL_COLUMN,
-    )
     segments = build_rolling_segments(
         training_panel,
         feature_date,
         train_weeks=train_weeks,
         valid_weeks=valid_weeks,
         label_ready_dates=label_ready_dates,
+    )
+    train_start, train_end = segments["train"]
+    train_panel = training_panel.loc[
+        pd.to_datetime(training_panel["datetime"]).between(pd.Timestamp(train_start), pd.Timestamp(train_end))
+    ].copy()
+    fill_values = compute_feature_fill_values(train_panel, feature_columns=feature_columns)
+    qlib_frame, used_features = build_training_frame(
+        training_panel,
+        feature_columns=feature_columns,
+        label_column=LABEL_COLUMN,
+        fill_values=fill_values,
     )
     prepared_input = PreparedModelInput(
         qlib_frame=qlib_frame,
@@ -361,16 +369,22 @@ def fit_predict_one_date(
 
     if prepared_input is None:
         training_panel = panel.loc[pd.to_datetime(panel["datetime"]) <= feature_date].copy()
-        qlib_frame, used_features = build_training_frame(
-            training_panel,
-            feature_columns=feature_columns,
-            label_column=LABEL_COLUMN,
-        )
         segments = build_rolling_segments(
             training_panel,
             feature_date,
             train_weeks=train_weeks,
             valid_weeks=valid_weeks,
+        )
+        train_start, train_end = segments["train"]
+        train_panel = training_panel.loc[
+            pd.to_datetime(training_panel["datetime"]).between(pd.Timestamp(train_start), pd.Timestamp(train_end))
+        ].copy()
+        fill_values = compute_feature_fill_values(train_panel, feature_columns=feature_columns)
+        qlib_frame, used_features = build_training_frame(
+            training_panel,
+            feature_columns=feature_columns,
+            label_column=LABEL_COLUMN,
+            fill_values=fill_values,
         )
     else:
         qlib_frame = prepared_input.qlib_frame
@@ -832,6 +846,131 @@ def prefilter_feature_columns(
                 )
     corr_marks = pd.DataFrame(corr_rows).sort_values(["abs_corr", "left_feature", "right_feature"], ascending=[False, True, True]).reset_index(drop=True) if corr_rows else pd.DataFrame(columns=["left_feature", "right_feature", "abs_corr"])
     return kept_features, stats, corr_marks
+
+
+def build_feature_redundancy_report(
+    panel: pd.DataFrame,
+    feature_columns: Sequence[str],
+    *,
+    start_date: str | pd.Timestamp | None = None,
+    end_date: str | pd.Timestamp | None = None,
+    corr_threshold: float = 0.9,
+) -> pd.DataFrame:
+    window = panel.copy()
+    window["datetime"] = pd.to_datetime(window["datetime"])
+    if start_date is not None:
+        window = window.loc[window["datetime"] >= pd.Timestamp(start_date)]
+    if end_date is not None:
+        window = window.loc[window["datetime"] <= pd.Timestamp(end_date)]
+
+    available = [column for column in feature_columns if column in window.columns]
+    if len(available) < 2 or window.empty:
+        return pd.DataFrame(columns=["left_feature", "right_feature", "abs_corr", "cluster_id", "window_start", "window_end"])
+
+    corr_frame = window[available].apply(pd.to_numeric, errors="coerce")
+    corr_frame = corr_frame.fillna(corr_frame.median(numeric_only=True))
+    corr_matrix = corr_frame.corr().abs()
+
+    parent = {column: column for column in available}
+
+    def _find(node: str) -> str:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    def _union(left: str, right: str) -> None:
+        left_root = _find(left)
+        right_root = _find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    pair_rows: list[dict[str, Any]] = []
+    for left, right in itertools.combinations(available, 2):
+        corr_value = float(corr_matrix.loc[left, right])
+        if corr_value <= corr_threshold:
+            continue
+        _union(left, right)
+        pair_rows.append(
+            {
+                "left_feature": left,
+                "right_feature": right,
+                "abs_corr": corr_value,
+            }
+        )
+
+    if not pair_rows:
+        return pd.DataFrame(columns=["left_feature", "right_feature", "abs_corr", "cluster_id", "window_start", "window_end"])
+
+    cluster_ids: dict[str, str] = {}
+    cluster_index = 1
+    for column in available:
+        root = _find(column)
+        if root not in cluster_ids:
+            cluster_ids[root] = f"cluster_{cluster_index:02d}"
+            cluster_index += 1
+
+    window_start = str(window["datetime"].min().date()) if not window.empty else None
+    window_end = str(window["datetime"].max().date()) if not window.empty else None
+    for row in pair_rows:
+        row["cluster_id"] = cluster_ids[_find(row["left_feature"])]
+        row["window_start"] = window_start
+        row["window_end"] = window_end
+    return pd.DataFrame(pair_rows).sort_values(
+        ["cluster_id", "abs_corr", "left_feature", "right_feature"],
+        ascending=[True, False, True, True],
+    ).reset_index(drop=True)
+
+
+def build_feature_outlier_audit(
+    panel: pd.DataFrame,
+    feature_columns: Sequence[str],
+    *,
+    start_date: str | pd.Timestamp | None = None,
+    end_date: str | pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    window = panel.copy()
+    window["datetime"] = pd.to_datetime(window["datetime"])
+    if start_date is not None:
+        window = window.loc[window["datetime"] >= pd.Timestamp(start_date)]
+    if end_date is not None:
+        window = window.loc[window["datetime"] <= pd.Timestamp(end_date)]
+
+    audit_columns = get_outlier_audit_candidates(feature_columns)
+    rows: list[dict[str, Any]] = []
+    for column in audit_columns:
+        if column not in window.columns:
+            continue
+        series = pd.to_numeric(window[column], errors="coerce").dropna()
+        if series.empty:
+            continue
+        q1 = float(series.quantile(0.25))
+        q50 = float(series.quantile(0.50))
+        q99 = float(series.quantile(0.99))
+        q01 = float(series.quantile(0.01))
+        iqr = float(series.quantile(0.75) - series.quantile(0.25))
+        if iqr > 0:
+            lower = q1 - 1.5 * iqr
+            upper = float(series.quantile(0.75)) + 1.5 * iqr
+            extreme_ratio = float(((series < lower) | (series > upper)).mean())
+        else:
+            extreme_ratio = 0.0
+        rows.append(
+            {
+                "feature": column,
+                "non_null_count": int(series.shape[0]),
+                "p01": q01,
+                "p50": q50,
+                "p99": q99,
+                "iqr": iqr,
+                "extreme_ratio": extreme_ratio,
+                "window_start": str(window["datetime"].min().date()) if not window.empty else None,
+                "window_end": str(window["datetime"].max().date()) if not window.empty else None,
+            }
+        )
+    return pd.DataFrame(rows).sort_values(["extreme_ratio", "feature"], ascending=[False, True]).reset_index(drop=True) if rows else pd.DataFrame(
+        columns=["feature", "non_null_count", "p01", "p50", "p99", "iqr", "extreme_ratio", "window_start", "window_end"]
+    )
 
 
 def build_model_params(

@@ -7,9 +7,10 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 from decimal import Decimal
+import json
 from pathlib import Path
 import threading
-from typing import Iterable, List, Optional, Sequence
+from typing import Iterable, List, Literal, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -64,6 +65,42 @@ MACRO_PHASE_Y_MAP = {
     "RECOVERY": 1,
     "OVERHEAT": 2,
     "STAGFLATION": 3,
+}
+
+PanelEnrichmentScope = Literal["none", "symbol_local", "research_full"]
+
+SYMBOL_LOCAL_DERIVED_COLUMNS = {
+    "mom_4w",
+    "rev_4w",
+    "volatility_8w",
+    "downside_volatility_8w",
+    "amount_change_4w",
+    "volume_change_4w",
+    "amount_zscore_4w",
+    "pe_ttm_delta_4w",
+    "f_score_delta_8w",
+}
+
+RESEARCH_CROSS_SECTIONAL_DERIVED_COLUMNS = {
+    "industry_mom_4w_rank_pct",
+    "industry_pe_ttm_pct_rank_pct",
+    "industry_f_score_rank_pct",
+    "industry_npm_ttm_rank_pct",
+    "buffett_npm_flag",
+    "buffett_moat_coverage",
+    "buffett_moat_score",
+    "buffett_moat_pass",
+    "macro_reflation_x_mom_4w",
+    "macro_recovery_x_mom_8w",
+    "macro_overheat_x_volatility_8w",
+    "macro_stagflation_x_f_score",
+    "macro_industry_match_x_mom_4w",
+}
+
+_ENRICHMENT_SCOPE_ORDER: dict[PanelEnrichmentScope, int] = {
+    "none": 0,
+    "symbol_local": 1,
+    "research_full": 2,
 }
 
 
@@ -345,13 +382,44 @@ def _attach_future_labels(panel: pd.DataFrame, horizons: Sequence[int]) -> pd.Da
     return result
 
 
-def engineer_research_features(panel: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add research-oriented derived features on top of the weekly raw panel.
+def _replace_numeric_infinities(panel: pd.DataFrame) -> pd.DataFrame:
+    if panel.empty:
+        return panel.copy()
+    result = panel.copy()
+    numeric_columns = result.select_dtypes(include=[np.number]).columns
+    if len(numeric_columns) > 0:
+        result.loc[:, numeric_columns] = result.loc[:, numeric_columns].replace([np.inf, -np.inf], np.nan)
+    return result
 
-    The added features focus on cross-sectional signal quality and are kept
-    separate from the raw export path so notebooks and scripted workflows can
-    opt in without mutating the source panel contract.
+
+def resolve_panel_enrichment_scope(
+    include_derived_features: bool | None = True,
+    enrichment_scope: PanelEnrichmentScope | str | None = None,
+) -> PanelEnrichmentScope:
+    if enrichment_scope is None:
+        return "research_full" if include_derived_features else "none"
+
+    resolved = str(enrichment_scope).strip().lower()
+    if resolved not in _ENRICHMENT_SCOPE_ORDER:
+        raise ValueError(f"Unsupported panel enrichment scope: {enrichment_scope}")
+    return resolved  # type: ignore[return-value]
+
+
+def detect_panel_enrichment_scope(panel: pd.DataFrame) -> PanelEnrichmentScope:
+    if panel.empty:
+        return "none"
+
+    columns = set(panel.columns)
+    if columns.intersection(RESEARCH_CROSS_SECTIONAL_DERIVED_COLUMNS):
+        return "research_full"
+    if columns.intersection(SYMBOL_LOCAL_DERIVED_COLUMNS):
+        return "symbol_local"
+    return "none"
+
+
+def engineer_symbol_local_features(panel: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add deterministic per-symbol derived features on top of the weekly raw panel.
     """
     if panel.empty:
         return panel.copy()
@@ -418,6 +486,20 @@ def engineer_research_features(panel: pd.DataFrame) -> pd.DataFrame:
         result[f"{column}_delta_8w"] = pd.to_numeric(result[column], errors="coerce").groupby(result["symbol"]).transform(
             lambda values: values.diff(8)
         )
+
+    return _replace_numeric_infinities(result)
+
+
+def engineer_cross_sectional_research_features(panel: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add universe-scoped research features on top of a symbol-local enriched panel.
+    """
+    if panel.empty:
+        return panel.copy()
+
+    result = panel.copy()
+    if detect_panel_enrichment_scope(result) == "none":
+        result = engineer_symbol_local_features(result)
 
     def _cross_rank(values: pd.Series) -> pd.Series:
         numeric = pd.to_numeric(values, errors="coerce")
@@ -501,10 +583,35 @@ def engineer_research_features(panel: pd.DataFrame) -> pd.DataFrame:
         factor_values = pd.to_numeric(result[factor_column], errors="coerce")
         result[output_column] = phase_values * factor_values
 
-    numeric_columns = result.select_dtypes(include=[np.number]).columns
-    if len(numeric_columns) > 0:
-        result.loc[:, numeric_columns] = result.loc[:, numeric_columns].replace([np.inf, -np.inf], np.nan)
+    return _replace_numeric_infinities(result)
+
+
+def ensure_panel_enrichment(
+    panel: pd.DataFrame,
+    target_scope: PanelEnrichmentScope | str,
+) -> pd.DataFrame:
+    resolved_scope = resolve_panel_enrichment_scope(enrichment_scope=target_scope)
+    if resolved_scope == "none" or panel.empty:
+        result = panel.copy()
+        result.attrs["enrichment_scope"] = detect_panel_enrichment_scope(result)
+        return result
+
+    current_scope = detect_panel_enrichment_scope(panel)
+    result = panel.copy()
+    if _ENRICHMENT_SCOPE_ORDER[current_scope] < _ENRICHMENT_SCOPE_ORDER["symbol_local"]:
+        result = engineer_symbol_local_features(result)
+        current_scope = "symbol_local"
+    if _ENRICHMENT_SCOPE_ORDER[current_scope] < _ENRICHMENT_SCOPE_ORDER[resolved_scope]:
+        result = engineer_cross_sectional_research_features(result)
+    result.attrs["enrichment_scope"] = detect_panel_enrichment_scope(result)
     return result
+
+
+def engineer_research_features(panel: pd.DataFrame) -> pd.DataFrame:
+    """
+    Backward-compatible wrapper that materializes the full research feature layer.
+    """
+    return ensure_panel_enrichment(panel, "research_full")
 
 
 def _filter_panel_by_universe_profile(
@@ -531,6 +638,7 @@ async def build_weekly_feature_panel(
     universe_profile: str | None = None,
     filter_to_universe_membership: bool = True,
     include_derived_features: bool = True,
+    enrichment_scope: PanelEnrichmentScope | str | None = None,
 ) -> pd.DataFrame:
     """
     Build a weekly feature panel aligned to weekly processed prices.
@@ -538,6 +646,11 @@ async def build_weekly_feature_panel(
     Daily valuation and quarterly quality data are merged backward by symbol/time
     so each weekly row only sees information available by that feature date.
     """
+    resolved_scope = resolve_panel_enrichment_scope(
+        include_derived_features=include_derived_features,
+        enrichment_scope=enrichment_scope,
+    )
+
     resolved_symbols, history_frames = await resolve_universe_symbols(
         universe_profile=universe_profile,
         symbols=symbols,
@@ -641,16 +754,63 @@ async def build_weekly_feature_panel(
     if history_frames:
         feature_panel = attach_universe_flags(feature_panel, history_frames)
     feature_panel = _attach_future_labels(feature_panel, horizons=horizons)
-    if include_derived_features:
-        feature_panel = engineer_research_features(feature_panel)
+    feature_panel = ensure_panel_enrichment(feature_panel, resolved_scope)
     if history_frames and filter_to_universe_membership:
         feature_panel = _filter_panel_by_universe_profile(feature_panel, universe_profile)
     feature_panel["instrument"] = feature_panel["symbol"]
     feature_panel["datetime"] = feature_panel["time"]
-    return feature_panel.sort_values(["instrument", "datetime"]).reset_index(drop=True)
+    feature_panel = feature_panel.sort_values(["instrument", "datetime"]).reset_index(drop=True)
+    feature_panel.attrs["enrichment_scope"] = resolved_scope
+    return feature_panel
 
 
-def write_feature_panel(frame: pd.DataFrame, output_path: str | Path) -> Path:
+def feature_panel_metadata_path(output_path: str | Path) -> Path:
+    path = Path(output_path).expanduser().resolve()
+    return path.with_name(f"{path.name}.metadata.json")
+
+
+def write_feature_panel_metadata(
+    output_path: str | Path,
+    *,
+    enrichment_scope: PanelEnrichmentScope,
+) -> Path:
+    metadata_path = feature_panel_metadata_path(output_path)
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "panel_enrichment_scope": enrichment_scope,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return metadata_path
+
+
+def load_feature_panel_enrichment_scope(
+    output_path: str | Path,
+    panel: pd.DataFrame | None = None,
+) -> PanelEnrichmentScope:
+    metadata_path = feature_panel_metadata_path(output_path)
+    if metadata_path.exists():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if metadata.get("panel_enrichment_scope") is not None:
+                return resolve_panel_enrichment_scope(enrichment_scope=metadata.get("panel_enrichment_scope"))
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+    if panel is not None:
+        return detect_panel_enrichment_scope(panel)
+    return "none"
+
+
+def write_feature_panel(
+    frame: pd.DataFrame,
+    output_path: str | Path,
+    *,
+    enrichment_scope: PanelEnrichmentScope | str | None = None,
+) -> Path:
     """Persist a feature panel to csv or parquet based on output suffix."""
     path = Path(output_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -662,6 +822,10 @@ def write_feature_panel(frame: pd.DataFrame, output_path: str | Path) -> Path:
         frame.to_parquet(path, index=False)
     else:
         raise ValueError(f"Unsupported panel output format: {path.suffix}")
+    resolved_scope = resolve_panel_enrichment_scope(
+        enrichment_scope=enrichment_scope or frame.attrs.get("enrichment_scope", detect_panel_enrichment_scope(frame))
+    )
+    write_feature_panel_metadata(path, enrichment_scope=resolved_scope)
     return path
 
 
@@ -698,8 +862,14 @@ def export_weekly_feature_panel(
     universe_profile: str | None = None,
     filter_to_universe_membership: bool = True,
     include_derived_features: bool = True,
+    enrichment_scope: PanelEnrichmentScope | str | None = None,
 ) -> Path:
     """Synchronous wrapper for CLI usage."""
+    resolved_scope = resolve_panel_enrichment_scope(
+        include_derived_features=include_derived_features,
+        enrichment_scope=enrichment_scope,
+    )
+
     async def _build_and_close() -> pd.DataFrame:
         try:
             return await build_weekly_feature_panel(
@@ -710,9 +880,10 @@ def export_weekly_feature_panel(
                 universe_profile=universe_profile,
                 filter_to_universe_membership=filter_to_universe_membership,
                 include_derived_features=include_derived_features,
+                enrichment_scope=resolved_scope,
             )
         finally:
             await close_fdh()
 
     panel = _run_coroutine_sync(_build_and_close())
-    return write_feature_panel(panel, output_path)
+    return write_feature_panel(panel, output_path, enrichment_scope=resolved_scope)

@@ -29,7 +29,11 @@ from qlib_research.core.index_benchmark import (
     build_universe_benchmark_series,
     resolve_benchmark_components,
 )
-from qlib_research.core.notebook_workflow import filter_panel_by_universe_profile
+from qlib_research.core.notebook_workflow import (
+    filter_panel_by_universe_profile,
+    groups_for_features,
+    load_feature_config,
+)
 from qlib_research.core.qlib_native_backtest import (
     build_native_portfolio_diagnostics,
     build_native_quote_frame,
@@ -46,13 +50,20 @@ from qlib_research.core.qlib_pipeline import (
     init_qlib_runtime,
     load_panel_dataframe,
     normalize_feature_name_list,
-        resolve_feature_columns,
+    resolve_feature_columns,
 )
-from qlib_research.core.weekly_feature_panel import engineer_research_features, export_weekly_feature_panel
+from qlib_research.core.weekly_feature_panel import (
+    PanelEnrichmentScope,
+    ensure_panel_enrichment,
+    export_weekly_feature_panel,
+    load_feature_panel_enrichment_scope,
+)
 from qlib_research.io.artifacts import build_portfolio_targets, publish_portfolio_targets, publish_score_snapshot
 
 from qlib_research.core.weekly_model_eval import (
     build_backtest_price_frames,
+    build_feature_outlier_audit,
+    build_feature_redundancy_report,
     default_weekly_net_backtest_config,
     prefilter_feature_columns,
     run_strategy_backtest,
@@ -161,6 +172,7 @@ class NativeWorkflowConfig:
     recipe_parallel_workers: int = 1
     model_num_threads: int | None = None
     publish_model: bool = False
+    feature_spec_path: str | Path | None = None
     feature_groups: tuple[str, ...] = field(default_factory=lambda: RESEARCH_DEFAULT_FEATURE_GROUPS)
     included_features: tuple[str, ...] = field(default_factory=tuple)
     excluded_features: tuple[str, ...] = field(default_factory=tuple)
@@ -179,6 +191,8 @@ class NativeRecipeArtifacts:
     slice_regime_summary: pd.DataFrame
     feature_prefilter_stats: pd.DataFrame
     feature_corr_candidates: pd.DataFrame
+    feature_redundancy: pd.DataFrame
+    feature_outlier_audit: pd.DataFrame
     used_feature_columns: list[str]
     native_provider_dir: Path
     benchmark_frames: dict[str, pd.DataFrame]
@@ -317,6 +331,8 @@ def _compact_native_recipe_artifacts(artifacts: NativeRecipeArtifacts) -> Native
         slice_regime_summary=artifacts.slice_regime_summary,
         feature_prefilter_stats=artifacts.feature_prefilter_stats,
         feature_corr_candidates=artifacts.feature_corr_candidates,
+        feature_redundancy=artifacts.feature_redundancy,
+        feature_outlier_audit=artifacts.feature_outlier_audit,
         used_feature_columns=artifacts.used_feature_columns,
         native_provider_dir=artifacts.native_provider_dir,
         benchmark_frames={},
@@ -332,14 +348,35 @@ def _run_native_recipe_job(
 
 
 def build_native_recipe_registry(config: NativeWorkflowConfig) -> dict[str, NativeResearchRecipe]:
+    feature_spec = load_feature_config(config.feature_spec_path)
+    spec_feature_groups = normalize_feature_name_list(feature_spec.get("selected_feature_groups"))
+    spec_selected_features = normalize_feature_name_list(feature_spec.get("selected_features"))
+    baseline_feature_groups = tuple(spec_feature_groups or groups_for_features(spec_selected_features) or config.feature_groups)
+    baseline_included_features = tuple(spec_selected_features or normalize_feature_name_list(config.included_features))
+    baseline_excluded_features = tuple(
+        normalize_feature_name_list(
+            (
+                *normalize_feature_name_list(feature_spec.get("excluded_features")),
+                *normalize_feature_name_list(config.excluded_features),
+            )
+        )
+    )
+    baseline_industry_normalization = str(
+        feature_spec.get("industry_normalization")
+        or feature_spec.get("normalization_policy", {}).get("default")
+        or "l1_weekly_robust"
+    )
+    baseline_model_params = dict(feature_spec.get("tuned_params") or {})
+
     baseline = NativeResearchRecipe(
         name="baseline",
         signal_objective=config.signal_objective,
         label_recipe=config.label_recipe,
-        feature_groups=tuple(config.feature_groups),
-        included_features=tuple(normalize_feature_name_list(config.included_features)),
-        excluded_features=tuple(normalize_feature_name_list(config.excluded_features)),
-        model_params={},
+        feature_groups=baseline_feature_groups,
+        included_features=baseline_included_features,
+        excluded_features=baseline_excluded_features,
+        industry_normalization=baseline_industry_normalization,
+        model_params=baseline_model_params,
     )
     registry = {
         baseline.name: baseline,
@@ -350,6 +387,8 @@ def build_native_recipe_registry(config: NativeWorkflowConfig) -> dict[str, Nati
             feature_groups=baseline.feature_groups,
             included_features=baseline.included_features,
             excluded_features=baseline.excluded_features,
+            industry_normalization=baseline.industry_normalization,
+            model_params=baseline.model_params,
         ),
         "binary_4w": NativeResearchRecipe(
             name="binary_4w",
@@ -358,6 +397,8 @@ def build_native_recipe_registry(config: NativeWorkflowConfig) -> dict[str, Nati
             feature_groups=baseline.feature_groups,
             included_features=baseline.included_features,
             excluded_features=baseline.excluded_features,
+            industry_normalization=baseline.industry_normalization,
+            model_params=baseline.model_params,
         ),
         "rank_blended": NativeResearchRecipe(
             name="rank_blended",
@@ -366,6 +407,8 @@ def build_native_recipe_registry(config: NativeWorkflowConfig) -> dict[str, Nati
             feature_groups=baseline.feature_groups,
             included_features=baseline.included_features,
             excluded_features=baseline.excluded_features,
+            industry_normalization=baseline.industry_normalization,
+            model_params=baseline.model_params,
         ),
         "huber_8w": NativeResearchRecipe(
             name="huber_8w",
@@ -374,6 +417,8 @@ def build_native_recipe_registry(config: NativeWorkflowConfig) -> dict[str, Nati
             feature_groups=baseline.feature_groups,
             included_features=baseline.included_features,
             excluded_features=baseline.excluded_features,
+            industry_normalization=baseline.industry_normalization,
+            model_params=baseline.model_params,
         ),
     }
     return registry
@@ -397,6 +442,7 @@ def _ensure_panel(
     batch_size: int,
     run_export: RunExportMode,
     filter_to_universe_membership: bool,
+    enrichment_scope: PanelEnrichmentScope,
 ) -> pd.DataFrame:
     if run_export == "always" or (run_export == "auto_if_missing" and not path.exists()):
         export_weekly_feature_panel(
@@ -406,11 +452,12 @@ def _ensure_panel(
             end_date=end_date,
             batch_size=batch_size,
             filter_to_universe_membership=filter_to_universe_membership,
-            include_derived_features=True,
+            enrichment_scope=enrichment_scope,
         )
     if not path.exists():
         raise FileNotFoundError(f"Feature panel not found: {path}")
     panel = load_panel_dataframe(path)
+    panel.attrs["enrichment_scope"] = load_feature_panel_enrichment_scope(path, panel=panel)
     return panel
 
 
@@ -423,6 +470,7 @@ def _materialize_panel_artifact(
     batch_size: int,
     run_export: RunExportMode,
     filter_to_universe_membership: bool,
+    enrichment_scope: PanelEnrichmentScope,
 ) -> Path:
     if run_export == "always" or (run_export == "auto_if_missing" and not path.exists()):
         export_weekly_feature_panel(
@@ -432,7 +480,7 @@ def _materialize_panel_artifact(
             end_date=end_date,
             batch_size=batch_size,
             filter_to_universe_membership=filter_to_universe_membership,
-            include_derived_features=True,
+            enrichment_scope=enrichment_scope,
         )
     if not path.exists():
         raise FileNotFoundError(f"Feature panel not found: {path}")
@@ -452,6 +500,7 @@ def _prepare_execution_panel(config: NativeWorkflowConfig, execution_path: Path 
         batch_size=config.batch_size,
         run_export=config.run_export,
         filter_to_universe_membership=False,
+        enrichment_scope="none",
     )
     return execution_panel, execution_path
 
@@ -473,6 +522,7 @@ def _prime_parallel_workflow_inputs(config: NativeWorkflowConfig) -> NativeWorkf
         batch_size=config.batch_size,
         run_export=config.run_export,
         filter_to_universe_membership=True,
+        enrichment_scope="research_full",
     )
     if config.universe_exit_policy == "retain_quotes_for_existing_positions":
         if execution_path is None:
@@ -485,6 +535,7 @@ def _prime_parallel_workflow_inputs(config: NativeWorkflowConfig) -> NativeWorkf
             batch_size=config.batch_size,
             run_export=config.run_export,
             filter_to_universe_membership=False,
+            enrichment_scope="none",
         )
     return replace(
         config,
@@ -516,7 +567,7 @@ def prepare_modeling_panel(
     label_recipe: LabelRecipe,
     signal_objective: SignalObjective,
 ) -> pd.DataFrame:
-    result = engineer_research_features(panel)
+    result = ensure_panel_enrichment(panel, "research_full")
     result["datetime"] = pd.to_datetime(result["datetime"])
     if label_recipe == "blended_excess_4w_8w":
         result["model_label_raw"] = (
@@ -1058,7 +1109,12 @@ def _prefer_non_empty_frame(primary: pd.DataFrame | None, fallback: pd.DataFrame
     return fallback.copy()
 
 
-def _prefilter_and_normalize_features(panel: pd.DataFrame, recipe: NativeResearchRecipe) -> tuple[pd.DataFrame, list[str], pd.DataFrame, pd.DataFrame]:
+def _prefilter_and_normalize_features(
+    panel: pd.DataFrame,
+    recipe: NativeResearchRecipe,
+    *,
+    calibration_end_date: pd.Timestamp | None = None,
+) -> tuple[pd.DataFrame, list[str], pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     requested = compose_feature_columns(recipe.feature_groups)
     selected = resolve_feature_columns(
         requested,
@@ -1066,13 +1122,28 @@ def _prefilter_and_normalize_features(panel: pd.DataFrame, recipe: NativeResearc
         excluded_features=recipe.excluded_features,
         default_features=requested,
     )
-    kept, feature_stats, corr_candidates = prefilter_feature_columns(panel, selected)
+    reference_panel = panel.copy()
+    if calibration_end_date is not None:
+        reference_panel = reference_panel.loc[
+            pd.to_datetime(reference_panel["datetime"]) <= pd.Timestamp(calibration_end_date)
+        ].copy()
+    kept, feature_stats, corr_candidates = prefilter_feature_columns(reference_panel, selected)
+    feature_redundancy = build_feature_redundancy_report(
+        reference_panel,
+        kept,
+        end_date=calibration_end_date,
+    )
+    feature_outlier_audit = build_feature_outlier_audit(
+        reference_panel,
+        kept,
+        end_date=calibration_end_date,
+    )
     normalized_panel = apply_industry_normalization(
         panel,
         feature_columns=get_normalized_feature_candidates(kept),
         method=recipe.industry_normalization,
     )
-    return normalized_panel, kept, feature_stats, corr_candidates
+    return normalized_panel, kept, feature_stats, corr_candidates, feature_redundancy, feature_outlier_audit
 
 
 def _native_run_summary_row(
@@ -1111,16 +1182,49 @@ def run_native_recipe(
         batch_size=config.batch_size,
         run_export=config.run_export,
         filter_to_universe_membership=True,
+        enrichment_scope="research_full",
     )
     research_panel = filter_panel_by_universe_profile(research_panel, config.universe_profile)
     modeling_panel = prepare_modeling_panel(research_panel, label_recipe=recipe.label_recipe, signal_objective=recipe.signal_objective)
-    normalized_panel, feature_columns, feature_prefilter_stats, corr_candidates = _prefilter_and_normalize_features(modeling_panel, recipe)
+    rolling_dates = select_evaluation_dates_for_label(
+        modeling_panel,
+        label_column="model_label_raw",
+        train_weeks=config.train_weeks,
+        valid_weeks=config.valid_weeks,
+        eval_count=config.eval_count,
+        recent_weeks=config.rolling_recent_weeks,
+        step_weeks=config.step_weeks,
+    )
+    walk_forward_dates: list[pd.Timestamp] = []
+    if config.walk_forward_enabled:
+        walk_forward_dates = select_evaluation_dates_for_label(
+            modeling_panel,
+            label_column="model_label_raw",
+            train_weeks=config.walk_forward_train_weeks,
+            valid_weeks=config.walk_forward_valid_weeks,
+            eval_count=config.walk_forward_eval_count,
+            step_weeks=config.walk_forward_step_weeks,
+            start_date=config.walk_forward_start_date,
+            end_date=config.walk_forward_end_date,
+        )
+    calibration_dates = [date for date in [*rolling_dates[:1], *walk_forward_dates[:1]] if pd.notna(date)]
+    calibration_end_date = min(calibration_dates) if calibration_dates else pd.to_datetime(modeling_panel["datetime"]).max()
+    (
+        normalized_panel,
+        feature_columns,
+        feature_prefilter_stats,
+        corr_candidates,
+        feature_redundancy,
+        feature_outlier_audit,
+    ) = _prefilter_and_normalize_features(
+        modeling_panel,
+        recipe,
+        calibration_end_date=calibration_end_date,
+    )
 
     execution_panel, execution_path = _prepare_execution_panel(config, execution_path)
     if execution_panel.empty:
         execution_panel = normalized_panel
-    if config.universe_profile in {"csi300", "csi500", "merged_csi300_500"} and "in_csi300" in execution_panel.columns:
-        execution_panel = engineer_research_features(execution_panel)
     execution_panel["datetime"] = pd.to_datetime(execution_panel["datetime"])
     execution_panel["instrument"] = execution_panel["instrument"].astype(str)
 
@@ -1143,15 +1247,6 @@ def run_native_recipe(
     )
     latest_score_frame = attach_prediction_metadata(latest_score_frame, normalized_panel, latest_feature_date).sort_values("score", ascending=False).reset_index(drop=True)
 
-    rolling_dates = select_evaluation_dates_for_label(
-        normalized_panel,
-        label_column="model_label_raw",
-        train_weeks=config.train_weeks,
-        valid_weeks=config.valid_weeks,
-        eval_count=config.eval_count,
-        recent_weeks=config.rolling_recent_weeks,
-        step_weeks=config.step_weeks,
-    )
     rolling_bundle = collect_prediction_bundle(
         "rolling",
         normalized_panel,
@@ -1169,16 +1264,6 @@ def run_native_recipe(
         "feature_importance": pd.DataFrame(),
     }
     if config.walk_forward_enabled:
-        walk_forward_dates = select_evaluation_dates_for_label(
-            normalized_panel,
-            label_column="model_label_raw",
-            train_weeks=config.walk_forward_train_weeks,
-            valid_weeks=config.walk_forward_valid_weeks,
-            eval_count=config.walk_forward_eval_count,
-            step_weeks=config.walk_forward_step_weeks,
-            start_date=config.walk_forward_start_date,
-            end_date=config.walk_forward_end_date,
-        )
         walk_forward_bundle = collect_prediction_bundle(
             "walk_forward",
             normalized_panel,
@@ -1314,6 +1399,8 @@ def run_native_recipe(
     portfolio_targets.to_csv(recipe_dir / "portfolio_targets.csv", index=False)
     feature_prefilter_stats.to_csv(recipe_dir / "feature_prefilter.csv", index=False)
     corr_candidates.to_csv(recipe_dir / "feature_corr_candidates.csv", index=False)
+    feature_redundancy.to_csv(recipe_dir / "feature_redundancy.csv", index=False)
+    feature_outlier_audit.to_csv(recipe_dir / "feature_outlier_audit.csv", index=False)
     signal_diagnostics.to_csv(recipe_dir / "signal_diagnostics.csv", index=False)
     portfolio_diagnostics.to_csv(recipe_dir / "portfolio_diagnostics.csv", index=False)
     slice_regime_summary.to_csv(recipe_dir / "slice_regime_summary.csv", index=False)
@@ -1365,6 +1452,8 @@ def run_native_recipe(
         slice_regime_summary=slice_regime_summary,
         feature_prefilter_stats=feature_prefilter_stats,
         feature_corr_candidates=corr_candidates,
+        feature_redundancy=feature_redundancy,
+        feature_outlier_audit=feature_outlier_audit,
         used_feature_columns=feature_columns,
         native_provider_dir=native_provider_dir,
         benchmark_frames=benchmark_frames,
