@@ -103,6 +103,11 @@ class RunDetail(BaseModel):
     artifact_inventory: list[ArtifactRef] = Field(default_factory=list)
 
 
+class ArtifactInventoryResponse(BaseModel):
+    owner_id: str
+    artifact_inventory: list[ArtifactRef] = Field(default_factory=list)
+
+
 class RecipeDetail(BaseModel):
     run_id: str
     recipe_name: str
@@ -112,6 +117,12 @@ class RecipeDetail(BaseModel):
     nodes: list[DiagnosticNode] = Field(default_factory=list)
     tables: dict[str, DataTablePayload] = Field(default_factory=dict)
     artifact_inventory: list[ArtifactRef] = Field(default_factory=list)
+
+
+class RecipeTablesResponse(BaseModel):
+    run_id: str
+    recipe_name: str
+    tables: dict[str, DataTablePayload] = Field(default_factory=dict)
 
 
 class PanelSummary(BaseModel):
@@ -152,6 +163,14 @@ class CompareResponse(BaseModel):
     slice_stability: DataTablePayload = Field(default_factory=DataTablePayload)
     feature_importance: dict[str, DataTablePayload] = Field(default_factory=dict)
     latest_signal_snapshot: dict[str, DataTablePayload] = Field(default_factory=dict)
+
+
+class OverviewResponse(BaseModel):
+    total_runs: int = 0
+    ready_runs: int = 0
+    total_panels: int = 0
+    total_tasks: int = 0
+    recent_runs: list[RunListItem] = Field(default_factory=list)
 
 
 class ResearchTaskRequest(BaseModel):
@@ -202,4 +221,3 @@ class TaskLogResponse(BaseModel):
     task_id: str
     stdout: str = ""
     stderr: str = ""
-

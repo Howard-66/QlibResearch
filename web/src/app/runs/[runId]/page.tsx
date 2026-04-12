@@ -3,6 +3,7 @@ import Link from "next/link";
 import { PageHeader } from "@/components/common/page-header";
 import { DataTable } from "@/components/data/data-table";
 import { NodeCard } from "@/components/diagnostics/node-card";
+import { RunArtifactInventory } from "@/components/runs/run-artifact-inventory";
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -58,30 +59,6 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
 
       <Card className="glass-card">
         <CardHeader>
-          <CardTitle className="text-base">Config Summary</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <DataTable
-            table={{
-              columns: ["key", "value"],
-              rows: Object.entries(detail.config).map(([key, value]) => ({
-                key,
-                value: Array.isArray(value) ? value.join(", ") : typeof value === "object" && value !== null ? JSON.stringify(value) : value,
-              })),
-            }}
-            maxRows={24}
-          />
-        </CardContent>
-      </Card>
-
-      <div className="grid gap-4 xl:grid-cols-2">
-        {detail.nodes.map((node) => (
-          <NodeCard key={node.key} node={node} />
-        ))}
-      </div>
-
-      <Card className="glass-card">
-        <CardHeader>
           <CardTitle className="text-base">Recipe Overview</CardTitle>
         </CardHeader>
         <CardContent>
@@ -105,6 +82,41 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
 
       <Card className="glass-card">
         <CardHeader>
+          <CardTitle className="text-base">Config Summary</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <details className="group rounded-xl border border-border/60 bg-surface-2/40">
+            <summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium text-foreground marker:hidden">
+              <div className="flex items-center justify-between gap-4">
+                <span>展开查看全部 {Object.keys(detail.config).length} 项参数</span>
+                <span className="text-xs text-muted-foreground group-open:hidden">默认折叠</span>
+                <span className="hidden text-xs text-muted-foreground group-open:inline">点击收起</span>
+              </div>
+            </summary>
+            <div className="border-t border-border/60 px-4 py-4">
+              <DataTable
+                table={{
+                  columns: ["key", "value"],
+                  rows: Object.entries(detail.config).map(([key, value]) => ({
+                    key,
+                    value: Array.isArray(value) ? value.join(", ") : typeof value === "object" && value !== null ? JSON.stringify(value) : value,
+                  })),
+                }}
+                maxRows={Math.max(Object.keys(detail.config).length, 1)}
+              />
+            </div>
+          </details>
+        </CardContent>
+      </Card>
+
+      <div className="grid gap-4 xl:grid-cols-2">
+        {detail.nodes.map((node) => (
+          <NodeCard key={node.key} node={node} />
+        ))}
+      </div>
+
+      <Card className="glass-card">
+        <CardHeader>
           <CardTitle className="text-base">Promotion Gate</CardTitle>
         </CardHeader>
         <CardContent>
@@ -123,18 +135,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
           <CardTitle className="text-base">Artifact Inventory</CardTitle>
         </CardHeader>
         <CardContent>
-          <DataTable
-            table={{
-              columns: ["name", "path", "exists", "updated_at"],
-              rows: detail.artifact_inventory.map((item) => ({
-                name: item.name,
-                path: item.path,
-                exists: item.exists,
-                updated_at: item.updated_at,
-              })),
-            }}
-            maxRows={40}
-          />
+          <RunArtifactInventory runId={detail.run_id} />
         </CardContent>
       </Card>
     </div>

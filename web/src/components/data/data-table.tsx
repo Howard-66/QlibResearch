@@ -1,10 +1,15 @@
+"use client";
+
+import * as React from "react";
+
 import { DataTablePayload } from "@/lib/types";
 
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Button } from "@/components/ui/button";
 
 export function DataTable({
   table,
-  maxRows = 20,
+  maxRows = 80,
 }: {
   table: DataTablePayload;
   maxRows?: number;
@@ -13,10 +18,20 @@ export function DataTable({
     return <div className="rounded-lg border border-dashed border-border/70 p-6 text-sm text-muted-foreground">当前没有可展示的数据。</div>;
   }
 
-  const rows = table.rows.slice(0, maxRows);
+  const pageSize = Math.max(maxRows, 1);
+  const [visibleRows, setVisibleRows] = React.useState(pageSize);
+
+  React.useEffect(() => {
+    setVisibleRows(pageSize);
+  }, [pageSize, table.rows.length]);
+
+  const rows = table.rows.slice(0, visibleRows);
+  const hasMore = table.rows.length > rows.length;
+
   return (
     <div className="space-y-2">
-      <Table>
+      <div className="max-h-[36rem] overflow-auto rounded-xl border border-border/60">
+        <Table>
         <TableHeader>
           <TableRow>
             {table.columns.map((column) => (
@@ -33,10 +48,16 @@ export function DataTable({
             </TableRow>
           ))}
         </TableBody>
-      </Table>
-      {table.rows.length > rows.length ? (
-        <p className="text-xs text-muted-foreground">已显示前 {rows.length} 行，共 {table.rows.length} 行。</p>
-      ) : null}
+        </Table>
+      </div>
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-xs text-muted-foreground">当前已加载 {rows.length} / {table.rows.length} 行。</p>
+        {hasMore ? (
+          <Button size="sm" variant="outline" onClick={() => setVisibleRows((current) => Math.min(current + pageSize, table.rows.length))}>
+            加载更多
+          </Button>
+        ) : null}
+      </div>
     </div>
   );
 }

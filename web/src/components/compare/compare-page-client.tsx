@@ -17,15 +17,16 @@ import { CompareItemRef, CompareResponse, RunListItem } from "@/lib/types";
 export function ComparePageClient({ runs }: { runs: RunListItem[] }) {
   const [mounted, setMounted] = React.useState(false);
   const [items, setItems] = React.useState<CompareItemRef[]>(() => buildDefaultSelections(runs));
+  const [submittedItems, setSubmittedItems] = React.useState<CompareItemRef[] | null>(null);
 
   React.useEffect(() => {
     setMounted(true);
   }, []);
 
   const compareQuery = useQuery<CompareResponse>({
-    queryKey: ["compare", items],
-    queryFn: () => getCompare(items),
-    enabled: mounted && items.length >= 2 && items.length <= 4,
+    queryKey: ["compare", submittedItems],
+    queryFn: () => getCompare(submittedItems ?? []),
+    enabled: mounted && !!submittedItems && submittedItems.length >= 2 && submittedItems.length <= 4,
   });
 
   if (!mounted) {
@@ -91,11 +92,17 @@ export function ComparePageClient({ runs }: { runs: RunListItem[] }) {
         >
           新增对比项
         </Button>
+        <Button
+          onClick={() => setSubmittedItems(items)}
+          disabled={items.length < 2 || items.length > 4}
+        >
+          开始对比
+        </Button>
         {compareQuery.isLoading ? <Badge variant="info">对比中…</Badge> : null}
         {compareQuery.error ? <Badge variant="destructive">对比加载失败</Badge> : null}
       </div>
 
-      {compareQuery.data ? (
+      {submittedItems && compareQuery.data ? (
         <div className="space-y-6">
           <SectionCard title="Summary Metrics">
             <DataTable table={compareQuery.data.summary_metrics} maxRows={12} />
@@ -121,7 +128,13 @@ export function ComparePageClient({ runs }: { runs: RunListItem[] }) {
             ))}
           </div>
         </div>
-      ) : null}
+      ) : (
+        <Card className="glass-card">
+          <CardContent className="py-8 text-sm text-muted-foreground">
+            对比结果改为按需加载。确认 2-4 个对比项后点击“开始对比”。
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

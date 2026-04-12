@@ -3,11 +3,11 @@ import { PageHeader } from "@/components/common/page-header";
 import { StatCard } from "@/components/common/stat-card";
 import { DataTable } from "@/components/data/data-table";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { getPanels, getRuns, getTasks } from "@/lib/api";
+import { getOverview } from "@/lib/api";
 
 export default async function OverviewPage() {
-  const [runs, panels, tasks] = await Promise.all([getRuns(), getPanels(), getTasks()]);
-  const recentRows = runs.slice(0, 8).map((item) => ({
+  const overview = await getOverview();
+  const recentRows = overview.recent_runs.map((item) => ({
     item: item.run_id,
     rank_ic_ir: Number(item.quick_summary.baseline_metrics.walk_forward_rank_ic_ir ?? 0),
   }));
@@ -22,10 +22,10 @@ export default async function OverviewPage() {
       />
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <StatCard title="Runs" value={`${runs.length}`} detail="按最近修改时间排序" />
-        <StatCard title="Panels" value={`${panels.length}`} detail="panel 目录只读浏览" />
-        <StatCard title="Tasks" value={`${tasks.length}`} detail="文件落盘任务队列" />
-        <StatCard title="Ready Runs" value={`${runs.filter((item) => item.quick_summary.artifact_status === "ready").length}`} detail="产物齐全的运行记录" />
+        <StatCard title="Runs" value={`${overview.total_runs}`} detail="按最近修改时间排序" />
+        <StatCard title="Panels" value={`${overview.total_panels}`} detail="panel 目录只读浏览" />
+        <StatCard title="Tasks" value={`${overview.total_tasks}`} detail="文件落盘任务队列" />
+        <StatCard title="Ready Runs" value={`${overview.ready_runs}`} detail="产物齐全的运行记录" />
       </div>
 
       <div className="grid gap-6 xl:grid-cols-[1.2fr,0.8fr]">
@@ -46,7 +46,7 @@ export default async function OverviewPage() {
             <DataTable
               table={{
                 columns: ["run_id", "artifact_status", "baseline_recipe", "walk_forward_rank_ic_ir", "walk_forward_topk_mean_excess_return_4w"],
-                rows: runs.slice(0, 8).map((item) => ({
+                rows: overview.recent_runs.map((item) => ({
                   run_id: item.run_id,
                   artifact_status: item.quick_summary.artifact_status,
                   baseline_recipe: item.quick_summary.baseline_recipe,

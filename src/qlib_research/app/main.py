@@ -8,12 +8,15 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from qlib_research.app.contracts import (
+    ArtifactInventoryResponse,
     CompareItemRef,
     CompareResponse,
     ExportPanelTaskRequest,
+    OverviewResponse,
     PanelDetail,
     PanelSummary,
     RecipeDetail,
+    RecipeTablesResponse,
     RecipeSummary,
     ResearchTaskSummary,
     RunDetail,
@@ -25,9 +28,12 @@ from qlib_research.app.services import (
     compare_recipe_items,
     create_export_panel_task,
     create_native_workflow_task,
+    get_overview,
     get_panel_detail,
     get_recipe_detail,
+    get_recipe_tables,
     get_run_detail,
+    get_run_artifact_inventory,
     get_task,
     get_task_logs,
     list_panels,
@@ -59,6 +65,11 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/overview", response_model=OverviewResponse)
+def api_get_overview() -> OverviewResponse:
+    return get_overview()
+
+
 @app.get("/api/runs", response_model=list[RunListItem])
 def api_list_runs(limit: int = Query(default=50, ge=1, le=200)) -> list[RunListItem]:
     return list_runs(limit=limit)
@@ -68,6 +79,14 @@ def api_list_runs(limit: int = Query(default=50, ge=1, le=200)) -> list[RunListI
 def api_get_run(run_id: str) -> RunDetail:
     try:
         return get_run_detail(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/runs/{run_id}/inventory", response_model=ArtifactInventoryResponse)
+def api_get_run_inventory(run_id: str) -> ArtifactInventoryResponse:
+    try:
+        return get_run_artifact_inventory(run_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -84,6 +103,19 @@ def api_list_run_recipes(run_id: str) -> list[RecipeSummary]:
 def api_get_recipe(run_id: str, recipe_name: str) -> RecipeDetail:
     try:
         return get_recipe_detail(run_id, recipe_name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/runs/{run_id}/recipes/{recipe_name}/tables", response_model=RecipeTablesResponse)
+def api_get_recipe_tables(
+    run_id: str,
+    recipe_name: str,
+    names: str = Query(..., description="Comma-separated recipe table names"),
+) -> RecipeTablesResponse:
+    try:
+        selected_names = [name.strip() for name in names.split(",") if name.strip()]
+        return get_recipe_tables(run_id, recipe_name, selected_names)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -140,4 +172,3 @@ def api_get_task_logs(task_id: str) -> TaskLogResponse:
         return get_task_logs(task_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-

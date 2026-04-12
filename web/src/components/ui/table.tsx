@@ -3,7 +3,7 @@ import * as React from "react";
 import { cn } from "@/lib/utils";
 
 export const Table = React.forwardRef<HTMLTableElement, React.HTMLAttributes<HTMLTableElement>>(({ className, ...props }, ref) => (
-  <div className="relative w-full overflow-auto">
+  <div className="relative w-full min-w-max">
     <table ref={ref} className={cn("w-full caption-bottom text-sm", className)} {...props} />
   </div>
 ));
@@ -25,11 +25,11 @@ export const TableRow = React.forwardRef<HTMLTableRowElement, React.HTMLAttribut
 TableRow.displayName = "TableRow";
 
 export const TableHead = React.forwardRef<HTMLTableCellElement, React.ThHTMLAttributes<HTMLTableCellElement>>(({ className, ...props }, ref) => (
-  <th ref={ref} className={cn("h-12 px-4 text-left align-middle font-medium text-muted-foreground", className)} {...props} />
+  <th ref={ref} className={cn("sticky top-0 z-10 h-12 bg-background/95 px-4 text-left align-middle font-medium text-muted-foreground backdrop-blur", className)} {...props} />
 ));
 TableHead.displayName = "TableHead";
 
 export const TableCell = React.forwardRef<HTMLTableCellElement, React.TdHTMLAttributes<HTMLTableCellElement>>(({ className, ...props }, ref) => (
-  <td ref={ref} className={cn("p-4 align-middle", className)} {...props} />
+  <td ref={ref} className={cn("max-w-[24rem] p-4 align-middle", className)} {...props} />
 ));
 TableCell.displayName = "TableCell";

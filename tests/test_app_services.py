@@ -8,7 +8,6 @@ import pytest
 
 from qlib_research.app.contracts import (
     DataTablePayload,
-    RecipeDetail,
     RunListItem,
     RunQuickSummary,
 )
@@ -35,34 +34,23 @@ def test_list_runs_returns_quick_summary(monkeypatch, tmp_path):
         ),
         encoding="utf-8",
     )
-    (recipe_dir / "native_workflow_manifest.json").write_text("{}", encoding="utf-8")
-
-    def fake_load_native_workflow_artifacts(output_dir, recipe_names=None):
-        return {
-            "recipe_names": ["baseline"],
-            "recipe_overview": pd.DataFrame(
-                [
-                    {
-                        "recipe": "baseline",
-                        "rolling_rank_ic_ir": 0.11,
-                        "rolling_topk_mean_excess_return_4w": 0.01,
-                        "walk_forward_rank_ic_ir": 0.22,
-                        "walk_forward_topk_mean_excess_return_4w": 0.02,
-                        "walk_forward_net_total_return": 0.18,
-                    }
-                ]
-            ),
-            "recipes": {
-                "baseline": {
-                    "execution_diff_summary": pd.DataFrame(
-                        [{"bundle": "walk_forward", "native_minus_validation_return": 0.02}]
-                    )
-                }
-            },
-        }
+    (recipe_dir / "native_workflow_manifest.json").write_text(
+        json.dumps({"used_feature_columns": ["ma20", "ma50"]}),
+        encoding="utf-8",
+    )
+    pd.DataFrame(
+        [{"rank_ic_ir": 0.11, "topk_mean_excess_return_4w": 0.01, "used_feature_count": 2}]
+    ).to_csv(recipe_dir / "rolling_summary.csv", index=False)
+    pd.DataFrame(
+        [{"rank_ic_ir": 0.22, "topk_mean_excess_return_4w": 0.02, "used_feature_count": 2}]
+    ).to_csv(recipe_dir / "walk_forward_summary.csv", index=False)
+    pd.DataFrame([{"bundle": "walk_forward", "native_minus_validation_return": 0.02}]).to_csv(
+        recipe_dir / "execution_diff_summary.csv",
+        index=False,
+    )
+    pd.DataFrame([{"net_value": 1_180_000}]).to_csv(recipe_dir / "walk_forward_native_report.csv", index=False)
 
     monkeypatch.setattr(services, "NATIVE_WORKFLOW_ROOT", workflow_root)
-    monkeypatch.setattr(services, "load_native_workflow_artifacts", fake_load_native_workflow_artifacts)
 
     runs = services.list_runs()
 
@@ -71,9 +59,10 @@ def test_list_runs_returns_quick_summary(monkeypatch, tmp_path):
     assert runs[0].quick_summary.universe_profile == "csi300"
     assert runs[0].quick_summary.baseline_metrics["walk_forward_rank_ic_ir"] == 0.22
     assert runs[0].quick_summary.artifact_status == "partial"
+    assert (run_dir / services.RUN_INDEX_FILENAME).exists()
 
 
-def test_list_runs_falls_back_to_artifact_scan_when_pyqlib_missing(monkeypatch, tmp_path):
+def test_get_run_detail_does_not_depend_on_listing_all_runs(monkeypatch, tmp_path):
     workflow_root = tmp_path / "artifacts" / "native_workflow"
     run_dir = workflow_root / "demo_run"
     recipe_dir = run_dir / "baseline"
@@ -92,45 +81,43 @@ def test_list_runs_falls_back_to_artifact_scan_when_pyqlib_missing(monkeypatch, 
         ),
         encoding="utf-8",
     )
-    pd.DataFrame(
-        [
-            {
-                "bundle": "rolling",
-                "rank_ic_ir": 0.11,
-                "topk_mean_excess_return_4w": 0.01,
-                "used_feature_count": 12,
-            }
-        ]
-    ).to_csv(recipe_dir / "rolling_summary.csv", index=False)
-    pd.DataFrame(
-        [
-            {
-                "bundle": "walk_forward",
-                "rank_ic_ir": 0.22,
-                "topk_mean_excess_return_4w": 0.02,
-                "used_feature_count": 12,
-            }
-        ]
-    ).to_csv(recipe_dir / "walk_forward_summary.csv", index=False)
+    pd.DataFrame([{"rank_ic_ir": 0.11, "topk_mean_excess_return_4w": 0.01, "used_feature_count": 12}]).to_csv(
+        recipe_dir / "rolling_summary.csv",
+        index=False,
+    )
+    pd.DataFrame([{"rank_ic_ir": 0.22, "topk_mean_excess_return_4w": 0.02, "used_feature_count": 12}]).to_csv(
+        recipe_dir / "walk_forward_summary.csv",
+        index=False,
+    )
     pd.DataFrame([{"net_value": 1_180_000}]).to_csv(recipe_dir / "walk_forward_native_report.csv", index=False)
     pd.DataFrame([{"bundle": "walk_forward", "native_minus_validation_return": 0.02}]).to_csv(
         recipe_dir / "execution_diff_summary.csv", index=False
     )
-    (recipe_dir / "native_workflow_manifest.json").write_text("{}", encoding="utf-8")
-
-    monkeypatch.setattr(services, "NATIVE_WORKFLOW_ROOT", workflow_root)
-    monkeypatch.setattr(
-        services,
-        "load_native_workflow_artifacts",
-        lambda output_dir: (_ for _ in ()).throw(RuntimeError("pyqlib is not installed in the project environment.")),
+    pd.DataFrame([{"score_dispersion": 0.1, "topk_unique_score_ratio": 1.0}]).to_csv(
+        recipe_dir / "signal_diagnostics.csv",
+        index=False,
+    )
+    pd.DataFrame([{"blocked_sell_count": 0, "actual_hold_count": 10, "target_hold_count": 10}]).to_csv(
+        recipe_dir / "portfolio_diagnostics.csv",
+        index=False,
+    )
+    pd.DataFrame([{"mean_excess_return_4w": 0.02}]).to_csv(recipe_dir / "slice_regime_summary.csv", index=False)
+    pd.DataFrame([{"feature_date": "2026-01-03", "score": 0.5}]).to_csv(recipe_dir / "latest_score_frame.csv", index=False)
+    pd.DataFrame([{"keep": 1}]).to_csv(recipe_dir / "feature_prefilter.csv", index=False)
+    (recipe_dir / "native_workflow_manifest.json").write_text(
+        json.dumps({"used_feature_columns": ["ma20"]}),
+        encoding="utf-8",
     )
 
-    runs = services.list_runs()
+    monkeypatch.setattr(services, "NATIVE_WORKFLOW_ROOT", workflow_root)
+    monkeypatch.setattr(services, "list_runs", lambda limit=50: (_ for _ in ()).throw(AssertionError("should not list all runs")))
 
-    assert len(runs) == 1
-    assert runs[0].quick_summary.universe_profile == "csi300"
-    assert runs[0].quick_summary.baseline_metrics["walk_forward_rank_ic_ir"] == 0.22
-    assert runs[0].quick_summary.baseline_metrics["walk_forward_net_total_return"] == pytest.approx(0.18)
+    detail = services.get_run_detail("demo_run")
+
+    assert detail.quick_summary.universe_profile == "csi300"
+    assert detail.quick_summary.baseline_metrics["walk_forward_rank_ic_ir"] == 0.22
+    assert detail.quick_summary.baseline_metrics["walk_forward_net_total_return"] == pytest.approx(0.18)
+    assert detail.artifact_inventory == []
 
 
 def test_get_panel_detail_reads_panel_and_links_runs(monkeypatch, tmp_path):
@@ -218,40 +205,36 @@ def test_create_export_panel_task_persists_command(monkeypatch, tmp_path):
 
 
 def test_compare_recipe_items_returns_recipe_level_payload(monkeypatch):
-    detail = RecipeDetail(
-        run_id="demo_run",
-        recipe_name="baseline",
-        recipe_config={"signal_objective": "huber_regression"},
-        manifest={},
-        overview={"used_feature_count": 12},
-        nodes=[],
-        tables={
-            "rolling_summary": DataTablePayload(
-                columns=["rank_ic_ir", "topk_mean_excess_return_4w", "coverage_mean"],
-                rows=[{"rank_ic_ir": 0.21, "topk_mean_excess_return_4w": 0.03, "coverage_mean": 298}],
-            ),
-            "rolling_native_report": DataTablePayload(columns=["net_value", "turnover"], rows=[{"net_value": 1_120_000, "turnover": 0.6}]),
-            "execution_diff_summary": DataTablePayload(
-                columns=["bundle", "native_minus_validation_return", "native_max_drawdown"],
-                rows=[{"bundle": "rolling", "native_minus_validation_return": 0.02, "native_max_drawdown": -0.08}],
-            ),
-            "slice_regime_summary": DataTablePayload(
-                columns=["bundle", "slice_type", "mean_excess_return_4w"],
-                rows=[{"bundle": "rolling", "slice_type": "feature_year", "mean_excess_return_4w": 0.01}],
-            ),
-            "rolling_feature_importance": DataTablePayload(
-                columns=["feature", "importance_gain"],
-                rows=[{"feature": "ma20", "importance_gain": 10.0}],
-            ),
-            "latest_score_frame": DataTablePayload(
-                columns=["instrument", "score"],
-                rows=[{"instrument": "AAA.SH", "score": 0.5}],
-            ),
-        },
-        artifact_inventory=[],
-    )
+    run_dir = Path("/tmp/demo_run")
+    index_payload = {
+        "run_id": "demo_run",
+        "quick_summary": RunQuickSummary(
+            run_id="demo_run",
+            output_dir=str(run_dir),
+            recipe_names=["baseline"],
+            artifact_status="ready",
+        ).model_dump(mode="json"),
+        "overview_lookup": {"baseline": {"used_feature_count": 12}},
+    }
+    frames = {
+        "manifest": {},
+        "rolling_summary": pd.DataFrame([{"rank_ic_ir": 0.21, "topk_mean_excess_return_4w": 0.03, "coverage_mean": 298}]),
+        "rolling_native_report": pd.DataFrame([{"net_value": 1_120_000, "turnover": 0.6}]),
+        "execution_diff_summary": pd.DataFrame(
+            [{"bundle": "rolling", "native_minus_validation_return": 0.02, "native_max_drawdown": -0.08}]
+        ),
+        "slice_regime_summary": pd.DataFrame(
+            [{"bundle": "rolling", "slice_type": "feature_year", "mean_excess_return_4w": 0.01}]
+        ),
+        "rolling_feature_importance": pd.DataFrame([{"feature": "ma20", "importance_gain": 10.0}]),
+        "latest_score_frame": pd.DataFrame([{"instrument": "AAA.SH", "score": 0.5}]),
+        "walk_forward_summary": pd.DataFrame(),
+        "walk_forward_native_report": pd.DataFrame(),
+        "walk_forward_feature_importance": pd.DataFrame(),
+    }
 
-    monkeypatch.setattr(services, "get_recipe_detail", lambda run_id, recipe_name: detail)
+    monkeypatch.setattr(services, "_collect_run_context", lambda run_id: (run_dir, {"config": {}}, index_payload))
+    monkeypatch.setattr(services, "_load_recipe_frames", lambda run_dir, recipe_name, table_names: frames)
 
     response = services.compare_recipe_items(
         [

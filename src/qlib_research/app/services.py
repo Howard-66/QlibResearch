@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime
 import json
 import math
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -17,6 +18,7 @@ import pandas as pd
 
 from qlib_research.app.contracts import (
     ArtifactRef,
+    ArtifactInventoryResponse,
     CompareItemRef,
     CompareItemResult,
     CompareResponse,
@@ -24,9 +26,11 @@ from qlib_research.app.contracts import (
     DiagnosticNode,
     EvidenceItem,
     ExportPanelTaskRequest,
+    OverviewResponse,
     PanelDetail,
     PanelSummary,
     RecipeDetail,
+    RecipeTablesResponse,
     RecipeSummary,
     ResearchTaskSummary,
     RunDetail,
@@ -81,6 +85,76 @@ OPTIONAL_RECIPE_CSVS = {
     "rolling_native_annual_return_heatmap.csv",
     "walk_forward_native_annual_return_heatmap.csv",
 }
+
+RUN_INDEX_FILENAME = "workbench_run_index.json"
+PANEL_SUMMARY_CACHE_DIRNAME = ".workbench_cache"
+
+RUN_INDEX_RECIPE_FILES = {
+    "native_workflow_manifest.json",
+    "rolling_summary.csv",
+    "walk_forward_summary.csv",
+    "execution_diff_summary.csv",
+    "rolling_native_report.csv",
+    "walk_forward_native_report.csv",
+}
+
+RECIPE_TABLE_FILES = {
+    "feature_prefilter": "feature_prefilter.csv",
+    "signal_diagnostics": "signal_diagnostics.csv",
+    "portfolio_diagnostics": "portfolio_diagnostics.csv",
+    "rolling_summary": "rolling_summary.csv",
+    "walk_forward_summary": "walk_forward_summary.csv",
+    "rolling_details": "rolling_details.csv",
+    "walk_forward_details": "walk_forward_details.csv",
+    "rolling_native_report": "rolling_native_report.csv",
+    "walk_forward_native_report": "walk_forward_native_report.csv",
+    "execution_diff_summary": "execution_diff_summary.csv",
+    "slice_regime_summary": "slice_regime_summary.csv",
+    "rolling_feature_importance": "rolling_feature_importance.csv",
+    "walk_forward_feature_importance": "walk_forward_feature_importance.csv",
+    "latest_score_frame": "latest_score_frame.csv",
+    "portfolio_targets": "portfolio_targets.csv",
+    "rolling_native_monthly_return_heatmap": "rolling_native_monthly_return_heatmap.csv",
+    "walk_forward_native_monthly_return_heatmap": "walk_forward_native_monthly_return_heatmap.csv",
+    "rolling_native_annual_return_heatmap": "rolling_native_annual_return_heatmap.csv",
+    "walk_forward_native_annual_return_heatmap": "walk_forward_native_annual_return_heatmap.csv",
+}
+
+RUN_DETAIL_NODE_TABLES = {
+    "feature_prefilter",
+    "signal_diagnostics",
+    "portfolio_diagnostics",
+    "rolling_summary",
+    "walk_forward_summary",
+    "execution_diff_summary",
+    "slice_regime_summary",
+    "latest_score_frame",
+}
+
+RECIPE_DETAIL_INITIAL_TABLES = {
+    "feature_prefilter",
+    "signal_diagnostics",
+    "portfolio_diagnostics",
+    "rolling_summary",
+    "walk_forward_summary",
+    "execution_diff_summary",
+    "slice_regime_summary",
+}
+
+COMPARE_REQUIRED_TABLES = {
+    "latest_score_frame",
+    "execution_diff_summary",
+    "slice_regime_summary",
+    "rolling_summary",
+    "walk_forward_summary",
+    "rolling_native_report",
+    "walk_forward_native_report",
+    "rolling_feature_importance",
+    "walk_forward_feature_importance",
+}
+
+_RUN_INDEX_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_PANEL_SUMMARY_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 def _now_iso() -> str:
@@ -244,11 +318,12 @@ def _safe_native_report_return(frame: pd.DataFrame, account: float = 1_000_000.0
 def _build_recipe_overview_row(recipe_name: str, recipe_frames: dict[str, Any]) -> dict[str, Any]:
     rolling_summary = recipe_frames.get("rolling_summary", pd.DataFrame())
     walk_summary = recipe_frames.get("walk_forward_summary", pd.DataFrame())
+    manifest = recipe_frames.get("manifest", {}) if isinstance(recipe_frames.get("manifest", {}), dict) else {}
     rolling_row = _summary_row(rolling_summary)
     walk_row = _summary_row(walk_summary)
     return {
         "recipe": recipe_name,
-        "used_feature_count": rolling_row.get("used_feature_count") or walk_row.get("used_feature_count"),
+        "used_feature_count": rolling_row.get("used_feature_count") or walk_row.get("used_feature_count") or len(manifest.get("used_feature_columns", [])),
         "rolling_rank_ic_ir": rolling_row.get("rank_ic_ir"),
         "rolling_topk_mean_excess_return_4w": rolling_row.get("topk_mean_excess_return_4w"),
         "rolling_net_total_return": _safe_native_report_return(recipe_frames.get("rolling_native_report", pd.DataFrame())),
@@ -298,12 +373,222 @@ def _load_native_workflow_artifacts_safe(output_dir: Path) -> dict[str, Any]:
             "cannot import name 'build_annual_return_heatmap_frame'",
             "cannot import name 'build_monthly_return_heatmap_frame'",
             "No module named 'qlib'",
+            "No module named 'lightgbm'",
         )
         if not isinstance(exc, (ImportError, ModuleNotFoundError, RuntimeError)):
             raise
         if not any(message in str(exc) for message in fallback_messages):
             raise
     return _scan_native_workflow_artifacts(output_dir)
+
+
+def _run_index_path(run_dir: Path) -> Path:
+    return run_dir / RUN_INDEX_FILENAME
+
+
+def _panel_summary_cache_dir() -> Path:
+    return PANELS_ROOT / PANEL_SUMMARY_CACHE_DIRNAME
+
+
+def _panel_summary_cache_path(panel_path: Path) -> Path:
+    return _panel_summary_cache_dir() / f"{panel_path.name}.json"
+
+
+def _run_index_source_mtime(run_dir: Path, recipe_names: list[str]) -> float:
+    candidates = [run_dir / "native_workflow_summary.json"]
+    for recipe_name in recipe_names:
+        recipe_dir = run_dir / recipe_name
+        candidates.extend(recipe_dir / filename for filename in RUN_INDEX_RECIPE_FILES)
+    existing = [path.stat().st_mtime for path in candidates if path.exists()]
+    return max(existing, default=run_dir.stat().st_mtime)
+
+
+def _safe_last_numeric_value(frame: pd.DataFrame, column: str) -> float | None:
+    if frame.empty or column not in frame.columns:
+        return None
+    series = pd.to_numeric(frame[column], errors="coerce").dropna()
+    if series.empty:
+        return None
+    return float(series.iloc[-1])
+
+
+def _load_recipe_summary_inputs(recipe_dir: Path) -> dict[str, Any]:
+    return {
+        "manifest": _safe_read_json(recipe_dir / "native_workflow_manifest.json", {}),
+        "rolling_summary": _safe_read_csv(recipe_dir / "rolling_summary.csv"),
+        "walk_forward_summary": _safe_read_csv(recipe_dir / "walk_forward_summary.csv"),
+        "execution_diff_summary": _safe_read_csv(recipe_dir / "execution_diff_summary.csv"),
+        "rolling_native_report": _safe_read_csv(recipe_dir / "rolling_native_report.csv"),
+        "walk_forward_native_report": _safe_read_csv(recipe_dir / "walk_forward_native_report.csv"),
+    }
+
+
+def _build_run_index_payload(run_dir: Path) -> dict[str, Any]:
+    run_id = run_dir.name
+    summary_payload = _safe_read_json(run_dir / "native_workflow_summary.json", {})
+    recipe_names = _resolve_run_recipe_names(run_dir, summary_payload)
+    inventory = _run_inventory(run_dir, recipe_names)
+    artifact_status, ready_count, total_count, missing = _artifact_status(inventory)
+    recipe_configs = _resolve_recipe_registry(summary_payload)
+    promotion_gate_payload = summary_payload.get("promotion_gate", {}) or {}
+
+    overview_lookup: dict[str, dict[str, Any]] = {}
+    recipes: list[RecipeSummary] = []
+
+    for recipe_name in recipe_names:
+        recipe_dir = run_dir / recipe_name
+        summary_inputs = _load_recipe_summary_inputs(recipe_dir)
+        overview_row = sanitize_for_json(_build_recipe_overview_row(recipe_name, summary_inputs))
+        overview_lookup[recipe_name] = overview_row
+        recipes.append(
+            _build_recipe_summary(
+                run_id=run_id,
+                recipe_name=recipe_name,
+                overview_row=overview_row,
+                recipe_config=recipe_configs.get(recipe_name, {}),
+                promotion_gate=promotion_gate_payload.get(recipe_name, {}),
+            )
+        )
+
+    baseline_recipe = _select_baseline_recipe(recipe_names)
+    baseline_row = overview_lookup.get(baseline_recipe or "", {})
+    baseline_exec = _safe_read_csv(run_dir / (baseline_recipe or "") / "execution_diff_summary.csv") if baseline_recipe else pd.DataFrame()
+    has_execution_gap_issue = False
+    if not baseline_exec.empty and "native_minus_validation_return" in baseline_exec.columns:
+        deltas = pd.to_numeric(baseline_exec["native_minus_validation_return"], errors="coerce").dropna()
+        has_execution_gap_issue = bool(not deltas.empty and deltas.abs().max() >= 0.05)
+
+    quick_summary = RunQuickSummary(
+        run_id=run_id,
+        output_dir=str(run_dir),
+        universe_profile=summary_payload.get("config", {}).get("universe_profile"),
+        panel_path=summary_payload.get("config", {}).get("panel_path"),
+        start_date=summary_payload.get("config", {}).get("start_date"),
+        end_date=summary_payload.get("config", {}).get("end_date"),
+        recipe_names=recipe_names,
+        artifact_status=artifact_status,
+        artifact_ready_count=ready_count,
+        artifact_total_count=total_count,
+        missing_artifacts=missing[:8],
+        promotion_gate_summary=sanitize_for_json(promotion_gate_payload),
+        baseline_recipe=baseline_recipe,
+        baseline_metrics={
+            "rolling_rank_ic_ir": _normalize_value(baseline_row.get("rolling_rank_ic_ir")),
+            "rolling_topk_mean_excess_return_4w": _normalize_value(baseline_row.get("rolling_topk_mean_excess_return_4w")),
+            "rolling_net_total_return": _normalize_value(baseline_row.get("rolling_net_total_return")),
+            "walk_forward_rank_ic_ir": _normalize_value(baseline_row.get("walk_forward_rank_ic_ir")),
+            "walk_forward_topk_mean_excess_return_4w": _normalize_value(baseline_row.get("walk_forward_topk_mean_excess_return_4w")),
+            "walk_forward_net_total_return": _normalize_value(baseline_row.get("walk_forward_net_total_return")),
+        },
+        has_execution_gap_issue=has_execution_gap_issue,
+        has_missing_artifacts=artifact_status != "ready",
+        updated_at=_path_updated_at(run_dir),
+    )
+    return {
+        "run_id": run_id,
+        "updated_at": quick_summary.updated_at,
+        "quick_summary": quick_summary.model_dump(mode="json"),
+        "recipes": [recipe.model_dump(mode="json") for recipe in recipes],
+        "overview_lookup": sanitize_for_json(overview_lookup),
+    }
+
+
+def _load_run_index_payload(run_dir: Path) -> dict[str, Any]:
+    recipe_names = _resolve_run_recipe_names(run_dir, _safe_read_json(run_dir / "native_workflow_summary.json", {}))
+    source_mtime = _run_index_source_mtime(run_dir, recipe_names)
+    cache_key = str(run_dir)
+    cached = _RUN_INDEX_CACHE.get(cache_key)
+    if cached and cached[0] >= source_mtime:
+        return cached[1]
+
+    index_path = _run_index_path(run_dir)
+    if index_path.exists() and index_path.stat().st_mtime >= source_mtime:
+        payload = _safe_read_json(index_path, {})
+        _RUN_INDEX_CACHE[cache_key] = (index_path.stat().st_mtime, payload)
+        return payload
+
+    payload = _build_run_index_payload(run_dir)
+    index_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    index_mtime = index_path.stat().st_mtime
+    _RUN_INDEX_CACHE[cache_key] = (index_mtime, payload)
+    return payload
+
+
+def _run_list_item_from_index_payload(payload: dict[str, Any]) -> RunListItem:
+    quick_summary = RunQuickSummary(**payload.get("quick_summary", {}))
+    return RunListItem(
+        run_id=str(payload.get("run_id") or quick_summary.run_id),
+        updated_at=payload.get("updated_at") or quick_summary.updated_at,
+        quick_summary=quick_summary,
+    )
+
+
+def _recipe_summaries_from_index_payload(payload: dict[str, Any]) -> list[RecipeSummary]:
+    return [RecipeSummary(**item) for item in payload.get("recipes", [])]
+
+
+def _recipe_overview_lookup_from_index_payload(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    raw_lookup = payload.get("overview_lookup", {})
+    if not isinstance(raw_lookup, dict):
+        return {}
+    return {str(key): value if isinstance(value, dict) else {} for key, value in raw_lookup.items()}
+
+
+def _load_recipe_frames(run_dir: Path, recipe_name: str, table_names: Iterable[str]) -> dict[str, Any]:
+    recipe_dir = run_dir / recipe_name
+    frames: dict[str, Any] = {
+        "manifest": _safe_read_json(recipe_dir / "native_workflow_manifest.json", {}),
+    }
+    for table_name in table_names:
+        filename = RECIPE_TABLE_FILES.get(table_name)
+        if not filename:
+            continue
+        frames[table_name] = _safe_read_csv(recipe_dir / filename)
+    return frames
+
+
+def _build_table_payloads(recipe_frames: dict[str, Any], table_names: Iterable[str]) -> dict[str, DataTablePayload]:
+    tables: dict[str, DataTablePayload] = {}
+    for table_name in table_names:
+        frame = recipe_frames.get(table_name, pd.DataFrame())
+        if table_name == "latest_score_frame":
+            tables[table_name] = _frame_to_payload(frame, sort_by="score")
+        elif table_name == "portfolio_targets":
+            tables[table_name] = _frame_to_payload(frame, sort_by="rank", ascending=True)
+        else:
+            tables[table_name] = _frame_to_payload(frame)
+    return tables
+
+
+def _load_panel_summary_payload(path: Path) -> dict[str, Any]:
+    source_mtime = path.stat().st_mtime
+    cache_key = str(path)
+    cached = _PANEL_SUMMARY_CACHE.get(cache_key)
+    if cached and cached[0] >= source_mtime:
+        return cached[1]
+
+    cache_path = _panel_summary_cache_path(path)
+    if cache_path.exists() and cache_path.stat().st_mtime >= source_mtime:
+        payload = _safe_read_json(cache_path, {})
+        _PANEL_SUMMARY_CACHE[cache_key] = (cache_path.stat().st_mtime, payload)
+        return payload
+
+    panel = load_panel_dataframe(path)
+    payload = {
+        "panel_id": path.name,
+        "name": path.name,
+        "path": str(path),
+        "format": path.suffix.lower().lstrip("."),
+        "size_bytes": path.stat().st_size,
+        "updated_at": _path_updated_at(path),
+        "enrichment_scope": load_feature_panel_enrichment_scope(path, panel=panel),
+        "summary": sanitize_for_json(summarize_panel(panel)),
+    }
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    cache_mtime = cache_path.stat().st_mtime
+    _PANEL_SUMMARY_CACHE[cache_key] = (cache_mtime, payload)
+    return payload
 
 
 def _resolve_recipe_registry(summary_payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -577,10 +862,10 @@ def _build_recipe_nodes(
 def _panel_summary_for_path(panel_path: Path | None) -> dict[str, Any] | None:
     if panel_path is None or not panel_path.exists():
         return None
-    panel = load_panel_dataframe(panel_path)
-    summary = summarize_panel(panel)
+    payload = _load_panel_summary_payload(panel_path)
+    summary = dict(payload.get("summary", {}))
     summary["path"] = str(panel_path)
-    summary["enrichment_scope"] = load_feature_panel_enrichment_scope(panel_path, panel=panel)
+    summary["enrichment_scope"] = payload.get("enrichment_scope")
     return sanitize_for_json(summary)
 
 
@@ -610,84 +895,33 @@ def _collect_run_context(run_id: str) -> tuple[Path, dict[str, Any], dict[str, A
     if not run_dir.exists():
         raise FileNotFoundError(f"Unknown run: {run_id}")
     summary_payload = _safe_read_json(run_dir / "native_workflow_summary.json", {})
-    artifact_view = _load_native_workflow_artifacts_safe(run_dir)
-    return run_dir, summary_payload, artifact_view
+    index_payload = _load_run_index_payload(run_dir)
+    return run_dir, summary_payload, index_payload
 
 
 def list_runs(limit: int = 50) -> list[RunListItem]:
-    runs: list[RunListItem] = []
-    for run_dir in _list_run_dirs()[:limit]:
-        run_id = run_dir.name
-        summary_payload = _safe_read_json(run_dir / "native_workflow_summary.json", {})
-        artifact_view = _load_native_workflow_artifacts_safe(run_dir)
-        recipe_names = list(artifact_view.get("recipe_names", []))
-        inventory = _run_inventory(run_dir, recipe_names)
-        artifact_status, ready_count, total_count, missing = _artifact_status(inventory)
-        baseline_recipe = _select_baseline_recipe(recipe_names)
-        recipe_overview = artifact_view.get("recipe_overview", pd.DataFrame())
-        overview_lookup = {
-            str(row["recipe"]): row for row in recipe_overview.to_dict(orient="records")
-        } if not recipe_overview.empty else {}
-        baseline_row = overview_lookup.get(baseline_recipe or "", {})
-        baseline_recipe_frames = artifact_view.get("recipes", {}).get(baseline_recipe or "", {})
-        execution_gap = baseline_recipe_frames.get("execution_diff_summary", pd.DataFrame())
-        has_execution_gap_issue = False
-        if not execution_gap.empty and "native_minus_validation_return" in execution_gap.columns:
-            deltas = pd.to_numeric(execution_gap["native_minus_validation_return"], errors="coerce").dropna()
-            has_execution_gap_issue = bool(not deltas.empty and deltas.abs().max() >= 0.05)
-        quick_summary = RunQuickSummary(
-            run_id=run_id,
-            output_dir=str(run_dir),
-            universe_profile=summary_payload.get("config", {}).get("universe_profile"),
-            panel_path=summary_payload.get("config", {}).get("panel_path"),
-            start_date=summary_payload.get("config", {}).get("start_date"),
-            end_date=summary_payload.get("config", {}).get("end_date"),
-            recipe_names=recipe_names,
-            artifact_status=artifact_status,
-            artifact_ready_count=ready_count,
-            artifact_total_count=total_count,
-            missing_artifacts=missing[:8],
-            promotion_gate_summary=sanitize_for_json(summary_payload.get("promotion_gate", {})),
-            baseline_recipe=baseline_recipe,
-            baseline_metrics={
-                "rolling_rank_ic_ir": _normalize_value(baseline_row.get("rolling_rank_ic_ir")),
-                "rolling_topk_mean_excess_return_4w": _normalize_value(baseline_row.get("rolling_topk_mean_excess_return_4w")),
-                "rolling_net_total_return": _normalize_value(baseline_row.get("rolling_net_total_return")),
-                "walk_forward_rank_ic_ir": _normalize_value(baseline_row.get("walk_forward_rank_ic_ir")),
-                "walk_forward_topk_mean_excess_return_4w": _normalize_value(baseline_row.get("walk_forward_topk_mean_excess_return_4w")),
-                "walk_forward_net_total_return": _normalize_value(baseline_row.get("walk_forward_net_total_return")),
-            },
-            has_execution_gap_issue=has_execution_gap_issue,
-            has_missing_artifacts=artifact_status != "ready",
-            updated_at=_path_updated_at(run_dir),
-        )
-        runs.append(RunListItem(run_id=run_id, updated_at=quick_summary.updated_at, quick_summary=quick_summary))
-    return runs
+    return [_run_list_item_from_index_payload(_load_run_index_payload(run_dir)) for run_dir in _list_run_dirs()[:limit]]
+
+
+def get_overview(limit: int = 8) -> OverviewResponse:
+    runs = list_runs(limit=200)
+    ready_runs = sum(1 for item in runs if item.quick_summary.artifact_status == "ready")
+    return OverviewResponse(
+        total_runs=len(runs),
+        ready_runs=ready_runs,
+        total_panels=len(_list_panel_files()),
+        total_tasks=len(_list_task_dirs()),
+        recent_runs=runs[:limit],
+    )
 
 
 def get_run_detail(run_id: str) -> RunDetail:
-    run_dir, summary_payload, artifact_view = _collect_run_context(run_id)
-    recipe_names = list(artifact_view.get("recipe_names", []))
-    quick_summary = next((item.quick_summary for item in list_runs(limit=200) if item.run_id == run_id), None)
-    if quick_summary is None:
-        inventory = _run_inventory(run_dir, recipe_names)
-        artifact_status, ready_count, total_count, missing = _artifact_status(inventory)
-        quick_summary = RunQuickSummary(
-            run_id=run_id,
-            output_dir=str(run_dir),
-            recipe_names=recipe_names,
-            artifact_status=artifact_status,
-            artifact_ready_count=ready_count,
-            artifact_total_count=total_count,
-            missing_artifacts=missing,
-        )
+    run_dir, summary_payload, index_payload = _collect_run_context(run_id)
+    quick_summary = RunQuickSummary(**index_payload.get("quick_summary", {}))
+    recipe_summaries = _recipe_summaries_from_index_payload(index_payload)
+    baseline_recipe = quick_summary.baseline_recipe or _select_baseline_recipe(quick_summary.recipe_names)
+    baseline_frames = _load_recipe_frames(run_dir, baseline_recipe, RUN_DETAIL_NODE_TABLES) if baseline_recipe else {}
     recipe_configs = _resolve_recipe_registry(summary_payload)
-    recipe_overview = artifact_view.get("recipe_overview", pd.DataFrame())
-    overview_lookup = {
-        str(row["recipe"]): row for row in recipe_overview.to_dict(orient="records")
-    } if not recipe_overview.empty else {}
-    baseline_recipe = quick_summary.baseline_recipe or _select_baseline_recipe(recipe_names)
-    baseline_frames = artifact_view.get("recipes", {}).get(baseline_recipe or "", {})
     panel_path = _resolve_artifact_path(summary_payload.get("config", {}).get("panel_path"))
     panel_summary = _panel_summary_for_path(panel_path)
     nodes = _build_recipe_nodes(
@@ -696,25 +930,6 @@ def get_run_detail(run_id: str) -> RunDetail:
         recipe_configs.get(baseline_recipe or "", {}),
         panel_summary,
     ) if baseline_recipe else []
-    recipes = [
-        _build_recipe_summary(
-            run_id=run_id,
-            recipe_name=recipe_name,
-            overview_row=overview_lookup.get(recipe_name, {}),
-            recipe_config=recipe_configs.get(recipe_name, {}),
-            promotion_gate=(summary_payload.get("promotion_gate", {}) or {}).get(recipe_name, {}),
-        )
-        for recipe_name in recipe_names
-    ]
-    inventory = _run_inventory(run_dir, recipe_names)
-    file_tree = sorted(
-        [
-            _artifact_ref(path, name=str(path.relative_to(run_dir)))
-            for path in run_dir.rglob("*")
-            if path.is_file()
-        ],
-        key=lambda item: item.name,
-    )
     return RunDetail(
         run_id=run_id,
         output_dir=str(run_dir),
@@ -723,51 +938,47 @@ def get_run_detail(run_id: str) -> RunDetail:
         recipe_registry=sanitize_for_json(summary_payload.get("recipe_registry", {})),
         promotion_gate=sanitize_for_json(summary_payload.get("promotion_gate", {})),
         nodes=nodes,
-        recipes=recipes,
-        artifact_inventory=inventory + file_tree,
+        recipes=recipe_summaries,
+        artifact_inventory=[],
     )
 
 
 def list_run_recipes(run_id: str) -> list[RecipeSummary]:
-    detail = get_run_detail(run_id)
-    return detail.recipes
+    run_dir = NATIVE_WORKFLOW_ROOT / run_id
+    if not run_dir.exists():
+        raise FileNotFoundError(f"Unknown run: {run_id}")
+    return _recipe_summaries_from_index_payload(_load_run_index_payload(run_dir))
+
+
+def get_run_artifact_inventory(run_id: str) -> ArtifactInventoryResponse:
+    run_dir = NATIVE_WORKFLOW_ROOT / run_id
+    if not run_dir.exists():
+        raise FileNotFoundError(f"Unknown run: {run_id}")
+    index_payload = _load_run_index_payload(run_dir)
+    quick_summary = RunQuickSummary(**index_payload.get("quick_summary", {}))
+    inventory = _run_inventory(run_dir, quick_summary.recipe_names)
+    file_tree = sorted(
+        [
+            _artifact_ref(path, name=str(path.relative_to(run_dir)))
+            for path in run_dir.rglob("*")
+            if path.is_file() and path.name != RUN_INDEX_FILENAME
+        ],
+        key=lambda item: item.name,
+    )
+    return ArtifactInventoryResponse(owner_id=run_id, artifact_inventory=inventory + file_tree)
 
 
 def get_recipe_detail(run_id: str, recipe_name: str) -> RecipeDetail:
-    run_dir, summary_payload, artifact_view = _collect_run_context(run_id)
-    recipe_frames = artifact_view.get("recipes", {}).get(recipe_name)
-    if recipe_frames is None:
+    run_dir, summary_payload, index_payload = _collect_run_context(run_id)
+    quick_summary = RunQuickSummary(**index_payload.get("quick_summary", {}))
+    if recipe_name not in quick_summary.recipe_names:
         raise FileNotFoundError(f"Unknown recipe '{recipe_name}' for run '{run_id}'")
-    recipe_overview = artifact_view.get("recipe_overview", pd.DataFrame())
-    overview_lookup = {
-        str(row["recipe"]): row for row in recipe_overview.to_dict(orient="records")
-    } if not recipe_overview.empty else {}
+    overview_lookup = _recipe_overview_lookup_from_index_payload(index_payload)
     recipe_config = _get_recipe_config(summary_payload, recipe_name)
     panel_path = _resolve_artifact_path(summary_payload.get("config", {}).get("panel_path"))
     panel_summary = _panel_summary_for_path(panel_path)
-    recipe_dir = run_dir / recipe_name
-    portfolio_targets = _safe_read_csv(recipe_dir / "portfolio_targets.csv")
-    tables = {
-        "feature_prefilter": _frame_to_payload(recipe_frames.get("feature_prefilter", pd.DataFrame())),
-        "signal_diagnostics": _frame_to_payload(recipe_frames.get("signal_diagnostics", pd.DataFrame())),
-        "portfolio_diagnostics": _frame_to_payload(recipe_frames.get("portfolio_diagnostics", pd.DataFrame())),
-        "rolling_summary": _frame_to_payload(recipe_frames.get("rolling_summary", pd.DataFrame())),
-        "walk_forward_summary": _frame_to_payload(recipe_frames.get("walk_forward_summary", pd.DataFrame())),
-        "rolling_details": _frame_to_payload(recipe_frames.get("rolling_details", pd.DataFrame())),
-        "walk_forward_details": _frame_to_payload(recipe_frames.get("walk_forward_details", pd.DataFrame())),
-        "rolling_native_report": _frame_to_payload(recipe_frames.get("rolling_native_report", pd.DataFrame())),
-        "walk_forward_native_report": _frame_to_payload(recipe_frames.get("walk_forward_native_report", pd.DataFrame())),
-        "execution_diff_summary": _frame_to_payload(recipe_frames.get("execution_diff_summary", pd.DataFrame())),
-        "slice_regime_summary": _frame_to_payload(recipe_frames.get("slice_regime_summary", pd.DataFrame())),
-        "rolling_feature_importance": _frame_to_payload(recipe_frames.get("rolling_feature_importance", pd.DataFrame())),
-        "walk_forward_feature_importance": _frame_to_payload(recipe_frames.get("walk_forward_feature_importance", pd.DataFrame())),
-        "latest_score_frame": _frame_to_payload(recipe_frames.get("latest_score_frame", pd.DataFrame()), sort_by="score"),
-        "portfolio_targets": _frame_to_payload(portfolio_targets, sort_by="rank", ascending=True),
-        "rolling_native_monthly_return_heatmap": _frame_to_payload(recipe_frames.get("rolling_native_monthly_return_heatmap", pd.DataFrame())),
-        "walk_forward_native_monthly_return_heatmap": _frame_to_payload(recipe_frames.get("walk_forward_native_monthly_return_heatmap", pd.DataFrame())),
-        "rolling_native_annual_return_heatmap": _frame_to_payload(recipe_frames.get("rolling_native_annual_return_heatmap", pd.DataFrame())),
-        "walk_forward_native_annual_return_heatmap": _frame_to_payload(recipe_frames.get("walk_forward_native_annual_return_heatmap", pd.DataFrame())),
-    }
+    recipe_frames = _load_recipe_frames(run_dir, recipe_name, RUN_DETAIL_NODE_TABLES.union(RECIPE_DETAIL_INITIAL_TABLES))
+    tables = _build_table_payloads(recipe_frames, RECIPE_DETAIL_INITIAL_TABLES)
     nodes = _build_recipe_nodes(recipe_name, recipe_frames, recipe_config, panel_summary)
     return RecipeDetail(
         run_id=run_id,
@@ -777,7 +988,24 @@ def get_recipe_detail(run_id: str, recipe_name: str) -> RecipeDetail:
         overview=sanitize_for_json(overview_lookup.get(recipe_name, {})),
         nodes=nodes,
         tables=tables,
-        artifact_inventory=_recipe_inventory(recipe_dir, prefix=recipe_name),
+        artifact_inventory=_recipe_inventory(run_dir / recipe_name, prefix=recipe_name),
+    )
+
+
+def get_recipe_tables(run_id: str, recipe_name: str, table_names: Iterable[str]) -> RecipeTablesResponse:
+    run_dir = NATIVE_WORKFLOW_ROOT / run_id
+    if not run_dir.exists():
+        raise FileNotFoundError(f"Unknown run: {run_id}")
+    index_payload = _load_run_index_payload(run_dir)
+    quick_summary = RunQuickSummary(**index_payload.get("quick_summary", {}))
+    if recipe_name not in quick_summary.recipe_names:
+        raise FileNotFoundError(f"Unknown recipe '{recipe_name}' for run '{run_id}'")
+    selected_names = [name for name in dict.fromkeys(table_names) if name in RECIPE_TABLE_FILES]
+    recipe_frames = _load_recipe_frames(run_dir, recipe_name, selected_names)
+    return RecipeTablesResponse(
+        run_id=run_id,
+        recipe_name=recipe_name,
+        tables=_build_table_payloads(recipe_frames, selected_names),
     )
 
 
@@ -789,18 +1017,31 @@ def compare_recipe_items(items: list[CompareItemRef]) -> CompareResponse:
     feature_importance: dict[str, DataTablePayload] = {}
     snapshots: dict[str, DataTablePayload] = {}
 
+    run_contexts: dict[str, tuple[Path, dict[str, Any], dict[str, Any]]] = {}
+    recipe_frame_cache: dict[tuple[str, str], dict[str, Any]] = {}
+
     for item in items:
-        recipe_detail = get_recipe_detail(item.run_id, item.recipe_name)
-        bundle_summary_key = f"{item.bundle}_summary"
-        bundle_report_key = f"{item.bundle}_native_report"
-        importance_key = f"{item.bundle}_feature_importance"
-        overview = recipe_detail.overview
-        summary_rows = recipe_detail.tables.get(bundle_summary_key, DataTablePayload()).rows
-        summary_row = summary_rows[0] if summary_rows else {}
-        report_rows = recipe_detail.tables.get(bundle_report_key, DataTablePayload()).rows
-        report_tail = report_rows[-1] if report_rows else {}
-        exec_table = recipe_detail.tables.get("execution_diff_summary", DataTablePayload())
-        matching_exec = next((row for row in exec_table.rows if row.get("bundle") == item.bundle), {})
+        if item.run_id not in run_contexts:
+            run_contexts[item.run_id] = _collect_run_context(item.run_id)
+        run_dir, summary_payload, index_payload = run_contexts[item.run_id]
+        quick_summary = RunQuickSummary(**index_payload.get("quick_summary", {}))
+        if item.recipe_name not in quick_summary.recipe_names:
+            raise FileNotFoundError(f"Unknown recipe '{item.recipe_name}' for run '{item.run_id}'")
+        cache_key = (item.run_id, item.recipe_name)
+        if cache_key not in recipe_frame_cache:
+            recipe_frame_cache[cache_key] = _load_recipe_frames(run_dir, item.recipe_name, COMPARE_REQUIRED_TABLES)
+        recipe_frames = recipe_frame_cache[cache_key]
+        overview = _recipe_overview_lookup_from_index_payload(index_payload).get(item.recipe_name, {})
+        summary_frame = recipe_frames.get(f"{item.bundle}_summary", pd.DataFrame())
+        report_frame = recipe_frames.get(f"{item.bundle}_native_report", pd.DataFrame())
+        exec_frame = recipe_frames.get("execution_diff_summary", pd.DataFrame())
+        slice_frame = recipe_frames.get("slice_regime_summary", pd.DataFrame())
+        importance_frame = recipe_frames.get(f"{item.bundle}_feature_importance", pd.DataFrame())
+        snapshot_frame = recipe_frames.get("latest_score_frame", pd.DataFrame())
+        summary_row = _summary_row(summary_frame)
+        report_tail = _last_row(report_frame)
+        exec_rows = exec_frame.to_dict(orient="records") if not exec_frame.empty else []
+        matching_exec = next((row for row in exec_rows if row.get("bundle") == item.bundle), {})
         label = f"{item.run_id} / {item.recipe_name} / {item.bundle}"
         metrics = {
             "rank_ic_ir": summary_row.get("rank_ic_ir"),
@@ -817,25 +1058,22 @@ def compare_recipe_items(items: list[CompareItemRef]) -> CompareResponse:
                 ref=item,
                 label=label,
                 metrics=sanitize_for_json(metrics),
-                nodes=recipe_detail.nodes,
+                nodes=[],
             )
         )
         metric_rows.append({"item": label, **sanitize_for_json(metrics)})
         execution_rows.append({"item": label, **sanitize_for_json(matching_exec)})
 
-        slice_table = recipe_detail.tables.get("slice_regime_summary", DataTablePayload())
-        for row in slice_table.rows:
+        for row in slice_frame.to_dict(orient="records") if not slice_frame.empty else []:
             if row.get("bundle") == item.bundle:
                 slice_rows.append({"item": label, **row})
 
-        importance_rows = recipe_detail.tables.get(importance_key, DataTablePayload()).rows
-        importance_df = pd.DataFrame(importance_rows)
+        importance_df = importance_frame.copy()
         if not importance_df.empty and "importance_gain" in importance_df.columns:
             importance_df = importance_df.sort_values("importance_gain", ascending=False).head(15)
         feature_importance[label] = _frame_to_payload(importance_df)
 
-        snapshot_table = recipe_detail.tables.get("latest_score_frame", DataTablePayload())
-        snapshot_df = pd.DataFrame(snapshot_table.rows)
+        snapshot_df = snapshot_frame.copy()
         sort_column = "score" if "score" in snapshot_df.columns else ("qlib_score" if "qlib_score" in snapshot_df.columns else None)
         if sort_column and not snapshot_df.empty:
             snapshot_df = snapshot_df.sort_values(sort_column, ascending=False).head(20)
@@ -867,18 +1105,17 @@ def list_panels() -> list[PanelSummary]:
     panels: list[PanelSummary] = []
     panel_links = _build_panel_run_links()
     for path in _list_panel_files():
-        panel = load_panel_dataframe(path)
-        summary = sanitize_for_json(summarize_panel(panel))
+        payload = _load_panel_summary_payload(path)
         panels.append(
             PanelSummary(
-                panel_id=path.name,
-                name=path.name,
-                path=str(path),
-                format=path.suffix.lower().lstrip("."),
-                size_bytes=path.stat().st_size,
-                updated_at=_path_updated_at(path),
-                enrichment_scope=load_feature_panel_enrichment_scope(path, panel=panel),
-                summary=summary,
+                panel_id=str(payload.get("panel_id") or path.name),
+                name=str(payload.get("name") or path.name),
+                path=str(payload.get("path") or path),
+                format=str(payload.get("format") or path.suffix.lower().lstrip(".")),
+                size_bytes=payload.get("size_bytes"),
+                updated_at=payload.get("updated_at"),
+                enrichment_scope=payload.get("enrichment_scope"),
+                summary=payload.get("summary", {}),
                 linked_runs=panel_links.get(str(path), panel_links.get(path.name, [])),
             )
         )
@@ -891,7 +1128,8 @@ def get_panel_detail(panel_id: str) -> PanelDetail:
         raise FileNotFoundError(f"Unknown panel: {panel_id}")
     panel = load_panel_dataframe(path)
     panel_links = _build_panel_run_links()
-    summary = sanitize_for_json(summarize_panel(panel))
+    cached_summary = _load_panel_summary_payload(path)
+    summary = cached_summary.get("summary", {})
     catalog_rows = []
     for column in panel.columns:
         series = panel[column]
@@ -914,7 +1152,7 @@ def get_panel_detail(panel_id: str) -> PanelDetail:
         format=path.suffix.lower().lstrip("."),
         size_bytes=path.stat().st_size,
         updated_at=_path_updated_at(path),
-        enrichment_scope=load_feature_panel_enrichment_scope(path, panel=panel),
+        enrichment_scope=cached_summary.get("enrichment_scope"),
         summary=summary,
         linked_runs=panel_links.get(str(path), panel_links.get(path.name, [])),
         columns=[str(column) for column in panel.columns],
