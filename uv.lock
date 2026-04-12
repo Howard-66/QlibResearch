@@ -3099,7 +3099,7 @@ wheels = [
 [[package]]
 name = "qlib-research"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "akshare" },
     { name = "finance-data-hub" },
@@ -3122,6 +3122,7 @@ dependencies = [
 app = [
     { name = "fastapi" },
     { name = "pydantic" },
+    { name = "pyqlib" },
     { name = "uvicorn" },
 ]
 qlib = [
@@ -3140,6 +3141,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.3.3" },
     { name = "plotly", specifier = ">=6.5.1" },
     { name = "pydantic", marker = "extra == 'app'", specifier = ">=2.11.0" },
+    { name = "pyqlib", marker = "extra == 'app'", specifier = ">=0.9.7,<0.10" },
     { name = "pyqlib", marker = "extra == 'qlib'", specifier = ">=0.9.7,<0.10" },
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "python-dotenv", specifier = ">=1.2.1" },

@@ -1,34 +1,205 @@
-"""Typed contracts reserved for the future QlibResearch API and UI layer."""
+"""Typed contracts for the QlibResearch workbench API."""
 
 from __future__ import annotations
 
-from typing import Literal, TypedDict
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
 
 TaskKind = Literal["export_panel", "run_native_workflow", "run_convergence", "publish_model", "sync_model"]
 TaskStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+DiagnosticStatus = Literal["healthy", "warning", "danger", "missing", "info"]
+NodeKey = Literal[
+    "panel_input",
+    "label_definition",
+    "feature_prefilter",
+    "normalization",
+    "score_quality",
+    "rolling_backtest",
+    "walk_forward_backtest",
+    "execution_gap",
+    "slice_stability",
+    "signal_snapshot",
+]
+Tone = Literal["default", "info", "success", "warning", "danger", "neutral"]
 
 
-class ResearchTaskRequest(TypedDict, total=False):
+class DataTablePayload(BaseModel):
+    columns: list[str] = Field(default_factory=list)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class EvidenceItem(BaseModel):
+    label: str
+    value: Any | None = None
+    tone: Tone = "neutral"
+
+
+class ArtifactRef(BaseModel):
+    name: str
+    path: str
+    exists: bool
+    size_bytes: int | None = None
+    updated_at: str | None = None
+
+
+class DiagnosticNode(BaseModel):
+    key: NodeKey
+    status: DiagnosticStatus
+    headline: str
+    evidence: list[EvidenceItem] = Field(default_factory=list)
+    interpretation: str
+    next_action: str | None = None
+
+
+class RunQuickSummary(BaseModel):
+    run_id: str
+    output_dir: str
+    universe_profile: str | None = None
+    panel_path: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+    recipe_names: list[str] = Field(default_factory=list)
+    artifact_status: Literal["ready", "partial", "missing"] = "missing"
+    artifact_ready_count: int = 0
+    artifact_total_count: int = 0
+    missing_artifacts: list[str] = Field(default_factory=list)
+    promotion_gate_summary: dict[str, Any] = Field(default_factory=dict)
+    baseline_recipe: str | None = None
+    baseline_metrics: dict[str, Any] = Field(default_factory=dict)
+    has_execution_gap_issue: bool = False
+    has_missing_artifacts: bool = False
+    updated_at: str | None = None
+
+
+class RunListItem(BaseModel):
+    run_id: str
+    updated_at: str | None = None
+    quick_summary: RunQuickSummary
+
+
+class RecipeSummary(BaseModel):
+    run_id: str
+    recipe_name: str
+    signal_objective: str | None = None
+    label_recipe: str | None = None
+    used_feature_count: int | None = None
+    rolling_rank_ic_ir: float | None = None
+    walk_forward_rank_ic_ir: float | None = None
+    rolling_topk_mean_excess_return_4w: float | None = None
+    walk_forward_topk_mean_excess_return_4w: float | None = None
+    promotion_gate_passed: bool | None = None
+
+
+class RunDetail(BaseModel):
+    run_id: str
+    output_dir: str
+    quick_summary: RunQuickSummary
+    config: dict[str, Any] = Field(default_factory=dict)
+    recipe_registry: dict[str, Any] = Field(default_factory=dict)
+    promotion_gate: dict[str, Any] = Field(default_factory=dict)
+    nodes: list[DiagnosticNode] = Field(default_factory=list)
+    recipes: list[RecipeSummary] = Field(default_factory=list)
+    artifact_inventory: list[ArtifactRef] = Field(default_factory=list)
+
+
+class RecipeDetail(BaseModel):
+    run_id: str
+    recipe_name: str
+    recipe_config: dict[str, Any] = Field(default_factory=dict)
+    manifest: dict[str, Any] = Field(default_factory=dict)
+    overview: dict[str, Any] = Field(default_factory=dict)
+    nodes: list[DiagnosticNode] = Field(default_factory=list)
+    tables: dict[str, DataTablePayload] = Field(default_factory=dict)
+    artifact_inventory: list[ArtifactRef] = Field(default_factory=list)
+
+
+class PanelSummary(BaseModel):
+    panel_id: str
+    name: str
+    path: str
+    format: str
+    size_bytes: int | None = None
+    updated_at: str | None = None
+    enrichment_scope: str | None = None
+    summary: dict[str, Any] = Field(default_factory=dict)
+    linked_runs: list[str] = Field(default_factory=list)
+
+
+class PanelDetail(PanelSummary):
+    columns: list[str] = Field(default_factory=list)
+    column_catalog: DataTablePayload = Field(default_factory=DataTablePayload)
+    sample_rows: DataTablePayload = Field(default_factory=DataTablePayload)
+
+
+class CompareItemRef(BaseModel):
+    run_id: str
+    recipe_name: str
+    bundle: Literal["rolling", "walk_forward"]
+
+
+class CompareItemResult(BaseModel):
+    ref: CompareItemRef
+    label: str
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    nodes: list[DiagnosticNode] = Field(default_factory=list)
+
+
+class CompareResponse(BaseModel):
+    items: list[CompareItemResult] = Field(default_factory=list)
+    summary_metrics: DataTablePayload = Field(default_factory=DataTablePayload)
+    execution_gap: DataTablePayload = Field(default_factory=DataTablePayload)
+    slice_stability: DataTablePayload = Field(default_factory=DataTablePayload)
+    feature_importance: dict[str, DataTablePayload] = Field(default_factory=dict)
+    latest_signal_snapshot: dict[str, DataTablePayload] = Field(default_factory=dict)
+
+
+class ResearchTaskRequest(BaseModel):
     task_kind: TaskKind
-    display_name: str
-    config_payload: dict
-    requested_by: str
+    display_name: str | None = None
+    config_payload: dict[str, Any] = Field(default_factory=dict)
+    requested_by: str | None = None
 
 
-class ResearchTaskSummary(TypedDict, total=False):
+class ExportPanelTaskRequest(BaseModel):
+    display_name: str | None = None
+    requested_by: str | None = None
+    output: str = "artifacts/panels/weekly_features.parquet"
+    start_date: str | None = None
+    end_date: str | None = None
+    symbols: list[str] | None = None
+    universe_profile: str | None = None
+    batch_size: int = 300
+    enrichment_scope: str | None = None
+
+
+class RunNativeWorkflowTaskRequest(BaseModel):
+    display_name: str | None = None
+    requested_by: str | None = None
+    config_payload: dict[str, Any] = Field(default_factory=dict)
+    recipe_names: list[str] | None = None
+
+
+class ResearchTaskSummary(BaseModel):
     task_id: str
     task_kind: TaskKind
     status: TaskStatus
-    started_at: str | None
-    finished_at: str | None
-    output_dir: str | None
-    model_id: str | None
-    message: str | None
+    display_name: str | None = None
+    requested_by: str | None = None
+    created_at: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    output_dir: str | None = None
+    model_id: str | None = None
+    message: str | None = None
+    command: list[str] = Field(default_factory=list)
+    config_payload: dict[str, Any] = Field(default_factory=dict)
+    logs: dict[str, str] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class ArtifactSummary(TypedDict, total=False):
-    model_id: str
-    feature_date: str | None
-    artifact_type: Literal["score_snapshot", "portfolio_targets", "workflow_run"]
-    path: str
-    generated_at: str | None
+class TaskLogResponse(BaseModel):
+    task_id: str
+    stdout: str = ""
+    stderr: str = ""
+

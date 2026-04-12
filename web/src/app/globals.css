@@ -1,0 +1,238 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --background: 39 35% 95%;
+  --foreground: 217 27% 20%;
+  --card: 39 29% 97%;
+  --card-foreground: 217 27% 20%;
+  --popover: 39 29% 98%;
+  --popover-foreground: 217 27% 20%;
+  --primary: 219 37% 24%;
+  --primary-foreground: 38 44% 96%;
+  --secondary: 216 24% 91%;
+  --secondary-foreground: 219 33% 24%;
+  --muted: 35 20% 90%;
+  --muted-foreground: 216 13% 43%;
+  --accent: 214 25% 89%;
+  --accent-foreground: 218 34% 24%;
+  --destructive: 8 52% 50%;
+  --destructive-foreground: 35 40% 97%;
+  --border: 35 17% 82%;
+  --input: 35 18% 86%;
+  --ring: 214 36% 36%;
+  --radius: 0.75rem;
+  --surface-1: 38 30% 98%;
+  --surface-2: 38 23% 95%;
+  --surface-3: 214 28% 93%;
+  --surface-overlay: 35 35% 99%;
+  --canvas-1: 39 40% 92%;
+  --canvas-2: 214 50% 92%;
+  --canvas-3: 35 36% 88%;
+  --shadow-soft: 218 28% 22%;
+  --tone-info: 215 41% 48%;
+  --tone-info-strong: 218 39% 38%;
+  --tone-info-soft: 214 60% 95%;
+  --tone-info-border: 214 35% 77%;
+  --tone-success: 153 29% 42%;
+  --tone-success-strong: 154 29% 36%;
+  --tone-success-soft: 154 42% 94%;
+  --tone-success-border: 153 25% 75%;
+  --tone-warning: 38 68% 54%;
+  --tone-warning-strong: 35 67% 46%;
+  --tone-warning-soft: 40 88% 94%;
+  --tone-warning-border: 39 50% 74%;
+  --tone-danger: 9 49% 52%;
+  --tone-danger-strong: 8 45% 44%;
+  --tone-danger-soft: 10 75% 95%;
+  --tone-danger-border: 9 40% 77%;
+  --tone-neutral: 216 13% 44%;
+  --tone-neutral-strong: 216 19% 32%;
+  --tone-neutral-soft: 214 26% 94%;
+  --tone-neutral-border: 216 17% 78%;
+  --chart-grid: 36 18% 84%;
+  --chart-axis: 216 14% 46%;
+  --chart-tooltip: 36 33% 97%;
+  --chart-tooltip-border: 36 17% 80%;
+  --chart-tooltip-foreground: 217 24% 18%;
+  --chart-1: 215 41% 48%;
+  --chart-2: 153 29% 42%;
+  --chart-3: 38 68% 54%;
+  --chart-4: 9 49% 52%;
+  --chart-5: 48 35% 58%;
+}
+
+.dark {
+  --background: 221 21% 12%;
+  --foreground: 35 34% 92%;
+  --card: 220 18% 16%;
+  --card-foreground: 35 34% 92%;
+  --popover: 220 18% 15%;
+  --popover-foreground: 35 34% 92%;
+  --primary: 35 30% 90%;
+  --primary-foreground: 220 24% 18%;
+  --secondary: 219 19% 24%;
+  --secondary-foreground: 35 34% 92%;
+  --muted: 220 16% 20%;
+  --muted-foreground: 216 16% 70%;
+  --accent: 219 18% 22%;
+  --accent-foreground: 35 34% 92%;
+  --destructive: 8 57% 58%;
+  --destructive-foreground: 35 34% 96%;
+  --border: 218 15% 28%;
+  --input: 218 15% 25%;
+  --ring: 34 28% 78%;
+  --surface-1: 220 18% 18%;
+  --surface-2: 221 16% 14%;
+  --surface-3: 218 18% 22%;
+  --surface-overlay: 219 20% 12%;
+  --canvas-1: 223 20% 16%;
+  --canvas-2: 214 36% 20%;
+  --canvas-3: 31 30% 18%;
+  --shadow-soft: 220 40% 4%;
+  --tone-info: 214 52% 74%;
+  --tone-info-strong: 214 57% 66%;
+  --tone-info-soft: 214 35% 20%;
+  --tone-info-border: 214 26% 34%;
+  --tone-success: 152 35% 66%;
+  --tone-success-strong: 153 43% 56%;
+  --tone-success-soft: 153 30% 18%;
+  --tone-success-border: 153 24% 33%;
+  --tone-warning: 39 72% 66%;
+  --tone-warning-strong: 37 69% 57%;
+  --tone-warning-soft: 39 33% 19%;
+  --tone-warning-border: 39 25% 34%;
+  --tone-danger: 8 68% 71%;
+  --tone-danger-strong: 8 60% 62%;
+  --tone-danger-soft: 8 31% 19%;
+  --tone-danger-border: 8 26% 34%;
+  --tone-neutral: 216 22% 72%;
+  --tone-neutral-strong: 216 20% 80%;
+  --tone-neutral-soft: 218 18% 21%;
+  --tone-neutral-border: 218 14% 34%;
+  --chart-grid: 217 15% 28%;
+  --chart-axis: 216 16% 70%;
+  --chart-tooltip: 220 19% 14%;
+  --chart-tooltip-border: 218 14% 32%;
+  --chart-tooltip-foreground: 35 28% 93%;
+  --chart-1: 214 57% 66%;
+  --chart-2: 153 43% 56%;
+  --chart-3: 37 69% 57%;
+  --chart-4: 8 60% 62%;
+  --chart-5: 48 48% 62%;
+}
+
+@theme inline {
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --color-surface-1: hsl(var(--surface-1));
+  --color-surface-2: hsl(var(--surface-2));
+  --color-surface-3: hsl(var(--surface-3));
+  --color-tone-info: hsl(var(--tone-info));
+  --color-tone-info-soft: hsl(var(--tone-info-soft));
+  --color-tone-info-border: hsl(var(--tone-info-border));
+  --color-tone-success: hsl(var(--tone-success));
+  --color-tone-success-soft: hsl(var(--tone-success-soft));
+  --color-tone-success-border: hsl(var(--tone-success-border));
+  --color-tone-warning: hsl(var(--tone-warning));
+  --color-tone-warning-soft: hsl(var(--tone-warning-soft));
+  --color-tone-warning-border: hsl(var(--tone-warning-border));
+  --color-tone-danger: hsl(var(--tone-danger));
+  --color-tone-danger-soft: hsl(var(--tone-danger-soft));
+  --color-tone-danger-border: hsl(var(--tone-danger-border));
+  --color-tone-neutral: hsl(var(--tone-neutral));
+  --color-tone-neutral-soft: hsl(var(--tone-neutral-soft));
+  --color-tone-neutral-border: hsl(var(--tone-neutral-border));
+  --color-chart-1: hsl(var(--chart-1));
+  --color-chart-2: hsl(var(--chart-2));
+  --color-chart-3: hsl(var(--chart-3));
+  --color-chart-4: hsl(var(--chart-4));
+  --color-chart-5: hsl(var(--chart-5));
+}
+
+@layer base {
+  html {
+    color-scheme: light;
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
+  * {
+    border-color: hsl(var(--border) / 0.85);
+  }
+
+  body {
+    min-height: 100vh;
+    background-color: hsl(var(--background));
+    background-image:
+      radial-gradient(circle at 0% 0%, hsl(var(--canvas-1) / 0.95), transparent 28%),
+      radial-gradient(circle at 100% 4%, hsl(var(--canvas-2) / 0.42), transparent 24%),
+      radial-gradient(circle at 84% 100%, hsl(var(--canvas-3) / 0.6), transparent 32%),
+      linear-gradient(180deg, hsl(var(--background)) 0%, hsl(var(--surface-2)) 100%);
+    background-attachment: fixed;
+    color: hsl(var(--foreground));
+    text-rendering: optimizeLegibility;
+  }
+}
+
+.surface-card {
+  background:
+    linear-gradient(180deg, hsl(var(--surface-1) / 0.98), hsl(var(--card) / 0.94)),
+    radial-gradient(circle at top right, hsl(var(--tone-info) / 0.06), transparent 38%);
+  border: 1px solid hsl(var(--border) / 0.88);
+  box-shadow:
+    0 12px 28px -18px hsl(var(--shadow-soft) / 0.32),
+    inset 0 1px 0 hsl(var(--surface-overlay) / 0.66);
+  backdrop-filter: blur(14px);
+}
+
+.surface-floating {
+  background:
+    linear-gradient(180deg, hsl(var(--surface-overlay) / 0.98), hsl(var(--card) / 0.92));
+  border: 1px solid hsl(var(--border) / 0.9);
+  box-shadow:
+    0 14px 30px -20px hsl(var(--shadow-soft) / 0.36),
+    inset 0 1px 0 hsl(var(--surface-overlay) / 0.7);
+  backdrop-filter: blur(20px);
+}
+
+.surface-soft {
+  background:
+    linear-gradient(180deg, hsl(var(--surface-2) / 0.88), hsl(var(--surface-1) / 0.74));
+  border: 1px solid hsl(var(--border) / 0.72);
+}
+
+.theme-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: 999px;
+  border: 1px solid hsl(var(--tone-info-border) / 0.7);
+  background: linear-gradient(180deg, hsl(var(--tone-info-soft)), hsl(var(--surface-1)));
+  color: hsl(var(--tone-info-strong));
+  padding: 0.35rem 0.8rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}

@@ -1,0 +1,30 @@
+.glass-card {
+  background:
+    linear-gradient(180deg, hsl(var(--surface-1) / 0.94), hsl(var(--card) / 0.82)),
+    radial-gradient(circle at top right, hsl(var(--tone-info) / 0.05), transparent 38%);
+  backdrop-filter: blur(18px);
+  border: 1px solid hsl(var(--border) / 0.78);
+  border-radius: calc(var(--radius) + 2px);
+  box-shadow:
+    0 22px 52px -34px hsl(var(--shadow-soft) / 0.44),
+    inset 0 1px 0 hsl(var(--surface-overlay) / 0.6);
+}
+
+.hover-lift {
+  transition:
+    transform 0.28s cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 0.28s cubic-bezier(0.4, 0, 0.2, 1),
+    border-color 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.hover-lift:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 26px 54px -34px hsl(var(--shadow-soft) / 0.44);
+}
+
+.text-gradient-blue {
+  background: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(var(--tone-info)) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}

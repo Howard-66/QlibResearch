@@ -42,3 +42,26 @@ uv run python scripts/sync_to_valueinvesting.py --model-id watchlist-weekly-lgbm
 - [Native Workflow](docs/03-workflows/native-workflow.md)
 - [Score Snapshot Contract](docs/04-artifacts/score-snapshot.md)
 - [Future UI/API Plan](docs/06-ui-api-future/information-architecture.md)
+
+## Web Workbench
+
+后端：
+
+```bash
+uv sync --extra qlib --extra app
+uv run uvicorn qlib_research.app.main:app --host 0.0.0.0 --port 8010 --reload
+```
+
+前端：
+
+```bash
+cd web
+pnpm install
+pnpm dev --port 3010
+```
+
+端口约定：
+
+- QlibResearch Web: `3010`
+- QlibResearch API: `8010`
+- ValueInvesting 现有开发端口 `3000 / 8000` 视为保留，不复用
