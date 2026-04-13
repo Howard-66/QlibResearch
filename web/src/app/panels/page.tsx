@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { getPanels } from "@/lib/api";
-import { formatBytes, formatCompactDate, formatInteger } from "@/lib/format";
+import { formatBytes, formatCompactDate, formatInteger, formatPathName } from "@/lib/format";
 
 export default async function PanelsPage() {
   const panels = await getPanels();
@@ -14,9 +14,8 @@ export default async function PanelsPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        kicker="Panels"
         title="Panels"
-        description="第一阶段只做 panel 目录与详情只读展示，帮助确认 panel 的日期范围、样本规模、enrichment scope 以及它被哪些 runs 消费。"
+        description=""
         badge={`${panels.length} panels`}
       />
 
@@ -34,13 +33,13 @@ export default async function PanelsPage() {
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <CardTitle className="text-base">{panel.name}</CardTitle>
-                  <p className="mt-1 text-sm text-muted-foreground">{panel.path}</p>
+                  <p className="mt-1 text-sm text-muted-foreground">{formatPathName(panel.path)}</p>
                 </div>
                 <Badge variant="info">{panel.enrichment_scope ?? "unknown"}</Badge>
               </div>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="grid grid-cols-2 gap-3 text-sm">
+              <div className="grid grid-cols-2 gap-3 text-sm xl:grid-cols-3">
                 <div>
                   <div className="text-xs text-muted-foreground">Rows</div>
                   <div className="font-medium">{formatInteger(panel.summary.rows)}</div>
@@ -56,6 +55,12 @@ export default async function PanelsPage() {
                 <div>
                   <div className="text-xs text-muted-foreground">Size</div>
                   <div className="font-medium">{formatBytes(panel.size_bytes)}</div>
+                </div>
+                <div className="col-span-2 xl:col-span-1">
+                  <div className="text-xs text-muted-foreground">Date Range</div>
+                  <div className="font-medium">
+                    {formatCompactDate(panel.summary.start_date)} → {formatCompactDate(panel.summary.end_date)}
+                  </div>
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">

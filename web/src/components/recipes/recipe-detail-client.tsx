@@ -15,7 +15,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { getRecipeTables } from "@/lib/api";
 import { DataTablePayload, RecipeDetail } from "@/lib/types";
-import { formatInteger, formatPercent } from "@/lib/format";
+import { formatInteger, formatNumber, formatPathName, formatPercent } from "@/lib/format";
 
 export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
   const emptyTable = React.useMemo<DataTablePayload>(() => ({ columns: [], rows: [] }), []);
@@ -51,26 +51,38 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
   const walkSummary = getTable("walk_forward_summary").rows[0] ?? {};
   const rollingReport = getTable("rolling_native_report").rows as Record<string, unknown>[];
   const walkReport = getTable("walk_forward_native_report").rows as Record<string, unknown>[];
+  const rollingSignalDiagnostics = React.useMemo(() => filterTableByBundle(getTable("signal_diagnostics"), "rolling"), [getTable]);
+  const walkSignalDiagnostics = React.useMemo(() => filterTableByBundle(getTable("signal_diagnostics"), "walk_forward"), [getTable]);
+  const rollingPortfolioDiagnostics = React.useMemo(() => filterTableByBundle(getTable("portfolio_diagnostics"), "rolling"), [getTable]);
+  const walkPortfolioDiagnostics = React.useMemo(() => filterTableByBundle(getTable("portfolio_diagnostics"), "walk_forward"), [getTable]);
+  const rollingSliceStability = React.useMemo(() => filterTableByBundle(getTable("slice_regime_summary"), "rolling"), [getTable]);
+  const walkSliceStability = React.useMemo(() => filterTableByBundle(getTable("slice_regime_summary"), "walk_forward"), [getTable]);
+  const rollingExecutionGap = React.useMemo(() => filterTableByBundle(getTable("execution_diff_summary"), "rolling"), [getTable]);
+  const walkExecutionGap = React.useMemo(() => filterTableByBundle(getTable("execution_diff_summary"), "walk_forward"), [getTable]);
 
   return (
     <div className="space-y-6">
       <PageHeader
-        kicker={detail.run_id}
         title={detail.recipe_name}
-        description="单 recipe 详情页把标签口径、分数质量、回测兑现、切片稳定性和最新快照放到同一条阅读路径里。"
+        description=""
         badge={String(detail.recipe_config.signal_objective ?? "recipe")}
       />
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <StatCard title="Rolling rank_ic_ir" value={formatPercent(rollingSummary.rank_ic_ir, 1)} />
-        <StatCard title="Rolling topk excess" value={formatPercent(rollingSummary.topk_mean_excess_return_4w, 2)} />
-        <StatCard title="Walk-forward rank_ic_ir" value={formatPercent(walkSummary.rank_ic_ir, 1)} />
-        <StatCard title="Walk-forward topk excess" value={formatPercent(walkSummary.topk_mean_excess_return_4w, 2)} />
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-8">
+        <StatCard dense title="Rolling rank_ic_ir" value={formatNumber(rollingSummary.rank_ic_ir, 3)} />
+        <StatCard dense title="Rolling topk excess" value={formatPercent(rollingSummary.topk_mean_excess_return_4w, 2)} />
+        <StatCard dense title="Rolling net return" value={formatPercent(detail.overview.rolling_net_total_return, 2)} />
+        <StatCard dense title="Rolling max drawdown" value={formatPercent(detail.overview.rolling_max_drawdown, 2)} />
+        <StatCard dense title="Walk-forward rank_ic_ir" value={formatNumber(walkSummary.rank_ic_ir, 3)} />
+        <StatCard dense title="Walk-forward topk excess" value={formatPercent(walkSummary.topk_mean_excess_return_4w, 2)} />
+        <StatCard dense title="Walk-forward net return" value={formatPercent(detail.overview.walk_forward_net_total_return, 2)} />
+        <StatCard dense title="Walk-forward max drawdown" value={formatPercent(detail.overview.walk_forward_max_drawdown, 2)} />
       </div>
 
       <Tabs defaultValue="diagnostics" className="space-y-4" onValueChange={setActiveTab}>
         <TabsList>
           <TabsTrigger value="diagnostics">诊断总览</TabsTrigger>
+          <TabsTrigger value="feature">Feature</TabsTrigger>
           <TabsTrigger value="rolling">Rolling</TabsTrigger>
           <TabsTrigger value="walk-forward">Walk Forward</TabsTrigger>
           <TabsTrigger value="snapshot">Snapshot</TabsTrigger>
@@ -83,26 +95,19 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
               <NodeCard key={node.key} node={node} />
             ))}
           </div>
-          <div className="grid gap-6 xl:grid-cols-2">
-            <SectionCard title="标签定义">
-              <div className="flex flex-wrap gap-2">
-                <Badge variant="info">label: {String(detail.recipe_config.label_recipe ?? "—")}</Badge>
-                <Badge variant="info">objective: {String(detail.recipe_config.signal_objective ?? "—")}</Badge>
-                <Badge variant="neutral">features: {formatInteger(detail.overview.used_feature_count)}</Badge>
-              </div>
-            </SectionCard>
-            <SectionCard title="Feature Prefilter">
-              <DataTable table={getTable("feature_prefilter")} maxRows={12} />
-            </SectionCard>
-          </div>
-          <div className="grid gap-6 xl:grid-cols-2">
-            <SectionCard title="Signal Diagnostics">
-              <DataTable table={getTable("signal_diagnostics")} maxRows={16} />
-            </SectionCard>
-            <SectionCard title="Portfolio Diagnostics">
-              <DataTable table={getTable("portfolio_diagnostics")} maxRows={16} />
-            </SectionCard>
-          </div>
+          <SectionCard title="标签定义">
+            <div className="flex flex-wrap gap-2">
+              <Badge variant="info">label: {String(detail.recipe_config.label_recipe ?? "—")}</Badge>
+              <Badge variant="info">objective: {String(detail.recipe_config.signal_objective ?? "—")}</Badge>
+              <Badge variant="neutral">features: {formatInteger(detail.overview.used_feature_count)}</Badge>
+            </div>
+          </SectionCard>
+        </TabsContent>
+
+        <TabsContent value="feature" className="space-y-6">
+          <SectionCard title="Feature Prefilter">
+            <DataTable table={getTable("feature_prefilter")} maxRows={12} />
+          </SectionCard>
         </TabsContent>
 
         <TabsContent value="rolling" className="space-y-6">
@@ -127,6 +132,18 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
           </div>
           <SectionCard title="Rolling Summary">
             <DataTable table={getTable("rolling_summary")} maxRows={5} />
+          </SectionCard>
+          <SectionCard title="Signal Diagnostics">
+            <DataTable table={rollingSignalDiagnostics} maxRows={16} />
+          </SectionCard>
+          <SectionCard title="Portfolio Diagnostics">
+            <DataTable table={rollingPortfolioDiagnostics} maxRows={16} />
+          </SectionCard>
+          <SectionCard title="Slice Stability">
+            <DataTable table={rollingSliceStability} maxRows={16} />
+          </SectionCard>
+          <SectionCard title="Execution Gap">
+            <DataTable table={rollingExecutionGap} maxRows={6} />
           </SectionCard>
         </TabsContent>
 
@@ -153,24 +170,28 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
           <SectionCard title="Walk-forward Summary">
             <DataTable table={getTable("walk_forward_summary")} maxRows={5} />
           </SectionCard>
-          <SectionCard title="Execution Gap">
-            <DataTable table={getTable("execution_diff_summary")} maxRows={6} />
+          <SectionCard title="Signal Diagnostics">
+            <DataTable table={walkSignalDiagnostics} maxRows={16} />
+          </SectionCard>
+          <SectionCard title="Portfolio Diagnostics">
+            <DataTable table={walkPortfolioDiagnostics} maxRows={16} />
           </SectionCard>
           <SectionCard title="Slice Stability">
-            <DataTable table={getTable("slice_regime_summary")} maxRows={16} />
+            <DataTable table={walkSliceStability} maxRows={16} />
+          </SectionCard>
+          <SectionCard title="Execution Gap">
+            <DataTable table={walkExecutionGap} maxRows={6} />
           </SectionCard>
         </TabsContent>
 
         <TabsContent value="snapshot" className="space-y-6">
           <LazyState queryState={lazyTablesQuery} />
-          <div className="grid gap-6 xl:grid-cols-2">
-            <SectionCard title="Latest Score Snapshot">
-              <DataTable table={getTable("latest_score_frame")} maxRows={20} />
-            </SectionCard>
-            <SectionCard title="Portfolio Targets">
-              <DataTable table={getTable("portfolio_targets")} maxRows={20} />
-            </SectionCard>
-          </div>
+          <SectionCard title="Latest Score Snapshot">
+            <DataTable table={getTable("latest_score_frame")} maxRows={20} />
+          </SectionCard>
+          <SectionCard title="Portfolio Targets">
+            <DataTable table={getTable("portfolio_targets")} maxRows={20} />
+          </SectionCard>
         </TabsContent>
 
         <TabsContent value="artifacts">
@@ -180,7 +201,7 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
                 columns: ["name", "path", "exists", "updated_at"],
                 rows: detail.artifact_inventory.map((item) => ({
                   name: item.name,
-                  path: item.path,
+                  path: formatPathName(item.path),
                   exists: item.exists,
                   updated_at: item.updated_at,
                 })),
@@ -192,6 +213,19 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
       </Tabs>
     </div>
   );
+}
+
+function filterTableByBundle(table: DataTablePayload, bundle: string): DataTablePayload {
+  if (!table.columns.length) {
+    return table;
+  }
+  if (!table.columns.includes("bundle")) {
+    return table;
+  }
+  return {
+    columns: table.columns,
+    rows: table.rows.filter((row) => String(row.bundle ?? "") === bundle),
+  };
 }
 
 function SectionCard({ title, children }: { title: string; children: React.ReactNode }) {

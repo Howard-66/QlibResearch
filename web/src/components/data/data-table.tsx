@@ -10,9 +10,11 @@ import { Button } from "@/components/ui/button";
 export function DataTable({
   table,
   maxRows = 80,
+  rowClassNameKey,
 }: {
   table: DataTablePayload;
   maxRows?: number;
+  rowClassNameKey?: string;
 }) {
   if (!table.columns.length) {
     return <div className="rounded-lg border border-dashed border-border/70 p-6 text-sm text-muted-foreground">当前没有可展示的数据。</div>;
@@ -41,7 +43,10 @@ export function DataTable({
         </TableHeader>
         <TableBody>
           {rows.map((row, index) => (
-            <TableRow key={index}>
+            <TableRow
+              key={index}
+              className={typeof rowClassNameKey === "string" && typeof row[rowClassNameKey] === "string" ? String(row[rowClassNameKey]) : undefined}
+            >
               {table.columns.map((column) => (
                 <TableCell key={column}>{renderCell(row[column])}</TableCell>
               ))}

@@ -77,6 +77,7 @@ RAW_LABEL_COLUMN_MAP = {
 }
 
 MONTH_HEATMAP_COLUMNS = [f"{month:02d}" for month in range(1, 13)]
+NATIVE_WORKFLOW_SUMMARY_SCHEMA_VERSION = 2
 
 RESEARCH_DEFAULT_FEATURE_GROUPS = (
     "technical_core",
@@ -1168,6 +1169,105 @@ def _native_run_summary_row(
     }
 
 
+def _normalize_summary_value(value: Any) -> Any:
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float):
+        return value if np.isfinite(value) else None
+    if pd.isna(value):
+        return None
+    return value
+
+
+def _summary_frame_first_row(frame: pd.DataFrame) -> dict[str, Any]:
+    if frame.empty:
+        return {}
+    return {str(key): _normalize_summary_value(value) for key, value in frame.iloc[0].to_dict().items()}
+
+
+def _summary_frame_max_int(frame: pd.DataFrame, column: str) -> int | None:
+    if frame.empty or column not in frame.columns:
+        return None
+    series = pd.to_numeric(frame[column], errors="coerce").dropna()
+    if series.empty:
+        return None
+    return int(series.max())
+
+
+def _native_summary_lookup(native_summary: pd.DataFrame) -> dict[str, dict[str, Any]]:
+    if native_summary.empty:
+        return {}
+    lookup: dict[str, dict[str, Any]] = {}
+    for row in native_summary.to_dict(orient="records"):
+        bundle_name = row.get("bundle")
+        if bundle_name is None:
+            continue
+        lookup[str(bundle_name)] = {str(key): _normalize_summary_value(value) for key, value in row.items()}
+    return lookup
+
+
+def _build_recipe_overview_row_from_artifacts(recipe_name: str, artifacts: NativeRecipeArtifacts) -> dict[str, Any]:
+    feature_prefilter = artifacts.feature_prefilter_stats
+    rolling_summary_row = _summary_frame_first_row(
+        artifacts.prediction_bundles.get("rolling", {}).get("summary", pd.DataFrame())
+    )
+    walk_forward_summary_row = _summary_frame_first_row(
+        artifacts.prediction_bundles.get("walk_forward", {}).get("summary", pd.DataFrame())
+    )
+    native_lookup = _native_summary_lookup(artifacts.native_summary)
+    rolling_native_row = native_lookup.get("rolling", {})
+    walk_forward_native_row = native_lookup.get("walk_forward", {})
+    used_feature_count = _summary_frame_max_int(feature_prefilter, "selected_feature_count")
+    requested_feature_count = _summary_frame_max_int(feature_prefilter, "requested_feature_count")
+
+    return {
+        "recipe": recipe_name,
+        "requested_feature_count": requested_feature_count,
+        "used_feature_count": used_feature_count if used_feature_count is not None else len(artifacts.used_feature_columns),
+        "rolling_rank_ic_ir": rolling_summary_row.get("rank_ic_ir"),
+        "rolling_topk_mean_excess_return_4w": rolling_summary_row.get("topk_mean_excess_return_4w"),
+        "rolling_net_total_return": rolling_native_row.get("net_total_return"),
+        "rolling_benchmark_total_return": rolling_native_row.get("benchmark_total_return"),
+        "rolling_excess_total_return": rolling_native_row.get("excess_total_return"),
+        "rolling_max_drawdown": rolling_native_row.get("strategy_max_drawdown"),
+        "rolling_excess_drawdown": rolling_native_row.get("strategy_excess_drawdown"),
+        "rolling_cost_drag": rolling_native_row.get("cost_drag"),
+        "rolling_turnover_mean": rolling_native_row.get("turnover_mean"),
+        "walk_forward_rank_ic_ir": walk_forward_summary_row.get("rank_ic_ir"),
+        "walk_forward_topk_mean_excess_return_4w": walk_forward_summary_row.get("topk_mean_excess_return_4w"),
+        "walk_forward_net_total_return": walk_forward_native_row.get("net_total_return"),
+        "walk_forward_benchmark_total_return": walk_forward_native_row.get("benchmark_total_return"),
+        "walk_forward_excess_total_return": walk_forward_native_row.get("excess_total_return"),
+        "walk_forward_max_drawdown": walk_forward_native_row.get("strategy_max_drawdown"),
+        "walk_forward_excess_drawdown": walk_forward_native_row.get("strategy_excess_drawdown"),
+        "walk_forward_cost_drag": walk_forward_native_row.get("cost_drag"),
+        "walk_forward_turnover_mean": walk_forward_native_row.get("turnover_mean"),
+    }
+
+
+def _build_native_workflow_summary_payload(
+    *,
+    config: NativeWorkflowConfig,
+    registry_payload: dict[str, Any],
+    promotion_gate: dict[str, Any],
+    output_dir: Path,
+    artifacts: dict[str, NativeRecipeArtifacts],
+) -> dict[str, Any]:
+    overview_lookup = {
+        recipe_name: _build_recipe_overview_row_from_artifacts(recipe_name, recipe_artifacts)
+        for recipe_name, recipe_artifacts in artifacts.items()
+    }
+    return {
+        "schema_version": NATIVE_WORKFLOW_SUMMARY_SCHEMA_VERSION,
+        "config": asdict(config),
+        "recipe_registry": registry_payload,
+        "promotion_gate": promotion_gate,
+        "promotion_gate_summary": promotion_gate,
+        "overview_lookup": overview_lookup,
+        "output_dir": str(output_dir),
+    }
+
+
 def run_native_recipe(
     config: NativeWorkflowConfig,
     recipe: NativeResearchRecipe,
@@ -1636,12 +1736,13 @@ def run_native_research_workflow(
             if name == "baseline":
                 continue
             promotion_gate[name] = passes_native_promotion_gate(artifacts["baseline"], candidate)
-    summary_payload = {
-        "config": asdict(effective_config),
-        "recipe_registry": registry_payload,
-        "promotion_gate": promotion_gate,
-        "output_dir": str(output_dir),
-    }
+    summary_payload = _build_native_workflow_summary_payload(
+        config=effective_config,
+        registry_payload=registry_payload,
+        promotion_gate=promotion_gate,
+        output_dir=output_dir,
+        artifacts=artifacts,
+    )
     (output_dir / "native_workflow_summary.json").write_text(
         json.dumps(summary_payload, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",

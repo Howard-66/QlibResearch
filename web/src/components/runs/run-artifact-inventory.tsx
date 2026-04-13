@@ -7,6 +7,7 @@ import { DataTable } from "@/components/data/data-table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { getRunArtifactInventory } from "@/lib/api";
+import { formatPathName } from "@/lib/format";
 
 export function RunArtifactInventory({ runId }: { runId: string }) {
   const [enabled, setEnabled] = React.useState(false);
@@ -16,42 +17,44 @@ export function RunArtifactInventory({ runId }: { runId: string }) {
     enabled,
   });
 
-  if (!enabled) {
-    return (
-      <div className="space-y-3">
-        <p className="text-sm text-muted-foreground">artifact 文件树改为按需加载，避免进入 run 详情时枚举整个目录。</p>
-        <Button onClick={() => setEnabled(true)}>加载 Artifact Inventory</Button>
-      </div>
-    );
-  }
-
-  if (inventoryQuery.isLoading) {
-    return <Badge variant="info">加载 artifact inventory…</Badge>;
-  }
-
-  if (inventoryQuery.error || !inventoryQuery.data) {
-    return (
-      <div className="space-y-3">
-        <Badge variant="destructive">artifact inventory 加载失败</Badge>
-        <Button variant="outline" onClick={() => inventoryQuery.refetch()}>
-          重试
-        </Button>
-      </div>
-    );
-  }
-
   return (
-    <DataTable
-      table={{
-        columns: ["name", "path", "exists", "updated_at"],
-        rows: inventoryQuery.data.artifact_inventory.map((item) => ({
-          name: item.name,
-          path: item.path,
-          exists: item.exists,
-          updated_at: item.updated_at,
-        })),
-      }}
-      maxRows={40}
-    />
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="text-base font-semibold">Artifact Inventory</div>
+        <div className="flex flex-wrap items-center gap-2">
+          {!enabled ? (
+            <Button size="sm" onClick={() => setEnabled(true)}>加载 Artifact Inventory</Button>
+          ) : null}
+          {enabled && inventoryQuery.isLoading ? <Badge variant="info">加载中…</Badge> : null}
+          {enabled && inventoryQuery.error ? (
+            <>
+              <Badge variant="destructive">加载失败</Badge>
+              <Button size="sm" variant="outline" onClick={() => inventoryQuery.refetch()}>
+                重试
+              </Button>
+            </>
+          ) : null}
+        </div>
+      </div>
+
+      {!enabled ? (
+        <p className="text-sm text-muted-foreground">按需加载完整产物清单。</p>
+      ) : null}
+
+      {enabled && inventoryQuery.data ? (
+        <DataTable
+          table={{
+            columns: ["name", "path", "exists", "updated_at"],
+            rows: inventoryQuery.data.artifact_inventory.map((item) => ({
+              name: item.name,
+              path: formatPathName(item.path),
+              exists: item.exists,
+              updated_at: item.updated_at,
+            })),
+          }}
+          maxRows={40}
+        />
+      ) : null}
+    </div>
   );
 }

@@ -15,9 +15,8 @@ export default async function OverviewPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        kicker="Artifact-first Workbench"
         title="Overview"
-        description="这里优先回答三个问题：最近有哪些 runs、哪些结果值得继续看、当前 panel 和任务面板是否健康。"
+        description=""
         badge="QlibResearch WebApp"
       />
 

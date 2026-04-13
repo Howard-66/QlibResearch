@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { getCompare } from "@/lib/api";
-import { CompareItemRef, CompareResponse, RunListItem } from "@/lib/types";
+import { CompareItemRef, CompareResponse, CompareTimeseriesSeries, RunListItem } from "@/lib/types";
 
 export function ComparePageClient({ runs }: { runs: RunListItem[] }) {
   const [mounted, setMounted] = React.useState(false);
@@ -33,7 +33,6 @@ export function ComparePageClient({ runs }: { runs: RunListItem[] }) {
     return (
       <div className="space-y-6">
         <PageHeader
-          kicker="Recipe Compare"
           title="Compare"
           description="对比粒度固定在 `(run, recipe, bundle)`。你可以同 run 比不同 recipe，也可以跨 run 比同 recipe 或不同 recipe。"
           badge="2-4 compare items"
@@ -59,7 +58,6 @@ export function ComparePageClient({ runs }: { runs: RunListItem[] }) {
   return (
     <div className="space-y-6">
       <PageHeader
-        kicker="Recipe Compare"
         title="Compare"
         description="对比粒度固定在 `(run, recipe, bundle)`。你可以同 run 比不同 recipe，也可以跨 run 比同 recipe 或不同 recipe。"
         badge="2-4 compare items"
@@ -107,6 +105,11 @@ export function ComparePageClient({ runs }: { runs: RunListItem[] }) {
           <SectionCard title="Summary Metrics">
             <DataTable table={compareQuery.data.summary_metrics} maxRows={12} />
           </SectionCard>
+          {compareQuery.data.net_value_curves.length > 0 ? (
+            <SectionCard title="Net Value Curves">
+              <EChartsChart option={buildNetValueCurveOption(compareQuery.data.net_value_curves)} height={380} />
+            </SectionCard>
+          ) : null}
           <SectionCard title="Execution Gap">
             <DataTable table={compareQuery.data.execution_gap} maxRows={12} />
           </SectionCard>
@@ -258,4 +261,62 @@ function buildFeatureOption(title: string, rows: Record<string, unknown>[]): ECh
       },
     ],
   } as EChartsOption;
+}
+
+function buildNetValueCurveOption(seriesList: CompareTimeseriesSeries[]): EChartsOption {
+  const palette = [
+    "#2563eb",
+    "#ea580c",
+    "#059669",
+    "#dc2626",
+    "#7c3aed",
+  ];
+  const lineSeries = seriesList.map((series, index) => ({
+    name: series.label,
+    type: "line" as const,
+    showSymbol: false,
+    smooth: false,
+    lineStyle: {
+      width: series.role === "benchmark" ? 2 : 2.5,
+      type: series.role === "benchmark" ? "dashed" as const : "solid" as const,
+      opacity: series.role === "benchmark" ? 0.9 : 1,
+    },
+    itemStyle: {
+      color: series.role === "benchmark" ? "#64748b" : palette[index % palette.length],
+    },
+    emphasis: { focus: "series" as const },
+    data: series.points.map((point) => [point.date, point.value]),
+  }));
+
+  return {
+    color: palette,
+    tooltip: {
+      trigger: "axis",
+      valueFormatter: (value) =>
+        typeof value === "number"
+          ? value.toLocaleString(undefined, { maximumFractionDigits: 0 })
+          : String(value ?? "—"),
+    },
+    legend: {
+      type: "scroll",
+      top: 0,
+      textStyle: { color: "#334155", fontSize: 12, fontWeight: 500 },
+    },
+    grid: { left: 56, right: 20, top: 52, bottom: 42 },
+    xAxis: {
+      type: "time" as const,
+      axisLabel: { color: "#64748b" },
+      axisLine: { lineStyle: { color: "#cbd5e1" } },
+    },
+    yAxis: {
+      type: "value" as const,
+      scale: true,
+      axisLabel: {
+        color: "#64748b",
+        formatter: (value: number) => value.toLocaleString(undefined, { notation: "compact", maximumFractionDigits: 1 }),
+      },
+      splitLine: { lineStyle: { color: "#e2e8f0" } },
+    },
+    series: lineSeries,
+  } satisfies EChartsOption;
 }

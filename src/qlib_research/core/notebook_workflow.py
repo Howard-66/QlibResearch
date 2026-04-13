@@ -1985,18 +1985,24 @@ def run_native_notebook_workflow(
     workflow_summary = _safe_read_json(
         resolved_output_dir / "native_workflow_summary.json",
         {
+            "schema_version": None,
             "config": sanitize_for_json(resolved_overrides),
             "recipe_registry": {"executed_recipes": list(recipe_names or [])},
             "promotion_gate": {},
+            "promotion_gate_summary": {},
+            "overview_lookup": {},
             "output_dir": str(resolved_output_dir),
         },
     )
     if run_workflow:
         result = run_native_research_workflow(config, recipe_names=recipe_names)
         workflow_summary = {
+            "schema_version": result.get("schema_version"),
             "config": result["config"],
             "recipe_registry": result["recipe_registry"],
             "promotion_gate": result["promotion_gate"],
+            "promotion_gate_summary": result.get("promotion_gate_summary", result["promotion_gate"]),
+            "overview_lookup": result.get("overview_lookup", {}),
             "output_dir": result["output_dir"],
         }
 

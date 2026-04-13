@@ -88,6 +88,10 @@ class RecipeSummary(BaseModel):
     walk_forward_rank_ic_ir: float | None = None
     rolling_topk_mean_excess_return_4w: float | None = None
     walk_forward_topk_mean_excess_return_4w: float | None = None
+    rolling_net_total_return: float | None = None
+    walk_forward_net_total_return: float | None = None
+    rolling_max_drawdown: float | None = None
+    walk_forward_max_drawdown: float | None = None
     promotion_gate_passed: bool | None = None
 
 
@@ -156,9 +160,22 @@ class CompareItemResult(BaseModel):
     nodes: list[DiagnosticNode] = Field(default_factory=list)
 
 
+class CompareTimeseriesPoint(BaseModel):
+    date: str
+    value: float | None = None
+
+
+class CompareTimeseriesSeries(BaseModel):
+    key: str
+    label: str
+    role: Literal["item", "benchmark"]
+    points: list[CompareTimeseriesPoint] = Field(default_factory=list)
+
+
 class CompareResponse(BaseModel):
     items: list[CompareItemResult] = Field(default_factory=list)
     summary_metrics: DataTablePayload = Field(default_factory=DataTablePayload)
+    net_value_curves: list[CompareTimeseriesSeries] = Field(default_factory=list)
     execution_gap: DataTablePayload = Field(default_factory=DataTablePayload)
     slice_stability: DataTablePayload = Field(default_factory=DataTablePayload)
     feature_importance: dict[str, DataTablePayload] = Field(default_factory=dict)

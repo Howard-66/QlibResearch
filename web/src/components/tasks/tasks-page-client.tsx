@@ -37,7 +37,6 @@ export function TasksPageClient() {
   return (
     <div className="space-y-6">
       <PageHeader
-        kicker="Task Runner"
         title="Tasks"
         description="这里已经接入文件落盘的任务队列。你可以直接从页面发起 panel 导出或 native workflow 运行，并查看 stdout / stderr。"
         badge={`${tasksQuery.data?.length ?? 0} tasks`}

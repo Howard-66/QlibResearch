@@ -6,7 +6,6 @@ export default function SettingsPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        kicker="Runtime Contract"
         title="Settings"
         description="这里固定记录开发端口、包管理器与启动命令，避免和 ValueInvesting 的运行环境混淆。"
         badge="3010 / 8010"

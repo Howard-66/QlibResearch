@@ -2,6 +2,7 @@ import { AlertTriangle, CheckCircle2, CircleHelp, Clock3, XCircle } from "lucide
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { formatPathName, looksLikePath } from "@/lib/format";
 import { DiagnosticNode } from "@/lib/types";
 
 const statusConfig = {
@@ -34,7 +35,7 @@ export function NodeCard({ node }: { node: DiagnosticNode }) {
           {node.evidence.map((evidence) => (
             <div key={evidence.label} className="flex items-start justify-between gap-4 border-b border-border/40 pb-2 last:border-0 last:pb-0">
               <span className="text-muted-foreground">{evidence.label}</span>
-              <span className="text-right font-medium">{String(evidence.value ?? "—")}</span>
+              <span className="text-right font-medium">{formatEvidenceValue(evidence.label, evidence.value)}</span>
             </div>
           ))}
         </div>
@@ -43,4 +44,14 @@ export function NodeCard({ node }: { node: DiagnosticNode }) {
       </CardContent>
     </Card>
   );
+}
+
+function formatEvidenceValue(label: string, value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return "—";
+  }
+  if (typeof value === "string" && (looksLikePath(value) || label.toLowerCase().includes("path") || label.toLowerCase().includes("panel"))) {
+    return formatPathName(value);
+  }
+  return String(value);
 }

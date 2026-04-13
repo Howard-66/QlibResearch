@@ -22,6 +22,8 @@ from qlib_research.app.contracts import (
     CompareItemRef,
     CompareItemResult,
     CompareResponse,
+    CompareTimeseriesPoint,
+    CompareTimeseriesSeries,
     DataTablePayload,
     DiagnosticNode,
     EvidenceItem,
@@ -87,6 +89,7 @@ OPTIONAL_RECIPE_CSVS = {
 }
 
 RUN_INDEX_FILENAME = "workbench_run_index.json"
+RUN_INDEX_SCHEMA_VERSION = 2
 PANEL_SUMMARY_CACHE_DIRNAME = ".workbench_cache"
 
 RUN_INDEX_RECIPE_FILES = {
@@ -315,22 +318,126 @@ def _safe_native_report_return(frame: pd.DataFrame, account: float = 1_000_000.0
     return float(series.iloc[-1] / float(account) - 1.0)
 
 
-def _build_recipe_overview_row(recipe_name: str, recipe_frames: dict[str, Any]) -> dict[str, Any]:
+def _safe_native_report_max_drawdown(frame: pd.DataFrame) -> float | None:
+    if frame.empty:
+        return None
+    candidate_columns = ("relative_drawdown", "strategy_drawdown", "drawdown")
+    for column in candidate_columns:
+        if column not in frame.columns:
+            continue
+        series = pd.to_numeric(frame[column], errors="coerce").dropna()
+        if not series.empty:
+            return float(series.min())
+    return None
+
+
+def _summary_overview_lookup(summary_payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    raw_lookup = summary_payload.get("overview_lookup", {})
+    if not isinstance(raw_lookup, dict):
+        return {}
+    return {str(key): value if isinstance(value, dict) else {} for key, value in raw_lookup.items()}
+
+
+def _promotion_gate_overview_fallback(
+    recipe_name: str,
+    *,
+    baseline_recipe: str | None,
+    promotion_gate_payload: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(promotion_gate_payload, dict) or not promotion_gate_payload:
+        return {}
+
+    def _row_from_gate(gate_payload: dict[str, Any], prefix: str) -> dict[str, Any]:
+        if not isinstance(gate_payload, dict):
+            return {}
+        return {
+            "walk_forward_net_total_return": _normalize_value(gate_payload.get(f"{prefix}_walk_forward_net_total_return")),
+            "walk_forward_max_drawdown": _normalize_value(gate_payload.get(f"{prefix}_walk_forward_drawdown")),
+        }
+
+    if recipe_name == baseline_recipe:
+        for gate_payload in promotion_gate_payload.values():
+            fallback_row = _row_from_gate(gate_payload, "baseline")
+            if any(value is not None for value in fallback_row.values()):
+                return fallback_row
+        return {}
+
+    return _row_from_gate(promotion_gate_payload.get(recipe_name, {}), "candidate")
+
+
+def _merge_overview_rows(primary: dict[str, Any], *fallbacks: dict[str, Any]) -> dict[str, Any]:
+    merged = {str(key): _normalize_value(value) for key, value in primary.items()}
+    for fallback in fallbacks:
+        if not isinstance(fallback, dict):
+            continue
+        for key, value in fallback.items():
+            normalized = _normalize_value(value)
+            if merged.get(key) is None and normalized is not None:
+                merged[str(key)] = normalized
+    return merged
+
+
+def _build_recipe_overview_row(
+    recipe_name: str,
+    recipe_frames: dict[str, Any],
+    *,
+    summary_overview: dict[str, Any] | None = None,
+    existing_overview: dict[str, Any] | None = None,
+    promotion_gate_overview: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     rolling_summary = recipe_frames.get("rolling_summary", pd.DataFrame())
     walk_summary = recipe_frames.get("walk_forward_summary", pd.DataFrame())
     manifest = recipe_frames.get("manifest", {}) if isinstance(recipe_frames.get("manifest", {}), dict) else {}
     rolling_row = _summary_row(rolling_summary)
     walk_row = _summary_row(walk_summary)
-    return {
+    computed_row = {
         "recipe": recipe_name,
         "used_feature_count": rolling_row.get("used_feature_count") or walk_row.get("used_feature_count") or len(manifest.get("used_feature_columns", [])),
         "rolling_rank_ic_ir": rolling_row.get("rank_ic_ir"),
         "rolling_topk_mean_excess_return_4w": rolling_row.get("topk_mean_excess_return_4w"),
         "rolling_net_total_return": _safe_native_report_return(recipe_frames.get("rolling_native_report", pd.DataFrame())),
+        "rolling_max_drawdown": _safe_native_report_max_drawdown(recipe_frames.get("rolling_native_report", pd.DataFrame())),
         "walk_forward_rank_ic_ir": walk_row.get("rank_ic_ir"),
         "walk_forward_topk_mean_excess_return_4w": walk_row.get("topk_mean_excess_return_4w"),
         "walk_forward_net_total_return": _safe_native_report_return(recipe_frames.get("walk_forward_native_report", pd.DataFrame())),
+        "walk_forward_max_drawdown": _safe_native_report_max_drawdown(recipe_frames.get("walk_forward_native_report", pd.DataFrame())),
     }
+    return _merge_overview_rows(
+        computed_row,
+        summary_overview or {},
+        existing_overview or {},
+        promotion_gate_overview or {},
+    )
+
+
+def _resolve_recipe_overview(
+    *,
+    recipe_name: str,
+    recipe_frames: dict[str, Any],
+    summary_payload: dict[str, Any],
+    index_payload: dict[str, Any],
+    baseline_recipe: str | None,
+) -> dict[str, Any]:
+    quick_summary_payload = index_payload.get("quick_summary", {})
+    promotion_gate_payload = (
+        summary_payload.get("promotion_gate", {})
+        or summary_payload.get("promotion_gate_summary", {})
+        or (quick_summary_payload.get("promotion_gate_summary", {}) if isinstance(quick_summary_payload, dict) else {})
+        or {}
+    )
+    return sanitize_for_json(
+        _build_recipe_overview_row(
+            recipe_name,
+            recipe_frames,
+            summary_overview=_summary_overview_lookup(summary_payload).get(recipe_name, {}),
+            existing_overview=_recipe_overview_lookup_from_index_payload(index_payload).get(recipe_name, {}),
+            promotion_gate_overview=_promotion_gate_overview_fallback(
+                recipe_name,
+                baseline_recipe=baseline_recipe,
+                promotion_gate_payload=promotion_gate_payload,
+            ),
+        )
+    )
 
 
 def _scan_native_workflow_artifacts(output_dir: Path) -> dict[str, Any]:
@@ -423,14 +530,29 @@ def _load_recipe_summary_inputs(recipe_dir: Path) -> dict[str, Any]:
     }
 
 
-def _build_run_index_payload(run_dir: Path) -> dict[str, Any]:
+def _build_run_index_payload(run_dir: Path, *, existing_payload: dict[str, Any] | None = None) -> dict[str, Any]:
     run_id = run_dir.name
     summary_payload = _safe_read_json(run_dir / "native_workflow_summary.json", {})
     recipe_names = _resolve_run_recipe_names(run_dir, summary_payload)
     inventory = _run_inventory(run_dir, recipe_names)
     artifact_status, ready_count, total_count, missing = _artifact_status(inventory)
     recipe_configs = _resolve_recipe_registry(summary_payload)
-    promotion_gate_payload = summary_payload.get("promotion_gate", {}) or {}
+    existing_payload = existing_payload if isinstance(existing_payload, dict) else {}
+    existing_quick_summary = existing_payload.get("quick_summary", {})
+    existing_promotion_gate_payload = (
+        existing_quick_summary.get("promotion_gate_summary", {})
+        if isinstance(existing_quick_summary, dict)
+        else {}
+    )
+    promotion_gate_payload = (
+        summary_payload.get("promotion_gate", {})
+        or summary_payload.get("promotion_gate_summary", {})
+        or existing_promotion_gate_payload
+        or {}
+    )
+    summary_overview_lookup = _summary_overview_lookup(summary_payload)
+    existing_overview_lookup = _recipe_overview_lookup_from_index_payload(existing_payload)
+    baseline_recipe = _select_baseline_recipe(recipe_names)
 
     overview_lookup: dict[str, dict[str, Any]] = {}
     recipes: list[RecipeSummary] = []
@@ -438,7 +560,19 @@ def _build_run_index_payload(run_dir: Path) -> dict[str, Any]:
     for recipe_name in recipe_names:
         recipe_dir = run_dir / recipe_name
         summary_inputs = _load_recipe_summary_inputs(recipe_dir)
-        overview_row = sanitize_for_json(_build_recipe_overview_row(recipe_name, summary_inputs))
+        overview_row = sanitize_for_json(
+            _build_recipe_overview_row(
+                recipe_name,
+                summary_inputs,
+                summary_overview=summary_overview_lookup.get(recipe_name, {}),
+                existing_overview=existing_overview_lookup.get(recipe_name, {}),
+                promotion_gate_overview=_promotion_gate_overview_fallback(
+                    recipe_name,
+                    baseline_recipe=baseline_recipe,
+                    promotion_gate_payload=promotion_gate_payload,
+                ),
+            )
+        )
         overview_lookup[recipe_name] = overview_row
         recipes.append(
             _build_recipe_summary(
@@ -450,7 +584,6 @@ def _build_run_index_payload(run_dir: Path) -> dict[str, Any]:
             )
         )
 
-    baseline_recipe = _select_baseline_recipe(recipe_names)
     baseline_row = overview_lookup.get(baseline_recipe or "", {})
     baseline_exec = _safe_read_csv(run_dir / (baseline_recipe or "") / "execution_diff_summary.csv") if baseline_recipe else pd.DataFrame()
     has_execution_gap_issue = False
@@ -476,15 +609,18 @@ def _build_run_index_payload(run_dir: Path) -> dict[str, Any]:
             "rolling_rank_ic_ir": _normalize_value(baseline_row.get("rolling_rank_ic_ir")),
             "rolling_topk_mean_excess_return_4w": _normalize_value(baseline_row.get("rolling_topk_mean_excess_return_4w")),
             "rolling_net_total_return": _normalize_value(baseline_row.get("rolling_net_total_return")),
+            "rolling_max_drawdown": _normalize_value(baseline_row.get("rolling_max_drawdown")),
             "walk_forward_rank_ic_ir": _normalize_value(baseline_row.get("walk_forward_rank_ic_ir")),
             "walk_forward_topk_mean_excess_return_4w": _normalize_value(baseline_row.get("walk_forward_topk_mean_excess_return_4w")),
             "walk_forward_net_total_return": _normalize_value(baseline_row.get("walk_forward_net_total_return")),
+            "walk_forward_max_drawdown": _normalize_value(baseline_row.get("walk_forward_max_drawdown")),
         },
         has_execution_gap_issue=has_execution_gap_issue,
         has_missing_artifacts=artifact_status != "ready",
         updated_at=_path_updated_at(run_dir),
     )
     return {
+        "schema_version": RUN_INDEX_SCHEMA_VERSION,
         "run_id": run_id,
         "updated_at": quick_summary.updated_at,
         "quick_summary": quick_summary.model_dump(mode="json"),
@@ -498,16 +634,19 @@ def _load_run_index_payload(run_dir: Path) -> dict[str, Any]:
     source_mtime = _run_index_source_mtime(run_dir, recipe_names)
     cache_key = str(run_dir)
     cached = _RUN_INDEX_CACHE.get(cache_key)
-    if cached and cached[0] >= source_mtime:
+    if cached and cached[0] >= source_mtime and cached[1].get("schema_version") == RUN_INDEX_SCHEMA_VERSION:
         return cached[1]
 
     index_path = _run_index_path(run_dir)
+    existing_payload = cached[1] if cached else {}
     if index_path.exists() and index_path.stat().st_mtime >= source_mtime:
         payload = _safe_read_json(index_path, {})
-        _RUN_INDEX_CACHE[cache_key] = (index_path.stat().st_mtime, payload)
-        return payload
+        existing_payload = payload
+        if payload.get("schema_version") == RUN_INDEX_SCHEMA_VERSION:
+            _RUN_INDEX_CACHE[cache_key] = (index_path.stat().st_mtime, payload)
+            return payload
 
-    payload = _build_run_index_payload(run_dir)
+    payload = _build_run_index_payload(run_dir, existing_payload=existing_payload)
     index_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     index_mtime = index_path.stat().st_mtime
     _RUN_INDEX_CACHE[cache_key] = (index_mtime, payload)
@@ -886,6 +1025,10 @@ def _build_recipe_summary(
         walk_forward_rank_ic_ir=_normalize_value(overview_row.get("walk_forward_rank_ic_ir")),
         rolling_topk_mean_excess_return_4w=_normalize_value(overview_row.get("rolling_topk_mean_excess_return_4w")),
         walk_forward_topk_mean_excess_return_4w=_normalize_value(overview_row.get("walk_forward_topk_mean_excess_return_4w")),
+        rolling_net_total_return=_normalize_value(overview_row.get("rolling_net_total_return")),
+        walk_forward_net_total_return=_normalize_value(overview_row.get("walk_forward_net_total_return")),
+        rolling_max_drawdown=_normalize_value(overview_row.get("rolling_max_drawdown")),
+        walk_forward_max_drawdown=_normalize_value(overview_row.get("walk_forward_max_drawdown")),
         promotion_gate_passed=_normalize_value(promotion_gate.get("promotion_gate_passed")),
     )
 
@@ -973,11 +1116,22 @@ def get_recipe_detail(run_id: str, recipe_name: str) -> RecipeDetail:
     quick_summary = RunQuickSummary(**index_payload.get("quick_summary", {}))
     if recipe_name not in quick_summary.recipe_names:
         raise FileNotFoundError(f"Unknown recipe '{recipe_name}' for run '{run_id}'")
-    overview_lookup = _recipe_overview_lookup_from_index_payload(index_payload)
     recipe_config = _get_recipe_config(summary_payload, recipe_name)
     panel_path = _resolve_artifact_path(summary_payload.get("config", {}).get("panel_path"))
     panel_summary = _panel_summary_for_path(panel_path)
-    recipe_frames = _load_recipe_frames(run_dir, recipe_name, RUN_DETAIL_NODE_TABLES.union(RECIPE_DETAIL_INITIAL_TABLES))
+    baseline_recipe = quick_summary.baseline_recipe or _select_baseline_recipe(quick_summary.recipe_names)
+    recipe_frames = _load_recipe_frames(
+        run_dir,
+        recipe_name,
+        RUN_DETAIL_NODE_TABLES.union(RECIPE_DETAIL_INITIAL_TABLES).union({"rolling_native_report", "walk_forward_native_report"}),
+    )
+    overview = _resolve_recipe_overview(
+        recipe_name=recipe_name,
+        recipe_frames=recipe_frames,
+        summary_payload=summary_payload,
+        index_payload=index_payload,
+        baseline_recipe=baseline_recipe,
+    )
     tables = _build_table_payloads(recipe_frames, RECIPE_DETAIL_INITIAL_TABLES)
     nodes = _build_recipe_nodes(recipe_name, recipe_frames, recipe_config, panel_summary)
     return RecipeDetail(
@@ -985,7 +1139,7 @@ def get_recipe_detail(run_id: str, recipe_name: str) -> RecipeDetail:
         recipe_name=recipe_name,
         recipe_config=sanitize_for_json(recipe_config),
         manifest=sanitize_for_json(recipe_frames.get("manifest", {})),
-        overview=sanitize_for_json(overview_lookup.get(recipe_name, {})),
+        overview=overview,
         nodes=nodes,
         tables=tables,
         artifact_inventory=_recipe_inventory(run_dir / recipe_name, prefix=recipe_name),
@@ -1009,6 +1163,32 @@ def get_recipe_tables(run_id: str, recipe_name: str, table_names: Iterable[str])
     )
 
 
+def _compare_curve_points(report_frame: pd.DataFrame, value_column: str) -> list[CompareTimeseriesPoint]:
+    if report_frame.empty or "datetime" not in report_frame.columns or value_column not in report_frame.columns:
+        return []
+    frame = report_frame[["datetime", value_column]].copy()
+    frame["datetime"] = pd.to_datetime(frame["datetime"], errors="coerce")
+    frame[value_column] = pd.to_numeric(frame[value_column], errors="coerce")
+    frame = frame.dropna(subset=["datetime"]).sort_values("datetime")
+    points: list[CompareTimeseriesPoint] = []
+    for row in frame.to_dict(orient="records"):
+        points.append(
+            CompareTimeseriesPoint(
+                date=pd.Timestamp(row["datetime"]).isoformat(),
+                value=_normalize_value(row.get(value_column)),
+            )
+        )
+    return points
+
+
+def _compare_curve_signature(points: list[CompareTimeseriesPoint]) -> tuple[tuple[str, float | None], ...]:
+    signature: list[tuple[str, float | None]] = []
+    for point in points:
+        value = None if point.value is None else round(float(point.value), 10)
+        signature.append((point.date, value))
+    return tuple(signature)
+
+
 def compare_recipe_items(items: list[CompareItemRef]) -> CompareResponse:
     compare_items: list[CompareItemResult] = []
     metric_rows: list[dict[str, Any]] = []
@@ -1016,11 +1196,14 @@ def compare_recipe_items(items: list[CompareItemRef]) -> CompareResponse:
     slice_rows: list[dict[str, Any]] = []
     feature_importance: dict[str, DataTablePayload] = {}
     snapshots: dict[str, DataTablePayload] = {}
+    net_value_curves: list[CompareTimeseriesSeries] = []
+    benchmark_candidates: list[list[CompareTimeseriesPoint]] = []
 
     run_contexts: dict[str, tuple[Path, dict[str, Any], dict[str, Any]]] = {}
     recipe_frame_cache: dict[tuple[str, str], dict[str, Any]] = {}
+    label_counts: dict[str, int] = {}
 
-    for item in items:
+    for index, item in enumerate(items):
         if item.run_id not in run_contexts:
             run_contexts[item.run_id] = _collect_run_context(item.run_id)
         run_dir, summary_payload, index_payload = run_contexts[item.run_id]
@@ -1042,7 +1225,9 @@ def compare_recipe_items(items: list[CompareItemRef]) -> CompareResponse:
         report_tail = _last_row(report_frame)
         exec_rows = exec_frame.to_dict(orient="records") if not exec_frame.empty else []
         matching_exec = next((row for row in exec_rows if row.get("bundle") == item.bundle), {})
-        label = f"{item.run_id} / {item.recipe_name} / {item.bundle}"
+        base_label = f"{item.run_id} / {item.recipe_name} / {item.bundle}"
+        label_counts[base_label] = label_counts.get(base_label, 0) + 1
+        label = base_label if label_counts[base_label] == 1 else f"{base_label} ({label_counts[base_label]})"
         metrics = {
             "rank_ic_ir": summary_row.get("rank_ic_ir"),
             "topk_mean_excess_return_4w": summary_row.get("topk_mean_excess_return_4w"),
@@ -1064,6 +1249,21 @@ def compare_recipe_items(items: list[CompareItemRef]) -> CompareResponse:
         metric_rows.append({"item": label, **sanitize_for_json(metrics)})
         execution_rows.append({"item": label, **sanitize_for_json(matching_exec)})
 
+        net_value_points = _compare_curve_points(report_frame, "net_value")
+        if net_value_points:
+            net_value_curves.append(
+                CompareTimeseriesSeries(
+                    key=f"item-{index}",
+                    label=label,
+                    role="item",
+                    points=net_value_points,
+                )
+            )
+
+        benchmark_points = _compare_curve_points(report_frame, "benchmark_value")
+        if benchmark_points:
+            benchmark_candidates.append(benchmark_points)
+
         for row in slice_frame.to_dict(orient="records") if not slice_frame.empty else []:
             if row.get("bundle") == item.bundle:
                 slice_rows.append({"item": label, **row})
@@ -1079,9 +1279,22 @@ def compare_recipe_items(items: list[CompareItemRef]) -> CompareResponse:
             snapshot_df = snapshot_df.sort_values(sort_column, ascending=False).head(20)
         snapshots[label] = _frame_to_payload(snapshot_df)
 
+    if benchmark_candidates and len(benchmark_candidates) == len(items):
+        first_signature = _compare_curve_signature(benchmark_candidates[0])
+        if first_signature and all(_compare_curve_signature(points) == first_signature for points in benchmark_candidates[1:]):
+            net_value_curves.append(
+                CompareTimeseriesSeries(
+                    key="shared-benchmark",
+                    label="Shared benchmark",
+                    role="benchmark",
+                    points=benchmark_candidates[0],
+                )
+            )
+
     return CompareResponse(
         items=compare_items,
         summary_metrics=_frame_to_payload(pd.DataFrame(metric_rows)),
+        net_value_curves=net_value_curves,
         execution_gap=_frame_to_payload(pd.DataFrame(execution_rows)),
         slice_stability=_frame_to_payload(pd.DataFrame(slice_rows)),
         feature_importance=feature_importance,

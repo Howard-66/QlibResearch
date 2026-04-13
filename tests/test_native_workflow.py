@@ -6,7 +6,10 @@ import pytest
 from scripts.evaluate_native_weekly import parse_args
 from qlib_research.core.notebook_workflow import load_native_workflow_artifacts, run_native_notebook_workflow
 from qlib_research.core.qlib_native_workflow import (
+    NativeRecipeArtifacts,
+    NativeResearchRecipe,
     NativeWorkflowConfig,
+    _build_native_workflow_summary_payload,
     _build_parallel_recipe_heartbeat,
     _prime_parallel_workflow_inputs,
     build_annual_return_heatmap_frame,
@@ -90,6 +93,77 @@ def test_build_native_recipe_registry_uses_feature_spec(tmp_path):
     assert baseline.excluded_features == ("macro_industry_match",)
     assert baseline.industry_normalization == "none"
     assert baseline.model_params["num_boost_round"] == 123
+
+
+def test_build_native_workflow_summary_payload_collects_recipe_overview(tmp_path):
+    artifacts = {
+        "baseline": NativeRecipeArtifacts(
+            recipe=NativeResearchRecipe(name="baseline"),
+            latest_score_frame=pd.DataFrame(),
+            prediction_bundles={
+                "rolling": {"summary": pd.DataFrame([{"rank_ic_ir": 0.11, "topk_mean_excess_return_4w": 0.02}])},
+                "walk_forward": {"summary": pd.DataFrame([{"rank_ic_ir": 0.07, "topk_mean_excess_return_4w": 0.01}])},
+            },
+            native_results={},
+            validation_results={},
+            executor_comparison_summary=pd.DataFrame(),
+            signal_diagnostics=pd.DataFrame(),
+            portfolio_diagnostics=pd.DataFrame(),
+            slice_regime_summary=pd.DataFrame(),
+            feature_prefilter_stats=pd.DataFrame([{"requested_feature_count": 5, "selected_feature_count": 3}]),
+            feature_corr_candidates=pd.DataFrame(),
+            feature_redundancy=pd.DataFrame(),
+            feature_outlier_audit=pd.DataFrame(),
+            used_feature_columns=["ma20", "ma50", "pb"],
+            native_provider_dir=tmp_path,
+            benchmark_frames={},
+            native_summary=pd.DataFrame(
+                [
+                    {
+                        "bundle": "rolling",
+                        "net_total_return": 0.12,
+                        "benchmark_total_return": 0.04,
+                        "excess_total_return": 0.08,
+                        "strategy_max_drawdown": -0.07,
+                        "strategy_excess_drawdown": -0.03,
+                        "cost_drag": 0.01,
+                        "turnover_mean": 0.25,
+                    },
+                    {
+                        "bundle": "walk_forward",
+                        "net_total_return": 0.08,
+                        "benchmark_total_return": 0.03,
+                        "excess_total_return": 0.05,
+                        "strategy_max_drawdown": -0.05,
+                        "strategy_excess_drawdown": -0.02,
+                        "cost_drag": 0.02,
+                        "turnover_mean": 0.3,
+                    },
+                ]
+            ),
+        )
+    }
+
+    payload = _build_native_workflow_summary_payload(
+        config=NativeWorkflowConfig(output_dir=tmp_path),
+        registry_payload={"executed_recipes": ["baseline"]},
+        promotion_gate={},
+        output_dir=tmp_path,
+        artifacts=artifacts,
+    )
+
+    overview = payload["overview_lookup"]["baseline"]
+
+    assert payload["schema_version"] == 2
+    assert payload["promotion_gate_summary"] == {}
+    assert overview["requested_feature_count"] == 5
+    assert overview["used_feature_count"] == 3
+    assert overview["rolling_rank_ic_ir"] == pytest.approx(0.11)
+    assert overview["rolling_net_total_return"] == pytest.approx(0.12)
+    assert overview["rolling_max_drawdown"] == pytest.approx(-0.07)
+    assert overview["walk_forward_rank_ic_ir"] == pytest.approx(0.07)
+    assert overview["walk_forward_net_total_return"] == pytest.approx(0.08)
+    assert overview["walk_forward_max_drawdown"] == pytest.approx(-0.05)
 
 
 def test_run_native_notebook_workflow_accepts_cli_style_overrides(tmp_path):
