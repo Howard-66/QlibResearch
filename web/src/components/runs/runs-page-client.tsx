@@ -114,7 +114,7 @@ function renderQuickJudgeContent(selected: RunListItem) {
               event.stopPropagation();
             }}
           >
-            <Link href="/compare">
+            <Link href={`/compare?runId=${encodeURIComponent(selected.run_id)}`}>
               去 Compare 选择 recipe
               <FolderSearch className="h-4 w-4" />
             </Link>

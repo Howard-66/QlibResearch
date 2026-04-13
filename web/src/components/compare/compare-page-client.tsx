@@ -14,14 +14,25 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { getCompare } from "@/lib/api";
 import { CompareItemRef, CompareResponse, CompareTimeseriesSeries, RunListItem } from "@/lib/types";
 
-export function ComparePageClient({ runs }: { runs: RunListItem[] }) {
+export function ComparePageClient({
+  runs,
+  initialRunId,
+}: {
+  runs: RunListItem[];
+  initialRunId?: string;
+}) {
   const [mounted, setMounted] = React.useState(false);
-  const [items, setItems] = React.useState<CompareItemRef[]>(() => buildDefaultSelections(runs));
+  const [items, setItems] = React.useState<CompareItemRef[]>(() => buildDefaultSelections(runs, initialRunId));
   const [submittedItems, setSubmittedItems] = React.useState<CompareItemRef[] | null>(null);
 
   React.useEffect(() => {
     setMounted(true);
   }, []);
+
+  React.useEffect(() => {
+    setItems(buildDefaultSelections(runs, initialRunId));
+    setSubmittedItems(null);
+  }, [runs, initialRunId]);
 
   const compareQuery = useQuery<CompareResponse>({
     queryKey: ["compare", submittedItems],
@@ -142,13 +153,15 @@ export function ComparePageClient({ runs }: { runs: RunListItem[] }) {
   );
 }
 
-function buildDefaultSelections(runs: RunListItem[]) {
-  const first = runs[0];
-  const secondRecipe = first?.quick_summary.recipe_names[1] ?? first?.quick_summary.recipe_names[0] ?? "baseline";
+function buildDefaultSelections(runs: RunListItem[], preferredRunId?: string) {
+  const preferred = runs.find((run) => run.run_id === preferredRunId);
+  const first = preferred ?? runs[0];
+  const firstRecipe = first?.quick_summary.recipe_names[0] ?? "baseline";
+  const secondRecipe = first?.quick_summary.recipe_names[1] ?? firstRecipe;
   return [
     {
       run_id: first?.run_id ?? "",
-      recipe_name: first?.quick_summary.recipe_names[0] ?? "baseline",
+      recipe_name: firstRecipe,
       bundle: "rolling" as const,
     },
     {
