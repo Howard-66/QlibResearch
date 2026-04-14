@@ -18,11 +18,15 @@ from qlib_research.app.contracts import (
     RecipeDetail,
     RecipeTablesResponse,
     RecipeSummary,
+    ResearchTaskDetail,
     ResearchTaskSummary,
     RunDetail,
     RunListItem,
     RunNativeWorkflowTaskRequest,
+    TaskBoardResponse,
     TaskLogResponse,
+    TaskPresetResponse,
+    TaskReorderRequest,
 )
 from qlib_research.app.services import (
     compare_recipe_items,
@@ -36,10 +40,16 @@ from qlib_research.app.services import (
     get_run_artifact_inventory,
     get_task,
     get_task_logs,
+    get_panel_task_preset,
+    get_run_task_preset,
     list_panels,
     list_run_recipes,
     list_runs,
     list_tasks,
+    remove_task,
+    reorder_tasks,
+    run_task_queue,
+    stop_current_task,
 )
 
 app = FastAPI(
@@ -143,8 +153,8 @@ def api_get_panel(panel_id: str) -> PanelDetail:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@app.get("/api/tasks", response_model=list[ResearchTaskSummary])
-def api_list_tasks() -> list[ResearchTaskSummary]:
+@app.get("/api/tasks", response_model=TaskBoardResponse)
+def api_list_tasks() -> TaskBoardResponse:
     return list_tasks()
 
 
@@ -158,8 +168,50 @@ def api_create_native_workflow_task(request: RunNativeWorkflowTaskRequest) -> Re
     return create_native_workflow_task(request)
 
 
-@app.get("/api/tasks/{task_id}", response_model=ResearchTaskSummary)
-def api_get_task(task_id: str) -> ResearchTaskSummary:
+@app.post("/api/tasks/run-queue", response_model=TaskBoardResponse)
+def api_run_task_queue() -> TaskBoardResponse:
+    return run_task_queue()
+
+
+@app.post("/api/tasks/stop-current", response_model=TaskBoardResponse)
+def api_stop_current_task() -> TaskBoardResponse:
+    return stop_current_task()
+
+
+@app.post("/api/tasks/reorder", response_model=TaskBoardResponse)
+def api_reorder_tasks(request: TaskReorderRequest) -> TaskBoardResponse:
+    try:
+        return reorder_tasks(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/tasks/{task_id}/remove", response_model=TaskBoardResponse)
+def api_remove_task(task_id: str) -> TaskBoardResponse:
+    try:
+        return remove_task(task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/tasks/presets/panels/{panel_id}", response_model=TaskPresetResponse)
+def api_get_panel_task_preset(panel_id: str) -> TaskPresetResponse:
+    try:
+        return get_panel_task_preset(panel_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/tasks/presets/runs/{run_id}", response_model=TaskPresetResponse)
+def api_get_run_task_preset(run_id: str) -> TaskPresetResponse:
+    try:
+        return get_run_task_preset(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/tasks/{task_id}", response_model=ResearchTaskDetail)
+def api_get_task(task_id: str) -> ResearchTaskDetail:
     try:
         return get_task(task_id)
     except FileNotFoundError as exc:

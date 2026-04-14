@@ -259,6 +259,8 @@ def build_native_workflow_cli_command(
         f"  --seed {int(config.seed)}",
         f"  --reproducibility-mode {shlex.quote(str(config.reproducibility_mode))}",
     ]
+    if config.task_description:
+        command_lines.append(f"  --task-description {shlex.quote(str(config.task_description))}")
     if config.execution_panel_path:
         command_lines.append(f"  --execution-panel {shlex.quote(str(config.execution_panel_path))}")
     if config.feature_spec_path:
@@ -365,6 +367,11 @@ def export_or_load_panel(
     batch_size: int = 300,
     return_panel: bool = True,
     enrichment_scope: str | None = None,
+    feature_groups: Sequence[str] | None = None,
+    included_features: Sequence[str] | None = None,
+    excluded_features: Sequence[str] | None = None,
+    universe_mode: str | None = None,
+    task_description: str | None = None,
 ) -> dict[str, Any]:
     resolved_path = _resolve_path(panel_path)
     export_performed = False
@@ -378,6 +385,11 @@ def export_or_load_panel(
             batch_size=batch_size,
             universe_profile=universe_profile,
             enrichment_scope=enrichment_scope,
+            feature_groups=feature_groups,
+            included_features=included_features,
+            excluded_features=excluded_features,
+            universe_mode=universe_mode,
+            task_description=task_description,
         )
         export_performed = True
     elif run_export == "auto_if_missing":
@@ -390,6 +402,11 @@ def export_or_load_panel(
                 batch_size=batch_size,
                 universe_profile=universe_profile,
                 enrichment_scope=enrichment_scope,
+                feature_groups=feature_groups,
+                included_features=included_features,
+                excluded_features=excluded_features,
+                universe_mode=universe_mode,
+                task_description=task_description,
             )
             export_performed = True
     elif run_export is False or run_export == "never":

@@ -10,8 +10,10 @@ from qlib_research.app.contracts import (
     DataTablePayload,
     RunListItem,
     RunQuickSummary,
+    TaskReorderRequest,
 )
 from qlib_research.app import services
+from qlib_research.core.weekly_feature_panel import select_panel_feature_columns
 
 
 def test_list_runs_returns_quick_summary(monkeypatch, tmp_path):
@@ -305,6 +307,18 @@ def test_get_panel_detail_reads_panel_and_links_runs(monkeypatch, tmp_path):
             "close": [10.0, 11.2],
         }
     ).to_csv(panel_path, index=False)
+    (panels_root / "demo_panel.csv.metadata.json").write_text(
+        json.dumps(
+            {
+                "panel_enrichment_scope": "research_full",
+                "universe_mode": "fixed_universe",
+                "universe_profile": "csi300",
+                "requested_start_date": "2010-01-01",
+                "requested_end_date": None,
+            }
+        ),
+        encoding="utf-8",
+    )
 
     monkeypatch.setattr(services, "PANELS_ROOT", panels_root)
     monkeypatch.setattr(
@@ -330,6 +344,8 @@ def test_get_panel_detail_reads_panel_and_links_runs(monkeypatch, tmp_path):
     assert detail.summary["rows"] == 2
     assert "demo_run" in detail.linked_runs
     assert "close" in detail.columns
+    assert detail.universe_mode == "fixed_universe"
+    assert detail.universe_profile == "csi300"
 
 
 def test_get_panel_detail_normalizes_array_like_samples(monkeypatch, tmp_path):
@@ -361,20 +377,32 @@ def test_get_panel_detail_normalizes_array_like_samples(monkeypatch, tmp_path):
 def test_create_export_panel_task_persists_command(monkeypatch, tmp_path):
     tasks_root = tmp_path / "artifacts" / "app_tasks"
     monkeypatch.setattr(services, "TASKS_ROOT", tasks_root)
-    monkeypatch.setattr(services, "_spawn_task_worker", lambda task_id: None)
 
     summary = services.create_export_panel_task(
         services.ExportPanelTaskRequest(
             output="artifacts/panels/from_test.parquet",
             universe_profile="csi300",
+            universe_mode="fixed_universe",
+            feature_groups=["technical_core"],
+            included_features=["ma20"],
+            excluded_features=["amount"],
         )
     )
 
     task_file = tasks_root / summary.task_id / "task.json"
+    queue_file = tasks_root / services.TASK_QUEUE_FILENAME
     assert task_file.exists()
+    assert queue_file.exists()
     payload = json.loads(task_file.read_text(encoding="utf-8"))
     assert payload["task_kind"] == "export_panel"
     assert "scripts/export_weekly_panel.py" in " ".join(payload["command"])
+    assert "--feature-group" in payload["command"]
+    assert "--include-feature" in payload["command"]
+    assert "--exclude-feature" in payload["command"]
+    assert "--universe-mode" in payload["command"]
+    queue_payload = json.loads(queue_file.read_text(encoding="utf-8"))
+    assert queue_payload["queued_task_ids"] == [summary.task_id]
+    assert summary.status == "queued"
 
 
 def test_compare_recipe_items_returns_recipe_level_payload(monkeypatch):
@@ -453,3 +481,203 @@ def test_compare_recipe_items_returns_recipe_level_payload(monkeypatch):
     assert response.net_value_curves[-1].label == "Shared benchmark"
     assert response.net_value_curves[0].points[-1].value == pytest.approx(1_120_000)
     assert response.feature_importance
+
+
+def test_task_dispatcher_runs_queue_serially(monkeypatch, tmp_path):
+    tasks_root = tmp_path / "artifacts" / "app_tasks"
+    monkeypatch.setattr(services, "TASKS_ROOT", tasks_root)
+
+    first = services.create_export_panel_task(services.ExportPanelTaskRequest(output="artifacts/panels/first.parquet"))
+    second = services.create_export_panel_task(services.ExportPanelTaskRequest(output="artifacts/panels/second.parquet"))
+    execution_order: list[str] = []
+
+    def fake_task_worker(task_dir: Path) -> int:
+        execution_order.append(task_dir.name)
+        services.update_task_status(
+            task_dir,
+            status="succeeded",
+            started_at="2026-04-13T10:00:00+08:00",
+            finished_at="2026-04-13T10:01:00+08:00",
+            message="Task completed",
+            metadata={"worker_pid": 1000, "return_code": 0},
+        )
+        services._write_json_file(
+            task_dir / "result.json",
+            {"task_id": task_dir.name, "status": "succeeded", "return_code": 0},
+        )
+        return 0
+
+    monkeypatch.setattr(services, "task_worker_run", fake_task_worker)
+
+    return_code = services.task_dispatcher_run()
+    board = services.list_tasks()
+
+    assert return_code == 0
+    assert execution_order == [first.task_id, second.task_id]
+    assert board.running_task is None
+    assert board.queue_state.dispatcher_status == "idle"
+    assert board.queue_state.queued_task_ids == []
+    assert {task.task_id for task in board.history_tasks[:2]} == {first.task_id, second.task_id}
+
+
+def test_reorder_and_remove_queued_tasks(monkeypatch, tmp_path):
+    tasks_root = tmp_path / "artifacts" / "app_tasks"
+    monkeypatch.setattr(services, "TASKS_ROOT", tasks_root)
+
+    first = services.create_export_panel_task(services.ExportPanelTaskRequest(output="artifacts/panels/first.parquet"))
+    second = services.create_export_panel_task(services.ExportPanelTaskRequest(output="artifacts/panels/second.parquet"))
+
+    board = services.reorder_tasks(TaskReorderRequest(queued_task_ids=[second.task_id, first.task_id]))
+    assert [task.task_id for task in board.queued_tasks] == [second.task_id, first.task_id]
+
+    board = services.remove_task(second.task_id)
+    assert [task.task_id for task in board.queued_tasks] == [first.task_id]
+    assert not (tasks_root / second.task_id).exists()
+
+
+def test_get_run_and_panel_task_presets(monkeypatch, tmp_path):
+    workflow_root = tmp_path / "artifacts" / "native_workflow"
+    panels_root = tmp_path / "artifacts" / "panels"
+    tasks_root = tmp_path / "artifacts" / "app_tasks"
+    workflow_root.mkdir(parents=True)
+    panels_root.mkdir(parents=True)
+    monkeypatch.setattr(services, "NATIVE_WORKFLOW_ROOT", workflow_root)
+    monkeypatch.setattr(services, "PANELS_ROOT", panels_root)
+    monkeypatch.setattr(services, "TASKS_ROOT", tasks_root)
+
+    panel_path = panels_root / "demo_panel.csv"
+    pd.DataFrame(
+        {
+            "datetime": ["2026-01-03", "2026-01-10"],
+            "instrument": ["AAA.SH", "BBB.SZ"],
+            "in_csi300": [True, True],
+            "ma20": [10.0, 11.0],
+        }
+    ).to_csv(panel_path, index=False)
+
+    run_dir = workflow_root / "demo_run"
+    recipe_dir = run_dir / "baseline"
+    recipe_dir.mkdir(parents=True)
+    (run_dir / "native_workflow_summary.json").write_text(
+        json.dumps(
+            {
+                "config": {
+                    "universe_profile": "csi300",
+                    "panel_path": str(panel_path),
+                    "output_dir": "artifacts/native_workflow/demo_run",
+                },
+                "recipe_registry": {"executed_recipes": ["baseline"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    pd.DataFrame([{"rank_ic_ir": 0.12}]).to_csv(recipe_dir / "rolling_summary.csv", index=False)
+    pd.DataFrame([{"rank_ic_ir": 0.18}]).to_csv(recipe_dir / "walk_forward_summary.csv", index=False)
+    (recipe_dir / "native_workflow_manifest.json").write_text(json.dumps({"used_feature_columns": ["ma20"]}), encoding="utf-8")
+
+    historical_task = services.ResearchTaskSummary(
+        task_id="task-demo-export",
+        task_kind="export_panel",
+        status="succeeded",
+        display_name="Export Panel",
+        requested_by="webapp",
+        created_at="2026-04-12T10:00:00+08:00",
+        finished_at="2026-04-12T10:10:00+08:00",
+        output_dir=str(panel_path),
+        message="Task completed",
+        command=["uv", "run", "python", "scripts/export_weekly_panel.py", "--output", str(panel_path)],
+        config_payload={
+            "display_name": "Export Panel",
+            "requested_by": "webapp",
+            "output": str(panel_path),
+            "enrichment_scope": "research_full",
+            "feature_groups": ["technical_core"],
+            "included_features": ["ma20"],
+            "excluded_features": ["amount"],
+        },
+        logs={},
+        metadata={},
+        source_ref=services.TaskSourceRef(kind="panel", source_id=panel_path.name, label=panel_path.name, path=str(panel_path)),
+    )
+    services._write_task(historical_task)
+
+    run_preset = services.get_run_task_preset("demo_run")
+    panel_preset = services.get_panel_task_preset("demo_panel.csv")
+
+    assert run_preset.task_kind == "run_native_workflow"
+    assert run_preset.payload["recipe_names"] == ["baseline"]
+    assert str(run_preset.payload["config_payload"]["output_dir"]).startswith("artifacts/native_workflow/demo_run-rerun-")
+    assert panel_preset.task_kind == "export_panel"
+    assert panel_preset.payload["feature_groups"] == ["technical_core"]
+    assert panel_preset.payload["included_features"] == ["ma20"]
+
+
+def test_select_panel_feature_columns_preserves_base_columns():
+    panel = pd.DataFrame(
+        {
+            "symbol": ["AAA.SH"],
+            "time": ["2026-01-03"],
+            "in_csi300": [True],
+            "ma20": [10.0],
+            "rsi": [55.0],
+            "amount": [1_000_000],
+        }
+    )
+
+    selected = select_panel_feature_columns(
+        panel,
+        feature_groups=["technical_core"],
+        included_features=["rsi"],
+        excluded_features=["amount"],
+    )
+
+    assert "symbol" in selected.columns
+    assert "time" in selected.columns
+    assert "in_csi300" in selected.columns
+    assert "ma20" in selected.columns
+    assert "rsi" in selected.columns
+    assert "amount" not in selected.columns
+
+
+def test_create_native_workflow_task_falls_back_to_source_run_execution_panel(monkeypatch, tmp_path):
+    tasks_root = tmp_path / "artifacts" / "app_tasks"
+    execution_panel = tmp_path / "artifacts" / "native_workflow" / "source_run" / "csi300_execution_panel.parquet"
+    execution_panel.parent.mkdir(parents=True, exist_ok=True)
+    execution_panel.write_text("placeholder", encoding="utf-8")
+
+    monkeypatch.setattr(services, "TASKS_ROOT", tasks_root)
+    monkeypatch.setattr(
+        services,
+        "get_run_detail",
+        lambda run_id: services.RunDetail(
+            run_id=run_id,
+            output_dir=str(execution_panel.parent),
+            quick_summary=RunQuickSummary(run_id=run_id, output_dir=str(execution_panel.parent), recipe_names=["baseline"], artifact_status="ready"),
+            config={"execution_panel_path": str(execution_panel)},
+            recipe_registry={},
+            promotion_gate={},
+            nodes=[],
+            recipes=[],
+            artifact_inventory=[],
+        ),
+    )
+
+    request = services.RunNativeWorkflowTaskRequest(
+        display_name="rerun task",
+        requested_by="webapp",
+        recipe_names=["baseline"],
+        source_ref=services.TaskSourceRef(kind="run", source_id="source_run", label="source_run", path=str(execution_panel.parent)),
+        config_payload={
+            "panel_path": "artifacts/panels/csi300_weekly_20260410.parquet",
+            "output_dir": "artifacts/native_workflow/target_run",
+            "execution_panel_path": "artifacts/native_workflow/target_run/csi300_weekly_20260410.parquet",
+            "universe_profile": "csi300",
+            "run_export": "never",
+        },
+    )
+
+    task = services.create_native_workflow_task(request)
+
+    assert task.config_payload["config_payload"]["execution_panel_path"] == str(execution_panel)
+    assert "--execution-panel" in task.command
+    assert str(execution_panel) in task.command

@@ -7,7 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 TaskKind = Literal["export_panel", "run_native_workflow", "run_convergence", "publish_model", "sync_model"]
-TaskStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+TaskStatus = Literal["queued", "running", "stopping", "succeeded", "failed", "cancelled"]
 DiagnosticStatus = Literal["healthy", "warning", "danger", "missing", "info"]
 NodeKey = Literal[
     "panel_input",
@@ -55,6 +55,7 @@ class DiagnosticNode(BaseModel):
 class RunQuickSummary(BaseModel):
     run_id: str
     output_dir: str
+    task_description: str | None = None
     universe_profile: str | None = None
     panel_path: str | None = None
     start_date: str | None = None
@@ -134,9 +135,14 @@ class PanelSummary(BaseModel):
     name: str
     path: str
     format: str
+    task_description: str | None = None
     size_bytes: int | None = None
     updated_at: str | None = None
     enrichment_scope: str | None = None
+    universe_mode: Literal["historical_membership", "fixed_universe"] | None = None
+    universe_profile: str | None = None
+    requested_start_date: str | None = None
+    requested_end_date: str | None = None
     summary: dict[str, Any] = Field(default_factory=dict)
     linked_runs: list[str] = Field(default_factory=list)
 
@@ -199,21 +205,36 @@ class ResearchTaskRequest(BaseModel):
 
 class ExportPanelTaskRequest(BaseModel):
     display_name: str | None = None
+    description: str | None = None
     requested_by: str | None = None
+    source_ref: TaskSourceRef | None = None
     output: str = "artifacts/panels/weekly_features.parquet"
     start_date: str | None = None
     end_date: str | None = None
     symbols: list[str] | None = None
     universe_profile: str | None = None
+    universe_mode: Literal["historical_membership", "fixed_universe"] | None = "historical_membership"
     batch_size: int = 300
     enrichment_scope: str | None = None
+    feature_groups: list[str] | None = None
+    included_features: list[str] | None = None
+    excluded_features: list[str] | None = None
 
 
 class RunNativeWorkflowTaskRequest(BaseModel):
     display_name: str | None = None
+    description: str | None = None
     requested_by: str | None = None
+    source_ref: TaskSourceRef | None = None
     config_payload: dict[str, Any] = Field(default_factory=dict)
     recipe_names: list[str] | None = None
+
+
+class TaskSourceRef(BaseModel):
+    kind: Literal["manual", "run", "panel"]
+    source_id: str
+    label: str | None = None
+    path: str | None = None
 
 
 class ResearchTaskSummary(BaseModel):
@@ -221,6 +242,7 @@ class ResearchTaskSummary(BaseModel):
     task_kind: TaskKind
     status: TaskStatus
     display_name: str | None = None
+    description: str | None = None
     requested_by: str | None = None
     created_at: str | None = None
     started_at: str | None = None
@@ -232,9 +254,46 @@ class ResearchTaskSummary(BaseModel):
     config_payload: dict[str, Any] = Field(default_factory=dict)
     logs: dict[str, str] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    queue_position: int | None = None
+    source_ref: TaskSourceRef | None = None
+    available_actions: list[str] = Field(default_factory=list)
+    result_path: str | None = None
+
+
+class ResearchTaskDetail(ResearchTaskSummary):
+    result: dict[str, Any] = Field(default_factory=dict)
+    timeline: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class TaskQueueState(BaseModel):
+    dispatcher_status: Literal["idle", "running", "stopping"] = "idle"
+    dispatcher_pid: int | None = None
+    running_task_id: str | None = None
+    queued_task_ids: list[str] = Field(default_factory=list)
+    updated_at: str | None = None
+
+
+class TaskBoardResponse(BaseModel):
+    running_task: ResearchTaskSummary | None = None
+    queued_tasks: list[ResearchTaskSummary] = Field(default_factory=list)
+    history_tasks: list[ResearchTaskSummary] = Field(default_factory=list)
+    queue_state: TaskQueueState = Field(default_factory=TaskQueueState)
+    feature_group_options: list[str] = Field(default_factory=list)
+
+
+class TaskPresetResponse(BaseModel):
+    task_kind: Literal["export_panel", "run_native_workflow"]
+    display_name: str | None = None
+    source_ref: TaskSourceRef
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class TaskReorderRequest(BaseModel):
+    queued_task_ids: list[str] = Field(default_factory=list)
 
 
 class TaskLogResponse(BaseModel):
     task_id: str
     stdout: str = ""
     stderr: str = ""
+    updated_at: str | None = None

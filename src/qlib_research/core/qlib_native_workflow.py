@@ -134,6 +134,7 @@ class NativeWorkflowConfig:
     panel_path: str | Path = "artifacts/panels/csi300_weekly.parquet"
     execution_panel_path: str | Path | None = None
     output_dir: str | Path = "artifacts/native_workflow/csi300"
+    task_description: str | None = None
     start_date: str | None = "2016-01-01"
     end_date: str | None = None
     batch_size: int = 200
@@ -444,6 +445,7 @@ def _ensure_panel(
     run_export: RunExportMode,
     filter_to_universe_membership: bool,
     enrichment_scope: PanelEnrichmentScope,
+    task_description: str | None = None,
 ) -> pd.DataFrame:
     if run_export == "always" or (run_export == "auto_if_missing" and not path.exists()):
         export_weekly_feature_panel(
@@ -454,6 +456,7 @@ def _ensure_panel(
             batch_size=batch_size,
             filter_to_universe_membership=filter_to_universe_membership,
             enrichment_scope=enrichment_scope,
+            task_description=task_description,
         )
     if not path.exists():
         raise FileNotFoundError(f"Feature panel not found: {path}")
@@ -472,6 +475,7 @@ def _materialize_panel_artifact(
     run_export: RunExportMode,
     filter_to_universe_membership: bool,
     enrichment_scope: PanelEnrichmentScope,
+    task_description: str | None = None,
 ) -> Path:
     if run_export == "always" or (run_export == "auto_if_missing" and not path.exists()):
         export_weekly_feature_panel(
@@ -482,6 +486,7 @@ def _materialize_panel_artifact(
             batch_size=batch_size,
             filter_to_universe_membership=filter_to_universe_membership,
             enrichment_scope=enrichment_scope,
+            task_description=task_description,
         )
     if not path.exists():
         raise FileNotFoundError(f"Feature panel not found: {path}")
@@ -502,6 +507,7 @@ def _prepare_execution_panel(config: NativeWorkflowConfig, execution_path: Path 
         run_export=config.run_export,
         filter_to_universe_membership=False,
         enrichment_scope="none",
+        task_description=config.task_description,
     )
     return execution_panel, execution_path
 
@@ -524,6 +530,7 @@ def _prime_parallel_workflow_inputs(config: NativeWorkflowConfig) -> NativeWorkf
         run_export=config.run_export,
         filter_to_universe_membership=True,
         enrichment_scope="research_full",
+        task_description=config.task_description,
     )
     if config.universe_exit_policy == "retain_quotes_for_existing_positions":
         if execution_path is None:
@@ -537,6 +544,7 @@ def _prime_parallel_workflow_inputs(config: NativeWorkflowConfig) -> NativeWorkf
             run_export=config.run_export,
             filter_to_universe_membership=False,
             enrichment_scope="none",
+            task_description=config.task_description,
         )
     return replace(
         config,
@@ -1283,6 +1291,7 @@ def run_native_recipe(
         run_export=config.run_export,
         filter_to_universe_membership=True,
         enrichment_scope="research_full",
+        task_description=config.task_description,
     )
     research_panel = filter_panel_by_universe_profile(research_panel, config.universe_profile)
     modeling_panel = prepare_modeling_panel(research_panel, label_recipe=recipe.label_recipe, signal_objective=recipe.signal_objective)

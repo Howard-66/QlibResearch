@@ -16,16 +16,16 @@ export function DataTable({
   maxRows?: number;
   rowClassNameKey?: string;
 }) {
-  if (!table.columns.length) {
-    return <div className="rounded-lg border border-dashed border-border/70 p-6 text-sm text-muted-foreground">当前没有可展示的数据。</div>;
-  }
-
   const pageSize = Math.max(maxRows, 1);
   const [visibleRows, setVisibleRows] = React.useState(pageSize);
 
   React.useEffect(() => {
     setVisibleRows(pageSize);
   }, [pageSize, table.rows.length]);
+
+  if (!table.columns.length) {
+    return <div className="rounded-lg border border-dashed border-border/70 p-6 text-sm text-muted-foreground">当前没有可展示的数据。</div>;
+  }
 
   const rows = table.rows.slice(0, visibleRows);
   const hasMore = table.rows.length > rows.length;

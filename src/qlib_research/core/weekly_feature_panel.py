@@ -10,13 +10,18 @@ from decimal import Decimal
 import json
 from pathlib import Path
 import threading
-from typing import Iterable, List, Literal, Optional, Sequence
+from typing import Any, Iterable, List, Literal, Optional, Sequence
 
 import numpy as np
 import pandas as pd
 
 from qlib_research.config import close_fdh, get_fdh
-from qlib_research.core.research_universe import attach_universe_flags, resolve_universe_symbols
+from qlib_research.core.qlib_pipeline import FEATURE_COLUMNS, compose_feature_columns, resolve_feature_columns
+from qlib_research.core.research_universe import (
+    UniverseSelectionMode,
+    attach_universe_flags,
+    resolve_universe_symbols,
+)
 
 
 WEEKLY_RENAME_MAP = {
@@ -68,6 +73,7 @@ MACRO_PHASE_Y_MAP = {
 }
 
 PanelEnrichmentScope = Literal["none", "symbol_local", "research_full"]
+DEFAULT_UNIVERSE_MODE: UniverseSelectionMode = "historical_membership"
 
 SYMBOL_LOCAL_DERIVED_COLUMNS = {
     "mom_4w",
@@ -629,6 +635,23 @@ def _filter_panel_by_universe_profile(
     return panel
 
 
+def _attach_fixed_universe_flags(panel: pd.DataFrame, universe_profile: str | None) -> pd.DataFrame:
+    if panel.empty or not universe_profile:
+        return panel
+    result = panel.copy()
+    if universe_profile in {"csi300", "merged_csi300_500"}:
+        result["in_csi300"] = True
+    if universe_profile in {"csi500", "merged_csi300_500"}:
+        result["in_csi500"] = True
+    return result
+
+
+def resolve_universe_mode(universe_mode: UniverseSelectionMode | str | None) -> UniverseSelectionMode:
+    if universe_mode == "fixed_universe":
+        return "fixed_universe"
+    return DEFAULT_UNIVERSE_MODE
+
+
 async def build_weekly_feature_panel(
     symbols: Optional[Sequence[str]] = None,
     start_date: Optional[str] = None,
@@ -639,6 +662,7 @@ async def build_weekly_feature_panel(
     filter_to_universe_membership: bool = True,
     include_derived_features: bool = True,
     enrichment_scope: PanelEnrichmentScope | str | None = None,
+    universe_mode: UniverseSelectionMode | str | None = None,
 ) -> pd.DataFrame:
     """
     Build a weekly feature panel aligned to weekly processed prices.
@@ -650,12 +674,14 @@ async def build_weekly_feature_panel(
         include_derived_features=include_derived_features,
         enrichment_scope=enrichment_scope,
     )
+    resolved_universe_mode = resolve_universe_mode(universe_mode)
 
     resolved_symbols, history_frames = await resolve_universe_symbols(
         universe_profile=universe_profile,
         symbols=symbols,
         start_date=start_date,
         end_date=end_date,
+        universe_mode=resolved_universe_mode,
     )
     symbols = resolved_symbols or symbols
     fdh = await get_fdh()
@@ -753,6 +779,8 @@ async def build_weekly_feature_panel(
     feature_panel = pd.concat(panels, ignore_index=True)
     if history_frames:
         feature_panel = attach_universe_flags(feature_panel, history_frames)
+    elif resolved_universe_mode == "fixed_universe":
+        feature_panel = _attach_fixed_universe_flags(feature_panel, universe_profile)
     feature_panel = _attach_future_labels(feature_panel, horizons=horizons)
     feature_panel = ensure_panel_enrichment(feature_panel, resolved_scope)
     if history_frames and filter_to_universe_membership:
@@ -761,6 +789,10 @@ async def build_weekly_feature_panel(
     feature_panel["datetime"] = feature_panel["time"]
     feature_panel = feature_panel.sort_values(["instrument", "datetime"]).reset_index(drop=True)
     feature_panel.attrs["enrichment_scope"] = resolved_scope
+    feature_panel.attrs["universe_mode"] = resolved_universe_mode
+    feature_panel.attrs["universe_profile"] = universe_profile
+    feature_panel.attrs["requested_start_date"] = start_date
+    feature_panel.attrs["requested_end_date"] = end_date
     return feature_panel
 
 
@@ -773,13 +805,15 @@ def write_feature_panel_metadata(
     output_path: str | Path,
     *,
     enrichment_scope: PanelEnrichmentScope,
+    metadata: dict[str, Any] | None = None,
 ) -> Path:
     metadata_path = feature_panel_metadata_path(output_path)
+    payload = {"panel_enrichment_scope": enrichment_scope}
+    if metadata:
+        payload.update({str(key): value for key, value in metadata.items()})
     metadata_path.write_text(
         json.dumps(
-            {
-                "panel_enrichment_scope": enrichment_scope,
-            },
+            payload,
             ensure_ascii=False,
             indent=2,
         ),
@@ -788,17 +822,26 @@ def write_feature_panel_metadata(
     return metadata_path
 
 
+def load_feature_panel_metadata(output_path: str | Path) -> dict[str, Any]:
+    metadata_path = feature_panel_metadata_path(output_path)
+    if not metadata_path.exists():
+        return {}
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def load_feature_panel_enrichment_scope(
     output_path: str | Path,
     panel: pd.DataFrame | None = None,
 ) -> PanelEnrichmentScope:
-    metadata_path = feature_panel_metadata_path(output_path)
-    if metadata_path.exists():
+    metadata = load_feature_panel_metadata(output_path)
+    if metadata.get("panel_enrichment_scope") is not None:
         try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            if metadata.get("panel_enrichment_scope") is not None:
-                return resolve_panel_enrichment_scope(enrichment_scope=metadata.get("panel_enrichment_scope"))
-        except (json.JSONDecodeError, ValueError, TypeError):
+            return resolve_panel_enrichment_scope(enrichment_scope=metadata.get("panel_enrichment_scope"))
+        except (ValueError, TypeError):
             pass
     if panel is not None:
         return detect_panel_enrichment_scope(panel)
@@ -810,6 +853,7 @@ def write_feature_panel(
     output_path: str | Path,
     *,
     enrichment_scope: PanelEnrichmentScope | str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> Path:
     """Persist a feature panel to csv or parquet based on output suffix."""
     path = Path(output_path).expanduser().resolve()
@@ -825,8 +869,65 @@ def write_feature_panel(
     resolved_scope = resolve_panel_enrichment_scope(
         enrichment_scope=enrichment_scope or frame.attrs.get("enrichment_scope", detect_panel_enrichment_scope(frame))
     )
-    write_feature_panel_metadata(path, enrichment_scope=resolved_scope)
+    write_feature_panel_metadata(
+        path,
+        enrichment_scope=resolved_scope,
+        metadata={
+            "universe_mode": resolve_universe_mode(frame.attrs.get("universe_mode")),
+            "universe_profile": frame.attrs.get("universe_profile"),
+            "requested_start_date": frame.attrs.get("requested_start_date"),
+            "requested_end_date": frame.attrs.get("requested_end_date"),
+            **(metadata or {}),
+        },
+    )
     return path
+
+
+def select_panel_feature_columns(
+    frame: pd.DataFrame,
+    *,
+    feature_groups: Sequence[str] | None = None,
+    included_features: Sequence[str] | None = None,
+    excluded_features: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+
+    normalized_groups = tuple(str(group).strip() for group in (feature_groups or []) if str(group).strip())
+    normalized_included = tuple(str(item).strip() for item in (included_features or []) if str(item).strip())
+    normalized_excluded = tuple(str(item).strip() for item in (excluded_features or []) if str(item).strip())
+    if not normalized_groups and not normalized_included and not normalized_excluded:
+        return frame
+
+    if normalized_groups:
+        candidate_features = list(compose_feature_columns(normalized_groups))
+    elif normalized_included:
+        candidate_features = list(resolve_feature_columns(feature_columns=FEATURE_COLUMNS, included_features=normalized_included))
+    else:
+        candidate_features = list(FEATURE_COLUMNS)
+
+    if normalized_groups and normalized_included:
+        included_candidates = resolve_feature_columns(feature_columns=FEATURE_COLUMNS, included_features=normalized_included)
+        for feature_name in included_candidates:
+            if feature_name not in candidate_features:
+                candidate_features.append(feature_name)
+
+    selected_features = resolve_feature_columns(feature_columns=candidate_features, excluded_features=normalized_excluded)
+    if not selected_features:
+        raise ValueError("No feature columns remain after applying export panel feature selection")
+
+    feature_registry = set(FEATURE_COLUMNS)
+    keep_columns = [
+        str(column)
+        for column in frame.columns
+        if str(column) not in feature_registry or str(column) in selected_features
+    ]
+    result = frame.loc[:, keep_columns].copy()
+    result.attrs.update(frame.attrs)
+    result.attrs["selected_feature_groups"] = list(normalized_groups)
+    result.attrs["selected_features"] = list(selected_features)
+    result.attrs["excluded_features"] = list(normalized_excluded)
+    return result
 
 
 def _run_coroutine_sync(awaitable):
@@ -863,6 +964,11 @@ def export_weekly_feature_panel(
     filter_to_universe_membership: bool = True,
     include_derived_features: bool = True,
     enrichment_scope: PanelEnrichmentScope | str | None = None,
+    feature_groups: Sequence[str] | None = None,
+    included_features: Sequence[str] | None = None,
+    excluded_features: Sequence[str] | None = None,
+    universe_mode: UniverseSelectionMode | str | None = None,
+    task_description: str | None = None,
 ) -> Path:
     """Synchronous wrapper for CLI usage."""
     resolved_scope = resolve_panel_enrichment_scope(
@@ -881,9 +987,21 @@ def export_weekly_feature_panel(
                 filter_to_universe_membership=filter_to_universe_membership,
                 include_derived_features=include_derived_features,
                 enrichment_scope=resolved_scope,
+                universe_mode=universe_mode,
             )
         finally:
             await close_fdh()
 
     panel = _run_coroutine_sync(_build_and_close())
-    return write_feature_panel(panel, output_path, enrichment_scope=resolved_scope)
+    panel = select_panel_feature_columns(
+        panel,
+        feature_groups=feature_groups,
+        included_features=included_features,
+        excluded_features=excluded_features,
+    )
+    return write_feature_panel(
+        panel,
+        output_path,
+        enrichment_scope=resolved_scope,
+        metadata={"task_description": task_description} if task_description else None,
+    )

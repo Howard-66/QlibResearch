@@ -1,7 +1,11 @@
+import Link from "next/link";
+
+import { CalendarCheck } from "lucide-react";
 import { PageHeader } from "@/components/common/page-header";
 import { StatCard } from "@/components/common/stat-card";
 import { DataTable } from "@/components/data/data-table";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { getPanelDetail } from "@/lib/api";
 import { formatBytes, formatCompactDate, formatInteger } from "@/lib/format";
@@ -14,15 +18,54 @@ export default async function PanelDetailPage({ params }: { params: Promise<{ pa
     <div className="space-y-6">
       <PageHeader
         title={panel.name}
-        description="Panel 详情页会展示样本规模、列目录、空值覆盖和样例记录，方便判断当前 panel 是否适合继续被 workflow 消费。"
+        description={panel.task_description ?? "Panel 详情页会展示样本规模、列目录、空值覆盖和样例记录，方便判断当前 panel 是否适合继续被 workflow 消费。"}
         badge={panel.enrichment_scope ?? "unknown"}
       />
+
+      <div className="flex flex-wrap gap-3">
+        <Badge
+          variant={
+            panel.universe_mode === "fixed_universe"
+              ? "warning"
+              : panel.universe_mode === "historical_membership"
+                ? "info"
+                : "neutral"
+          }
+        >
+          {panel.universe_mode === "fixed_universe"
+            ? "Fixed Universe"
+            : panel.universe_mode === "historical_membership"
+              ? "Historical Membership"
+              : "Unknown Universe Mode"}
+        </Badge>
+        {panel.universe_profile ? <Badge variant="outline">{panel.universe_profile}</Badge> : null}
+        <Button asChild>
+          <Link href={`/tasks?create=export_panel&sourceType=panel&sourceId=${encodeURIComponent(panel.panel_id)}`}>
+          Create Export Task
+          <CalendarCheck className="h-4 w-4" />
+          </Link>
+        </Button>
+      </div>
+
+      {panel.universe_mode === "historical_membership" ? (
+        <Card className="glass-card">
+          <CardContent className="p-4 text-sm text-muted-foreground">
+            {`当前 panel 使用历史成分模式。它会按 ${panel.universe_profile ?? "所选指数"} 的逐周真实成分过滤样本，因此口径更严格，但受 index_weight 历史长度限制。`}
+          </CardContent>
+        </Card>
+      ) : null}
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
         <StatCard
           title="Date Range"
           value={`${formatCompactDate(panel.summary.start_date)} ~ ${formatCompactDate(panel.summary.end_date)}`}
-          detail={panel.summary.start_date && panel.summary.end_date ? "" : "未识别时间列"}
+          detail={
+            panel.requested_start_date || panel.requested_end_date
+              ? `Requested ${formatCompactDate(panel.requested_start_date)} ~ ${formatCompactDate(panel.requested_end_date)}`
+              : panel.summary.start_date && panel.summary.end_date
+                ? ""
+                : "未识别时间列"
+          }
         />
         <StatCard title="Rows" value={formatInteger(panel.summary.rows)} />
         <StatCard title="Instruments" value={formatInteger(panel.summary.instrument_count)} />

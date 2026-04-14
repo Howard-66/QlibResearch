@@ -3,6 +3,7 @@ import threading
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from qlib_research.core.qlib_pipeline import LABEL_COLUMN, build_training_frame
 from qlib_research.core.weekly_feature_panel import (
@@ -420,7 +421,7 @@ def test_build_weekly_feature_panel_merges_macro_cycle_features(monkeypatch):
     async def fake_get_fdh():
         return FakeFdh()
 
-    async def fake_resolve_universe_symbols(universe_profile=None, symbols=None, start_date=None, end_date=None):
+    async def fake_resolve_universe_symbols(universe_profile=None, symbols=None, start_date=None, end_date=None, universe_mode=None):
         return ["AAA.SH"], None
 
     monkeypatch.setattr("qlib_research.core.weekly_feature_panel.get_fdh", fake_get_fdh)
@@ -508,6 +509,60 @@ def test_engineer_research_features_adds_cross_sectional_and_macro_interaction_f
     assert features["macro_reflation_x_mom_4w"].notna().any()
     assert features["industry_npm_ttm_rank_pct"].notna().any()
     assert features["buffett_moat_score"].notna().any()
+
+
+def test_build_weekly_feature_panel_adds_fixed_universe_flags():
+    class FakeFdh:
+        async def get_processed_weekly_async(self, symbols=None, start_date=None, end_date=None):
+            return pd.DataFrame(
+                {
+                    "symbol": ["AAA.SH"],
+                    "time": ["2010-01-08"],
+                    "close": [10.0],
+                    "amount": [100.0],
+                    "volume": [10.0],
+                }
+            )
+
+        async def get_fundamental_combined_async(self, symbols=None, start_date=None, end_date=None, include_fscore=True):
+            return pd.DataFrame({"symbol": ["AAA.SH"], "time": ["2010-01-08"]})
+
+        async def get_industry_valuation_async(self, symbols=None, start_date=None, end_date=None, include_exempted=True):
+            return pd.DataFrame({"symbol": ["AAA.SH"], "time": ["2010-01-08"]})
+
+        async def get_basic_async(self, symbols=None):
+            return pd.DataFrame({"symbol": ["AAA.SH"], "name": ["AAA"]})
+
+        async def get_cn_macro_cycle_async(self, start_date=None, end_date=None, phase_mode="stable"):
+            return pd.DataFrame()
+
+        async def get_cn_macro_cycle_industries_async(self, start_date=None, end_date=None, preferred_only=False, phase_mode="stable"):
+            return pd.DataFrame()
+
+    async def fake_get_fdh():
+        return FakeFdh()
+
+    async def fake_resolve_universe_symbols(universe_profile=None, symbols=None, start_date=None, end_date=None, universe_mode=None):
+        return ["AAA.SH"], {}
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr("qlib_research.core.weekly_feature_panel.get_fdh", fake_get_fdh)
+    monkeypatch.setattr("qlib_research.core.weekly_feature_panel.resolve_universe_symbols", fake_resolve_universe_symbols)
+    try:
+        panel = asyncio.run(
+            build_weekly_feature_panel(
+                start_date="2010-01-01",
+                end_date="2010-12-31",
+                universe_profile="csi300",
+                universe_mode="fixed_universe",
+                batch_size=10,
+            )
+        )
+    finally:
+        monkeypatch.undo()
+
+    assert bool(panel["in_csi300"].all())
+    assert panel.attrs["universe_mode"] == "fixed_universe"
 
 
 def test_engineer_research_features_handles_object_columns_with_array_values():

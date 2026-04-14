@@ -17,10 +17,6 @@ export function TrendChart({
   color?: string;
   benchmarkColor?: string;
 }) {
-  if (!data.length) {
-    return <div className="rounded-lg border border-dashed border-border/70 p-8 text-sm text-muted-foreground">当前没有可绘制的趋势数据。</div>;
-  }
-
   const lines = React.useMemo(() => {
     if (yKeys?.length) {
       return yKeys;
@@ -55,6 +51,10 @@ export function TrendChart({
     const padding = Math.max((max - min) * 0.08, 0.01);
     return [min - padding, max + padding];
   }, [numericValues]);
+
+  if (!data.length) {
+    return <div className="rounded-lg border border-dashed border-border/70 p-8 text-sm text-muted-foreground">当前没有可绘制的趋势数据。</div>;
+  }
 
   return (
     <div className="h-72 w-full">

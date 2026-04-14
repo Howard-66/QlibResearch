@@ -1,5 +1,7 @@
 import Link from "next/link";
 
+import { ReceiptText } from "lucide-react";
+import { CalendarCheck } from "lucide-react";
 import { PageHeader } from "@/components/common/page-header";
 import { StatCard } from "@/components/common/stat-card";
 import { Badge } from "@/components/ui/badge";
@@ -34,8 +36,26 @@ export default async function PanelsPage() {
                 <div>
                   <CardTitle className="text-base">{panel.name}</CardTitle>
                   <p className="mt-1 text-sm text-muted-foreground">{formatPathName(panel.path)}</p>
+                  {panel.task_description ? <p className="mt-2 text-sm text-muted-foreground">{panel.task_description}</p> : null}
                 </div>
-                <Badge variant="info">{panel.enrichment_scope ?? "unknown"}</Badge>
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Badge
+                    variant={
+                      panel.universe_mode === "fixed_universe"
+                        ? "warning"
+                        : panel.universe_mode === "historical_membership"
+                          ? "info"
+                          : "neutral"
+                    }
+                  >
+                    {panel.universe_mode === "fixed_universe"
+                      ? "Fixed Universe"
+                      : panel.universe_mode === "historical_membership"
+                        ? "Historical Membership"
+                        : "Unknown Universe Mode"}
+                  </Badge>
+                  <Badge variant="info">{panel.enrichment_scope ?? "unknown"}</Badge>
+                </div>
               </div>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -70,9 +90,20 @@ export default async function PanelsPage() {
                   </Badge>
                 ))}
               </div>
-              <Button asChild>
-                <Link href={`/panels/${panel.panel_id}`}>打开 Panel 详情</Link>
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button asChild>
+                  <Link href={`/panels/${panel.panel_id}`}>
+                  Details
+                  <ReceiptText className="h-4 w-4" />
+                  </Link>
+                </Button>
+                <Button variant="outline" asChild>
+                  <Link href={`/tasks?create=export_panel&sourceType=panel&sourceId=${encodeURIComponent(panel.panel_id)}`}>
+                  Create Export Task
+                  <CalendarCheck className="h-4 w-4" />
+                  </Link>
+                </Button>
+              </div>
             </CardContent>
           </Card>
         ))}

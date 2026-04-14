@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Literal, Optional, Sequence
 
 import pandas as pd
 
@@ -24,6 +24,8 @@ SUPPORTED_UNIVERSE_PROFILES = {
     "csi500",
     "merged_csi300_500",
 }
+
+UniverseSelectionMode = Literal["historical_membership", "fixed_universe"]
 
 
 def _normalize_symbol(values: pd.Series) -> pd.Series:
@@ -131,11 +133,52 @@ async def fetch_universe_profile_history(
     return history
 
 
+def _select_fixed_universe_symbols(
+    history_frames: dict[str, pd.DataFrame],
+    *,
+    as_of_date: str | None = None,
+) -> list[str]:
+    if not history_frames:
+        return []
+
+    as_of_ts = pd.to_datetime(as_of_date, errors="coerce") if as_of_date else None
+    if pd.isna(as_of_ts):
+        as_of_ts = None
+
+    symbols: set[str] = set()
+    for frame in history_frames.values():
+        if frame.empty:
+            continue
+        normalized = frame.copy()
+        normalized["trade_date"] = _normalize_time(normalized["trade_date"])
+        normalized["symbol"] = _normalize_symbol(normalized["symbol"])
+        normalized = normalized.dropna(subset=["trade_date", "symbol"])
+        if normalized.empty:
+            continue
+
+        if as_of_ts is not None:
+            eligible = normalized.loc[normalized["trade_date"] <= pd.Timestamp(as_of_ts)].copy()
+        else:
+            eligible = normalized
+
+        if eligible.empty:
+            snapshot_date = normalized["trade_date"].min()
+            eligible = normalized.loc[normalized["trade_date"] == snapshot_date].copy()
+        else:
+            snapshot_date = eligible["trade_date"].max()
+            eligible = eligible.loc[eligible["trade_date"] == snapshot_date].copy()
+
+        symbols.update(eligible["symbol"].dropna().astype(str).tolist())
+
+    return sorted(symbols)
+
+
 async def resolve_universe_symbols(
     universe_profile: str | None = None,
     symbols: Optional[Sequence[str]] = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    universe_mode: UniverseSelectionMode = "historical_membership",
 ) -> tuple[list[str], dict[str, pd.DataFrame]]:
     """
     Resolve the effective symbol list and optional historical membership frames.
@@ -155,6 +198,8 @@ async def resolve_universe_symbols(
         start_date=start_date,
         end_date=end_date,
     )
+    if universe_mode == "fixed_universe":
+        return _select_fixed_universe_symbols(history, as_of_date=end_date), {}
     resolved = sorted({
         symbol
         for frame in history.values()

@@ -5,9 +5,11 @@ import pandas as pd
 
 from qlib_research.core.research_universe import (
     _expand_index_weight_query_window,
+    _select_fixed_universe_symbols,
     attach_universe_flags,
     build_index_membership_flag_frame,
     fetch_universe_profile_history,
+    resolve_universe_symbols,
 )
 
 
@@ -122,3 +124,51 @@ def test_fetch_universe_profile_history_pads_index_weight_query_window(monkeypat
     ]
     assert "in_csi300" in history
     assert history["in_csi300"]["symbol"].tolist() == ["AAA.SH"]
+
+
+def test_select_fixed_universe_symbols_uses_latest_available_snapshot_before_end_date():
+    history = {
+        "in_csi300": pd.DataFrame(
+            {
+                "symbol": ["AAA.SH", "BBB.SZ", "CCC.SH", "DDD.SZ"],
+                "trade_date": pd.to_datetime(["2016-01-29", "2016-01-29", "2020-12-31", "2020-12-31"]),
+                "weight": [1.0, 1.0, 1.0, 1.0],
+            }
+        )
+    }
+
+    symbols_2018 = _select_fixed_universe_symbols(history, as_of_date="2018-01-01")
+    symbols_2010 = _select_fixed_universe_symbols(history, as_of_date="2010-01-01")
+
+    assert symbols_2018 == ["AAA.SH", "BBB.SZ"]
+    assert symbols_2010 == ["AAA.SH", "BBB.SZ"]
+
+
+def test_resolve_universe_symbols_supports_fixed_universe_mode(monkeypatch):
+    async def fake_fetch_universe_profile_history(universe_profile=None, start_date=None, end_date=None):
+        return {
+            "in_csi300": pd.DataFrame(
+                {
+                    "symbol": ["AAA.SH", "BBB.SZ"],
+                    "trade_date": pd.to_datetime(["2016-01-29", "2016-01-29"]),
+                    "weight": [1.0, 1.0],
+                }
+            )
+        }
+
+    monkeypatch.setattr(
+        "qlib_research.core.research_universe.fetch_universe_profile_history",
+        fake_fetch_universe_profile_history,
+    )
+
+    symbols, history = asyncio.run(
+        resolve_universe_symbols(
+            universe_profile="csi300",
+            start_date="2010-01-01",
+            end_date=None,
+            universe_mode="fixed_universe",
+        )
+    )
+
+    assert symbols == ["AAA.SH", "BBB.SZ"]
+    assert history == {}

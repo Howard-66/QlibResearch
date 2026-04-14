@@ -2,8 +2,9 @@
 
 import Link from "next/link";
 import * as React from "react";
-import { FolderSearch } from "lucide-react";
-
+import { ReceiptText } from "lucide-react";
+import { GitCompare } from "lucide-react";
+import { CalendarCheck } from "lucide-react";
 import { PageHeader } from "@/components/common/page-header";
 import { StatCard } from "@/components/common/stat-card";
 import { Badge } from "@/components/ui/badge";
@@ -56,6 +57,9 @@ export function RunsPageClient({ runs }: { runs: RunListItem[] }) {
                       <div className="text-[11px] text-muted-foreground sm:text-xs">{formatCompactDate(summary.updated_at)}</div>
                       <Badge variant={artifactVariantMap[summary.artifact_status]}>{summary.artifact_status}</Badge>
                     </div>
+                    {summary.task_description ? (
+                      <div className="text-sm text-muted-foreground">{summary.task_description}</div>
+                    ) : null}
                     <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
                       <InfoPill label="Universe" value={summary.universe_profile ?? "—"} />
                       <InfoPill label="Recipes" value={`${summary.recipe_names.length}`} />
@@ -103,7 +107,8 @@ function renderQuickJudgeContent(selected: RunListItem) {
             }}
           >
             <Link href={`/runs/${selected.run_id}`}>
-              打开完整详情
+              Details
+              <ReceiptText className="h-4 w-4" />
             </Link>
           </Button>
           <Button
@@ -115,8 +120,21 @@ function renderQuickJudgeContent(selected: RunListItem) {
             }}
           >
             <Link href={`/compare?runId=${encodeURIComponent(selected.run_id)}`}>
-              去 Compare 选择 recipe
-              <FolderSearch className="h-4 w-4" />
+              Add to Compare
+              <GitCompare className="h-4 w-4" />
+            </Link>
+          </Button>
+          <Button
+            asChild
+            size="sm"
+            variant="outline"
+            onClick={(event) => {
+              event.stopPropagation();
+            }}
+          >
+            <Link href={`/tasks?create=run_native_workflow&sourceType=run&sourceId=${encodeURIComponent(selected.run_id)}`}>
+              Create Workflow Task
+              <CalendarCheck className="h-4 w-4" />
             </Link>
           </Button>
         </div>

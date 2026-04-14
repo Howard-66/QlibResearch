@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import date, datetime
 import json
 import math
 import os
 from pathlib import Path
+import shutil
 import shlex
+import signal
 import subprocess
 import sys
 from typing import Any, Iterable
@@ -34,12 +37,18 @@ from qlib_research.app.contracts import (
     RecipeDetail,
     RecipeTablesResponse,
     RecipeSummary,
+    ResearchTaskDetail,
     ResearchTaskSummary,
     RunDetail,
     RunListItem,
     RunNativeWorkflowTaskRequest,
     RunQuickSummary,
+    TaskBoardResponse,
     TaskLogResponse,
+    TaskPresetResponse,
+    TaskQueueState,
+    TaskReorderRequest,
+    TaskSourceRef,
 )
 from qlib_research.config import get_project_root, get_qlib_artifacts_dir
 from qlib_research.core.notebook_workflow import (
@@ -48,14 +57,18 @@ from qlib_research.core.notebook_workflow import (
     sanitize_for_json,
     summarize_panel,
 )
-from qlib_research.core.qlib_pipeline import load_panel_dataframe
-from qlib_research.core.weekly_feature_panel import load_feature_panel_enrichment_scope
+from qlib_research.core.qlib_pipeline import FEATURE_GROUP_COLUMNS, load_panel_dataframe
+from qlib_research.core.weekly_feature_panel import (
+    load_feature_panel_enrichment_scope,
+    load_feature_panel_metadata,
+)
 
 PROJECT_ROOT = get_project_root()
 ARTIFACTS_ROOT = get_qlib_artifacts_dir()
 NATIVE_WORKFLOW_ROOT = ARTIFACTS_ROOT / "native_workflow"
 PANELS_ROOT = ARTIFACTS_ROOT / "panels"
 TASKS_ROOT = ARTIFACTS_ROOT / "app_tasks"
+TASK_QUEUE_FILENAME = "queue.json"
 
 REQUIRED_RECIPE_ARTIFACTS = {
     "native_workflow_manifest.json",
@@ -594,6 +607,7 @@ def _build_run_index_payload(run_dir: Path, *, existing_payload: dict[str, Any] 
     quick_summary = RunQuickSummary(
         run_id=run_id,
         output_dir=str(run_dir),
+        task_description=summary_payload.get("config", {}).get("task_description"),
         universe_profile=summary_payload.get("config", {}).get("universe_profile"),
         panel_path=summary_payload.get("config", {}).get("panel_path"),
         start_date=summary_payload.get("config", {}).get("start_date"),
@@ -701,26 +715,36 @@ def _build_table_payloads(recipe_frames: dict[str, Any], table_names: Iterable[s
 
 def _load_panel_summary_payload(path: Path) -> dict[str, Any]:
     source_mtime = path.stat().st_mtime
+    metadata_path = path.with_name(f"{path.name}.metadata.json")
+    if metadata_path.exists():
+        source_mtime = max(source_mtime, metadata_path.stat().st_mtime)
     cache_key = str(path)
     cached = _PANEL_SUMMARY_CACHE.get(cache_key)
-    if cached and cached[0] >= source_mtime:
+    if cached and cached[0] >= source_mtime and "universe_mode" in cached[1]:
         return cached[1]
 
     cache_path = _panel_summary_cache_path(path)
     if cache_path.exists() and cache_path.stat().st_mtime >= source_mtime:
         payload = _safe_read_json(cache_path, {})
-        _PANEL_SUMMARY_CACHE[cache_key] = (cache_path.stat().st_mtime, payload)
-        return payload
+        if "universe_mode" in payload:
+            _PANEL_SUMMARY_CACHE[cache_key] = (cache_path.stat().st_mtime, payload)
+            return payload
 
     panel = load_panel_dataframe(path)
+    metadata = load_feature_panel_metadata(path)
     payload = {
         "panel_id": path.name,
         "name": path.name,
         "path": str(path),
         "format": path.suffix.lower().lstrip("."),
+        "task_description": metadata.get("task_description"),
         "size_bytes": path.stat().st_size,
         "updated_at": _path_updated_at(path),
         "enrichment_scope": load_feature_panel_enrichment_scope(path, panel=panel),
+        "universe_mode": metadata.get("universe_mode"),
+        "universe_profile": metadata.get("universe_profile"),
+        "requested_start_date": metadata.get("requested_start_date"),
+        "requested_end_date": metadata.get("requested_end_date"),
         "summary": sanitize_for_json(summarize_panel(panel)),
     }
     cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1328,6 +1352,10 @@ def list_panels() -> list[PanelSummary]:
                 size_bytes=payload.get("size_bytes"),
                 updated_at=payload.get("updated_at"),
                 enrichment_scope=payload.get("enrichment_scope"),
+                universe_mode=payload.get("universe_mode"),
+                universe_profile=payload.get("universe_profile"),
+                requested_start_date=payload.get("requested_start_date"),
+                requested_end_date=payload.get("requested_end_date"),
                 summary=payload.get("summary", {}),
                 linked_runs=panel_links.get(str(path), panel_links.get(path.name, [])),
             )
@@ -1366,6 +1394,10 @@ def get_panel_detail(panel_id: str) -> PanelDetail:
         size_bytes=path.stat().st_size,
         updated_at=_path_updated_at(path),
         enrichment_scope=cached_summary.get("enrichment_scope"),
+        universe_mode=cached_summary.get("universe_mode"),
+        universe_profile=cached_summary.get("universe_profile"),
+        requested_start_date=cached_summary.get("requested_start_date"),
+        requested_end_date=cached_summary.get("requested_end_date"),
         summary=summary,
         linked_runs=panel_links.get(str(path), panel_links.get(path.name, [])),
         columns=[str(column) for column in panel.columns],
@@ -1374,66 +1406,221 @@ def get_panel_detail(panel_id: str) -> PanelDetail:
     )
 
 
-def _task_paths(task_id: str) -> tuple[Path, Path, Path, Path]:
+def _task_paths(task_id: str) -> tuple[Path, Path, Path, Path, Path]:
     task_dir = TASKS_ROOT / task_id
     return (
         task_dir,
         task_dir / "task.json",
         task_dir / "stdout.log",
         task_dir / "stderr.log",
+        task_dir / "result.json",
     )
 
 
-def _load_task(task_id: str) -> ResearchTaskSummary:
-    _, task_file, _, _ = _task_paths(task_id)
+def _queue_state_path() -> Path:
+    return TASKS_ROOT / TASK_QUEUE_FILENAME
+
+
+def _write_json_file(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(sanitize_for_json(payload), ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _default_manual_source() -> TaskSourceRef:
+    return TaskSourceRef(kind="manual", source_id="manual", label="Manual Task")
+
+
+def _pid_exists(pid: int | None) -> bool:
+    if pid is None:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _load_task_raw(task_id: str) -> ResearchTaskSummary:
+    _, task_file, _, _, _ = _task_paths(task_id)
     if not task_file.exists():
         raise FileNotFoundError(f"Unknown task: {task_id}")
     return ResearchTaskSummary(**_safe_read_json(task_file, {}))
 
 
-def list_tasks() -> list[ResearchTaskSummary]:
-    summaries = []
-    for task_dir in _list_task_dirs():
-        task_file = task_dir / "task.json"
-        if task_file.exists():
-            summaries.append(ResearchTaskSummary(**_safe_read_json(task_file, {})))
-    return summaries
-
-
-def get_task(task_id: str) -> ResearchTaskSummary:
-    return _load_task(task_id)
-
-
-def get_task_logs(task_id: str) -> TaskLogResponse:
-    _, _, stdout_path, stderr_path = _task_paths(task_id)
-    return TaskLogResponse(
-        task_id=task_id,
-        stdout=stdout_path.read_text(encoding="utf-8") if stdout_path.exists() else "",
-        stderr=stderr_path.read_text(encoding="utf-8") if stderr_path.exists() else "",
+def _task_sort_key(summary: ResearchTaskSummary) -> tuple[str, str]:
+    return (
+        str(summary.finished_at or summary.started_at or summary.created_at or ""),
+        summary.task_id,
     )
 
 
+def _available_task_actions(summary: ResearchTaskSummary, queue_state: TaskQueueState, queue_position: int | None) -> list[str]:
+    if summary.status == "queued":
+        actions = ["view"]
+        if queue_position and queue_position > 1:
+            actions.append("move_up")
+        if queue_position and queue_position < len(queue_state.queued_task_ids):
+            actions.append("move_down")
+        actions.append("remove")
+        return actions
+    if summary.status == "running":
+        return ["view", "stop"]
+    if summary.status == "stopping":
+        return ["view"]
+    return ["view"]
+
+
+def _hydrate_task_summary(summary: ResearchTaskSummary, queue_state: TaskQueueState) -> ResearchTaskSummary:
+    queue_position = None
+    if summary.task_id in queue_state.queued_task_ids:
+        queue_position = queue_state.queued_task_ids.index(summary.task_id) + 1
+    return summary.model_copy(
+        update={
+            "queue_position": queue_position,
+            "source_ref": summary.source_ref or _default_manual_source(),
+            "available_actions": _available_task_actions(summary, queue_state, queue_position),
+            "result_path": str(_task_paths(summary.task_id)[4]),
+        }
+    )
+
+
+def _write_queue_state(state: TaskQueueState) -> TaskQueueState:
+    payload = state.model_copy(update={"updated_at": _now_iso()})
+    _write_json_file(_queue_state_path(), payload.model_dump(mode="json"))
+    return payload
+
+
+def _load_queue_state() -> TaskQueueState:
+    TASKS_ROOT.mkdir(parents=True, exist_ok=True)
+    queue_path = _queue_state_path()
+    raw_payload = _safe_read_json(queue_path, {})
+    try:
+        state = TaskQueueState(**raw_payload)
+    except Exception:
+        state = TaskQueueState()
+    changed = not queue_path.exists()
+
+    known_task_ids = set()
+    queued_by_discovery: list[str] = []
+    for task_dir in _list_task_dirs():
+        task_file = task_dir / "task.json"
+        if not task_file.exists():
+            continue
+        known_task_ids.add(task_dir.name)
+        try:
+            task_summary = ResearchTaskSummary(**_safe_read_json(task_file, {}))
+        except Exception:
+            continue
+        if task_summary.status == "queued":
+            queued_by_discovery.append(task_dir.name)
+
+    normalized_queue: list[str] = []
+    for task_id in state.queued_task_ids:
+        if task_id not in known_task_ids:
+            changed = True
+            continue
+        try:
+            task_summary = _load_task_raw(task_id)
+        except FileNotFoundError:
+            changed = True
+            continue
+        if task_summary.status != "queued":
+            changed = True
+            continue
+        if task_id not in normalized_queue:
+            normalized_queue.append(task_id)
+
+    for task_id in reversed(queued_by_discovery):
+        if task_id not in normalized_queue and task_id != state.running_task_id:
+            normalized_queue.append(task_id)
+            changed = True
+    state = state.model_copy(update={"queued_task_ids": normalized_queue})
+
+    if state.running_task_id:
+        try:
+            running_summary = _load_task_raw(state.running_task_id)
+        except FileNotFoundError:
+            state = state.model_copy(update={"running_task_id": None, "dispatcher_status": "idle", "dispatcher_pid": None})
+            changed = True
+        else:
+            worker_pid = running_summary.metadata.get("worker_pid")
+            if running_summary.status in {"running", "stopping"} and _pid_exists(int(worker_pid) if worker_pid is not None else None):
+                state = state.model_copy(
+                    update={
+                        "dispatcher_pid": int(worker_pid),
+                        "dispatcher_status": "stopping" if running_summary.status == "stopping" else "running",
+                    }
+                )
+            elif running_summary.status in {"running", "stopping"}:
+                update_task_status(
+                    _task_paths(state.running_task_id)[0],
+                    status="cancelled" if running_summary.status == "stopping" else "failed",
+                    finished_at=_now_iso(),
+                    message="Task interrupted unexpectedly",
+                    metadata={**running_summary.metadata, "worker_error": "worker process not found"},
+                )
+                state = state.model_copy(update={"running_task_id": None, "dispatcher_status": "idle", "dispatcher_pid": None})
+                changed = True
+            elif running_summary.status not in {"running", "stopping"}:
+                state = state.model_copy(update={"running_task_id": None})
+                changed = True
+
+    if state.dispatcher_pid is not None and not _pid_exists(state.dispatcher_pid):
+        if state.running_task_id is None:
+            state = state.model_copy(update={"dispatcher_pid": None, "dispatcher_status": "idle"})
+        changed = True
+
+    if state.running_task_id is None and state.dispatcher_status == "stopping":
+        state = state.model_copy(update={"dispatcher_status": "idle", "dispatcher_pid": None})
+        changed = True
+
+    if changed or state.updated_at is None:
+        state = _write_queue_state(state)
+    return state
+
+
 def _write_task(summary: ResearchTaskSummary) -> None:
-    task_dir, task_file, _, _ = _task_paths(summary.task_id)
+    task_dir, task_file, _, _, _ = _task_paths(summary.task_id)
     task_dir.mkdir(parents=True, exist_ok=True)
     task_file.write_text(summary.model_dump_json(indent=2), encoding="utf-8")
 
 
-def _spawn_task_worker(task_id: str) -> None:
-    task_dir, _, _, _ = _task_paths(task_id)
-    subprocess.Popen(
-        [sys.executable, "-m", "qlib_research.app.task_worker", str(task_dir)],
-        cwd=PROJECT_ROOT,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
+def _task_timeline(summary: ResearchTaskSummary) -> list[dict[str, Any]]:
+    timeline = [
+        {"label": "Created", "at": summary.created_at, "status": "queued"},
+        {"label": "Started", "at": summary.started_at, "status": "running"},
+        {"label": "Finished", "at": summary.finished_at, "status": summary.status},
+    ]
+    return [item for item in timeline if item["at"]]
+
+
+def _task_result_payload(task_id: str) -> dict[str, Any]:
+    result_path = _task_paths(task_id)[4]
+    payload = _safe_read_json(result_path, {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def _build_task_detail(summary: ResearchTaskSummary, queue_state: TaskQueueState) -> ResearchTaskDetail:
+    hydrated = _hydrate_task_summary(summary, queue_state)
+    return ResearchTaskDetail(
+        **hydrated.model_dump(mode="json"),
+        result=_task_result_payload(summary.task_id),
+        timeline=_task_timeline(hydrated),
     )
 
 
-def create_export_panel_task(request: ExportPanelTaskRequest) -> ResearchTaskSummary:
-    TASKS_ROOT.mkdir(parents=True, exist_ok=True)
-    task_id = f"task-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+def _task_logs_updated_at(stdout_path: Path, stderr_path: Path) -> str | None:
+    candidates = [path.stat().st_mtime for path in (stdout_path, stderr_path) if path.exists()]
+    if not candidates:
+        return None
+    return datetime.fromtimestamp(max(candidates)).astimezone().isoformat()
+
+
+def _build_export_panel_command(request: ExportPanelTaskRequest) -> list[str]:
     command = [
         "uv",
         "run",
@@ -1450,58 +1637,158 @@ def create_export_panel_task(request: ExportPanelTaskRequest) -> ResearchTaskSum
         command += ["--end-date", request.end_date]
     if request.universe_profile:
         command += ["--universe-profile", request.universe_profile]
+    if request.universe_mode:
+        command += ["--universe-mode", request.universe_mode]
     if request.enrichment_scope:
         command += ["--enrichment-scope", request.enrichment_scope]
+    if request.description:
+        command += ["--task-description", request.description]
+    for feature_group in request.feature_groups or []:
+        command += ["--feature-group", feature_group]
+    for feature_name in request.included_features or []:
+        command += ["--include-feature", feature_name]
+    for feature_name in request.excluded_features or []:
+        command += ["--exclude-feature", feature_name]
     if request.symbols:
         command += ["--symbols", *request.symbols]
+    return command
+
+
+def _enqueue_task(summary: ResearchTaskSummary) -> ResearchTaskSummary:
+    _write_task(summary)
+    state = _load_queue_state()
+    if summary.task_id not in state.queued_task_ids and summary.task_id != state.running_task_id:
+        state = _write_queue_state(
+            state.model_copy(update={"queued_task_ids": [*state.queued_task_ids, summary.task_id]})
+        )
+    return _hydrate_task_summary(summary, state)
+
+
+def list_tasks() -> TaskBoardResponse:
+    state = _load_queue_state()
+    running_task = None
+    if state.running_task_id:
+        try:
+            running_task = _hydrate_task_summary(_load_task_raw(state.running_task_id), state)
+        except FileNotFoundError:
+            running_task = None
+
+    queued_tasks: list[ResearchTaskSummary] = []
+    for task_id in state.queued_task_ids:
+        try:
+            queued_tasks.append(_hydrate_task_summary(_load_task_raw(task_id), state))
+        except FileNotFoundError:
+            continue
+
+    queued_ids = set(state.queued_task_ids)
+    history_summaries: list[ResearchTaskSummary] = []
+    for task_dir in _list_task_dirs():
+        task_file = task_dir / "task.json"
+        if not task_file.exists():
+            continue
+        summary = ResearchTaskSummary(**_safe_read_json(task_file, {}))
+        if summary.task_id == state.running_task_id or summary.task_id in queued_ids:
+            continue
+        history_summaries.append(_hydrate_task_summary(summary, state))
+    history_summaries.sort(key=_task_sort_key, reverse=True)
+
+    return TaskBoardResponse(
+        running_task=running_task,
+        queued_tasks=queued_tasks,
+        history_tasks=history_summaries,
+        queue_state=state,
+        feature_group_options=sorted(FEATURE_GROUP_COLUMNS),
+    )
+
+
+def get_task(task_id: str) -> ResearchTaskDetail:
+    state = _load_queue_state()
+    return _build_task_detail(_load_task_raw(task_id), state)
+
+
+def get_task_logs(task_id: str) -> TaskLogResponse:
+    _, _, stdout_path, stderr_path, _ = _task_paths(task_id)
+    return TaskLogResponse(
+        task_id=task_id,
+        stdout=stdout_path.read_text(encoding="utf-8") if stdout_path.exists() else "",
+        stderr=stderr_path.read_text(encoding="utf-8") if stderr_path.exists() else "",
+        updated_at=_task_logs_updated_at(stdout_path, stderr_path),
+    )
+
+
+def _default_task_source(source_ref: TaskSourceRef | None) -> TaskSourceRef:
+    return source_ref or _default_manual_source()
+
+
+def create_export_panel_task(request: ExportPanelTaskRequest) -> ResearchTaskSummary:
+    TASKS_ROOT.mkdir(parents=True, exist_ok=True)
+    task_id = f"task-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+    task_paths = _task_paths(task_id)
     summary = ResearchTaskSummary(
         task_id=task_id,
         task_kind="export_panel",
         status="queued",
         display_name=request.display_name or "Export Panel",
+        description=request.description,
         requested_by=request.requested_by,
         created_at=_now_iso(),
         output_dir=str(_resolve_artifact_path(request.output) or request.output),
         message="Task queued",
-        command=command,
-        config_payload=request.model_dump(),
-        logs={"stdout": str(_task_paths(task_id)[2]), "stderr": str(_task_paths(task_id)[3])},
+        command=_build_export_panel_command(request),
+        config_payload=request.model_dump(mode="json"),
+        logs={"stdout": str(task_paths[2]), "stderr": str(task_paths[3])},
         metadata={"cwd": str(PROJECT_ROOT)},
+        source_ref=_default_task_source(request.source_ref),
+        result_path=str(task_paths[4]),
     )
-    _write_task(summary)
-    _spawn_task_worker(task_id)
-    return summary
+    return _enqueue_task(summary)
 
 
 def create_native_workflow_task(request: RunNativeWorkflowTaskRequest) -> ResearchTaskSummary:
     TASKS_ROOT.mkdir(parents=True, exist_ok=True)
     task_id = f"task-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+    config_payload = deepcopy(request.config_payload)
+    if request.description:
+        config_payload["task_description"] = request.description
+    execution_panel_path = _resolve_existing_artifact_string(config_payload.get("execution_panel_path"))
+    if execution_panel_path:
+        config_payload["execution_panel_path"] = execution_panel_path
+    else:
+        fallback_execution_panel_path = _fallback_execution_panel_path_for_source(request.source_ref)
+        if fallback_execution_panel_path:
+            config_payload["execution_panel_path"] = fallback_execution_panel_path
+        elif "execution_panel_path" in config_payload and config_payload.get("execution_panel_path"):
+            # Let the workflow fall back to its own default generation path instead of
+            # passing a guaranteed-missing artifact path through to the worker.
+            config_payload.pop("execution_panel_path", None)
     command_string = build_native_workflow_cli_command(
-        config_overrides=request.config_payload,
+        config_overrides=config_payload,
         recipe_names=request.recipe_names,
     ).replace("\\\n", " ")
     command = shlex.split(command_string)
-    output_dir = request.config_payload.get("output_dir", "artifacts/native_workflow/csi300")
+    output_dir = config_payload.get("output_dir", "artifacts/native_workflow/csi300")
+    task_paths = _task_paths(task_id)
     summary = ResearchTaskSummary(
         task_id=task_id,
         task_kind="run_native_workflow",
         status="queued",
         display_name=request.display_name or "Run Native Workflow",
+        description=request.description,
         requested_by=request.requested_by,
         created_at=_now_iso(),
         output_dir=str(_resolve_artifact_path(output_dir) or output_dir),
         message="Task queued",
         command=command,
         config_payload={
-            "config_payload": request.config_payload,
-            "recipe_names": request.recipe_names,
+            "config_payload": config_payload,
+            "recipe_names": list(request.recipe_names or []),
         },
-        logs={"stdout": str(_task_paths(task_id)[2]), "stderr": str(_task_paths(task_id)[3])},
+        logs={"stdout": str(task_paths[2]), "stderr": str(task_paths[3])},
         metadata={"cwd": str(PROJECT_ROOT)},
+        source_ref=_default_task_source(request.source_ref),
+        result_path=str(task_paths[4]),
     )
-    _write_task(summary)
-    _spawn_task_worker(task_id)
-    return summary
+    return _enqueue_task(summary)
 
 
 def update_task_status(task_dir: Path, **updates: Any) -> ResearchTaskSummary:
@@ -1513,12 +1800,200 @@ def update_task_status(task_dir: Path, **updates: Any) -> ResearchTaskSummary:
     return summary
 
 
+def _maybe_kill_process_group(pid: int | None) -> None:
+    if pid is None:
+        return
+    try:
+        os.killpg(int(pid), signal.SIGTERM)
+    except (OSError, ProcessLookupError):
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            return
+
+
+def run_task_queue() -> TaskBoardResponse:
+    state = _load_queue_state()
+    if state.running_task_id and _pid_exists(state.dispatcher_pid):
+        return list_tasks()
+    if not state.queued_task_ids:
+        _write_queue_state(state.model_copy(update={"dispatcher_status": "idle", "dispatcher_pid": None}))
+        return list_tasks()
+
+    process = subprocess.Popen(
+        [sys.executable, "-m", "qlib_research.app.task_dispatcher"],
+        cwd=PROJECT_ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    _write_queue_state(state.model_copy(update={"dispatcher_status": "running", "dispatcher_pid": process.pid}))
+    return list_tasks()
+
+
+def stop_current_task() -> TaskBoardResponse:
+    state = _load_queue_state()
+    if not state.running_task_id:
+        return list_tasks()
+
+    summary = _load_task_raw(state.running_task_id)
+    update_task_status(
+        _task_paths(summary.task_id)[0],
+        status="stopping",
+        message="Stop requested",
+        metadata={**summary.metadata, "stop_requested_at": _now_iso()},
+    )
+    _write_queue_state(state.model_copy(update={"dispatcher_status": "stopping"}))
+
+    pid_candidates = [
+        state.dispatcher_pid,
+        int(summary.metadata.get("worker_pid")) if summary.metadata.get("worker_pid") is not None else None,
+        int(summary.metadata.get("child_pid")) if summary.metadata.get("child_pid") is not None else None,
+    ]
+    for pid in pid_candidates:
+        if _pid_exists(pid):
+            _maybe_kill_process_group(pid)
+            break
+    return list_tasks()
+
+
+def reorder_tasks(request: TaskReorderRequest) -> TaskBoardResponse:
+    state = _load_queue_state()
+    requested_ids = list(request.queued_task_ids)
+    if sorted(requested_ids) != sorted(state.queued_task_ids):
+        raise ValueError("Reorder payload must contain exactly the queued task ids")
+    _write_queue_state(state.model_copy(update={"queued_task_ids": requested_ids}))
+    return list_tasks()
+
+
+def remove_task(task_id: str) -> TaskBoardResponse:
+    state = _load_queue_state()
+    if task_id not in state.queued_task_ids:
+        raise ValueError("Only queued tasks can be removed")
+    summary = _load_task_raw(task_id)
+    if summary.status != "queued":
+        raise ValueError("Only queued tasks can be removed")
+    remaining = [item for item in state.queued_task_ids if item != task_id]
+    _write_queue_state(state.model_copy(update={"queued_task_ids": remaining}))
+    shutil.rmtree(_task_paths(task_id)[0], ignore_errors=True)
+    return list_tasks()
+
+
+def _suggest_rerun_output_dir(output_dir: Any, run_id: str) -> str:
+    base = str(output_dir or f"artifacts/native_workflow/{run_id}")
+    base = base.rstrip("/") or f"artifacts/native_workflow/{run_id}"
+    return f"{base}-rerun-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+
+def _resolve_existing_artifact_string(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    raw = str(value)
+    resolved = _resolve_artifact_path(raw) or Path(raw).expanduser()
+    return str(resolved) if resolved.exists() else None
+
+
+def _fallback_execution_panel_path_for_source(source_ref: TaskSourceRef | None) -> str | None:
+    if not source_ref or source_ref.kind != "run":
+        return None
+    try:
+        detail = get_run_detail(source_ref.source_id)
+    except Exception:
+        return None
+    return _resolve_existing_artifact_string(detail.config.get("execution_panel_path"))
+
+
+def get_run_task_preset(run_id: str) -> TaskPresetResponse:
+    detail = get_run_detail(run_id)
+    payload = deepcopy(detail.config)
+    payload["output_dir"] = _suggest_rerun_output_dir(payload.get("output_dir"), detail.run_id)
+    return TaskPresetResponse(
+        task_kind="run_native_workflow",
+        display_name=f"Rerun {detail.run_id}",
+        source_ref=TaskSourceRef(kind="run", source_id=detail.run_id, label=detail.run_id, path=detail.output_dir),
+        payload={
+            "display_name": f"Rerun {detail.run_id}",
+            "description": detail.quick_summary.task_description,
+            "requested_by": "webapp",
+            "source_ref": {"kind": "run", "source_id": detail.run_id, "label": detail.run_id, "path": detail.output_dir},
+            "config_payload": payload,
+            "recipe_names": [recipe.recipe_name for recipe in detail.recipes],
+        },
+    )
+
+
+def get_panel_task_preset(panel_id: str) -> TaskPresetResponse:
+    panel = get_panel_detail(panel_id)
+    matched_task: ResearchTaskSummary | None = None
+    resolved_panel_path = str(_resolve_artifact_path(panel.path) or panel.path)
+    for task in list_tasks().history_tasks:
+        if task.task_kind != "export_panel" or task.status != "succeeded":
+            continue
+        output_value = task.config_payload.get("output") or task.output_dir
+        resolved_output = str(_resolve_artifact_path(str(output_value)) or output_value)
+        if resolved_output == resolved_panel_path:
+            matched_task = task
+            break
+
+    if matched_task is not None:
+        payload = deepcopy(matched_task.config_payload)
+    else:
+        payload = {
+            "display_name": f"Re-export {panel.name}",
+            "description": panel.task_description,
+            "requested_by": "webapp",
+            "output": panel.path,
+            "start_date": panel.requested_start_date or panel.summary.get("start_date"),
+            "end_date": panel.requested_end_date or panel.summary.get("end_date"),
+            "symbols": None,
+            "universe_profile": panel.universe_profile,
+            "universe_mode": panel.universe_mode or "historical_membership",
+            "batch_size": 300,
+            "enrichment_scope": panel.enrichment_scope,
+            "feature_groups": None,
+            "included_features": None,
+            "excluded_features": None,
+        }
+    payload["display_name"] = payload.get("display_name") or f"Re-export {panel.name}"
+    payload["description"] = payload.get("description") or panel.task_description
+    payload["requested_by"] = "webapp"
+    payload["source_ref"] = {"kind": "panel", "source_id": panel.panel_id, "label": panel.name, "path": panel.path}
+    return TaskPresetResponse(
+        task_kind="export_panel",
+        display_name=str(payload["display_name"]),
+        source_ref=TaskSourceRef(kind="panel", source_id=panel.panel_id, label=panel.name, path=panel.path),
+        payload=payload,
+    )
+
+
 def task_worker_run(task_dir: Path) -> int:
     task_file = task_dir / "task.json"
     payload = _safe_read_json(task_file, {})
     summary = ResearchTaskSummary(**payload)
     stdout_path = task_dir / "stdout.log"
     stderr_path = task_dir / "stderr.log"
+    result_path = task_dir / "result.json"
+    cancellation = {"requested": False}
+    process_holder: dict[str, subprocess.Popen[str]] = {}
+
+    original_sigterm = signal.getsignal(signal.SIGTERM)
+    original_sigint = signal.getsignal(signal.SIGINT)
+
+    def _handle_cancel(_signum: int, _frame: Any) -> None:
+        cancellation["requested"] = True
+        update_task_status(
+            task_dir,
+            status="stopping",
+            message="Stop requested",
+            metadata={**summary.metadata, "worker_pid": os.getpid(), "stop_requested_at": _now_iso()},
+        )
+        process = process_holder.get("process")
+        if process is not None and process.poll() is None:
+            _maybe_kill_process_group(process.pid)
+
+    signal.signal(signal.SIGTERM, _handle_cancel)
+    signal.signal(signal.SIGINT, _handle_cancel)
     summary = update_task_status(
         task_dir,
         status="running",
@@ -1536,40 +2011,104 @@ def task_worker_run(task_dir: Path) -> int:
                 stdout=stdout_handle,
                 stderr=stderr_handle,
                 text=True,
+                start_new_session=True,
             )
-            update_task_status(task_dir, metadata={**summary.metadata, "worker_pid": os.getpid(), "child_pid": process.pid})
+            process_holder["process"] = process
+            summary = update_task_status(
+                task_dir,
+                metadata={**summary.metadata, "worker_pid": os.getpid(), "child_pid": process.pid},
+            )
             return_code = process.wait()
-        final_status = "succeeded" if return_code == 0 else "failed"
+
+        final_status = "cancelled" if cancellation["requested"] else ("succeeded" if return_code == 0 else "failed")
+        final_message = "Task cancelled by user" if cancellation["requested"] else ("Task completed" if return_code == 0 else f"Task failed with exit code {return_code}")
+        finished_at = _now_iso()
+        update_task_status(
+            task_dir,
+            status=final_status,
+            finished_at=finished_at,
+            message=final_message,
+            metadata={
+                **summary.metadata,
+                "worker_pid": os.getpid(),
+                "return_code": return_code,
+                "cancel_requested": cancellation["requested"],
+            },
+        )
+        _write_json_file(
+            result_path,
+            {
+                "task_id": summary.task_id,
+                "status": final_status,
+                "return_code": return_code,
+                "finished_at": finished_at,
+            },
+        )
+        return 0 if final_status in {"succeeded", "cancelled"} else (return_code or 1)
+    except Exception as exc:  # pragma: no cover - defensive filesystem/subprocess handling
+        final_status = "cancelled" if cancellation["requested"] else "failed"
         update_task_status(
             task_dir,
             status=final_status,
             finished_at=_now_iso(),
-            message="Task completed" if return_code == 0 else f"Task failed with exit code {return_code}",
-            metadata={**summary.metadata, "worker_pid": os.getpid(), "return_code": return_code},
-        )
-        result_path = task_dir / "result.json"
-        result_path.write_text(
-            json.dumps(
-                {
-                    "task_id": summary.task_id,
-                    "status": final_status,
-                    "return_code": return_code,
-                    "finished_at": _now_iso(),
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        return return_code
-    except Exception as exc:  # pragma: no cover - defensive filesystem/subprocess handling
-        update_task_status(
-            task_dir,
-            status="failed",
-            finished_at=_now_iso(),
-            message=f"Task worker crashed: {exc}",
+            message="Task cancelled by user" if cancellation["requested"] else f"Task worker crashed: {exc}",
             metadata={**summary.metadata, "worker_pid": os.getpid(), "worker_error": str(exc)},
         )
         with stderr_path.open("a", encoding="utf-8") as stderr_handle:
             stderr_handle.write(f"[task-worker] crashed: {exc}\n")
-        return 1
+        return 0 if cancellation["requested"] else 1
+    finally:
+        signal.signal(signal.SIGTERM, original_sigterm)
+        signal.signal(signal.SIGINT, original_sigint)
+
+
+def task_dispatcher_run() -> int:
+    TASKS_ROOT.mkdir(parents=True, exist_ok=True)
+    original_sigterm = signal.getsignal(signal.SIGTERM)
+    original_sigint = signal.getsignal(signal.SIGINT)
+    stop_requested = {"value": False}
+
+    def _handle_stop(_signum: int, _frame: Any) -> None:
+        stop_requested["value"] = True
+        state = _load_queue_state()
+        _write_queue_state(state.model_copy(update={"dispatcher_status": "stopping", "dispatcher_pid": os.getpid()}))
+
+    signal.signal(signal.SIGTERM, _handle_stop)
+    signal.signal(signal.SIGINT, _handle_stop)
+    _write_queue_state(_load_queue_state().model_copy(update={"dispatcher_status": "running", "dispatcher_pid": os.getpid()}))
+    try:
+        while True:
+            state = _load_queue_state()
+            if stop_requested["value"] or state.dispatcher_status == "stopping":
+                _write_queue_state(state.model_copy(update={"dispatcher_status": "idle", "dispatcher_pid": None, "running_task_id": None}))
+                return 0
+            if not state.queued_task_ids:
+                _write_queue_state(state.model_copy(update={"dispatcher_status": "idle", "dispatcher_pid": None, "running_task_id": None}))
+                return 0
+
+            task_id = state.queued_task_ids[0]
+            state = _write_queue_state(
+                state.model_copy(
+                    update={
+                        "queued_task_ids": state.queued_task_ids[1:],
+                        "running_task_id": task_id,
+                        "dispatcher_status": "running",
+                        "dispatcher_pid": os.getpid(),
+                    }
+                )
+            )
+            task_worker_run(_task_paths(task_id)[0])
+
+            state = _load_queue_state()
+            if state.running_task_id == task_id:
+                state = state.model_copy(update={"running_task_id": None})
+            if stop_requested["value"] or state.dispatcher_status == "stopping":
+                _write_queue_state(state.model_copy(update={"dispatcher_status": "idle", "dispatcher_pid": None, "running_task_id": None}))
+                return 0
+            if not state.queued_task_ids:
+                _write_queue_state(state.model_copy(update={"dispatcher_status": "idle", "dispatcher_pid": None, "running_task_id": None}))
+                return 0
+            _write_queue_state(state.model_copy(update={"dispatcher_status": "running", "dispatcher_pid": os.getpid()}))
+    finally:
+        signal.signal(signal.SIGTERM, original_sigterm)
+        signal.signal(signal.SIGINT, original_sigint)

@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { CalendarCheck } from "lucide-react";
 import { PageHeader } from "@/components/common/page-header";
 import { DataTable } from "@/components/data/data-table";
 import { NodeCard } from "@/components/diagnostics/node-card";
@@ -12,61 +13,11 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { getRunDetail } from "@/lib/api";
 import { formatNumber, formatPathName, formatPercent } from "@/lib/format";
-
-const CONFIG_DESCRIPTIONS: Record<string, string> = {
-  universe_profile: "研究股票池或回测范围，例如 CSI300、CSI500。",
-  panel_path: "训练与评估使用的特征面板文件路径。",
-  execution_panel_path: "执行层回放使用的行情或交易面板路径。",
-  output_dir: "本次 workflow 产物输出目录。",
-  start_date: "滚动训练与评估的起始日期。",
-  end_date: "滚动训练与评估的结束日期；为空表示用最新可用数据。",
-  batch_size: "按批处理样本时的批大小。",
-  run_export: "控制已有产物存在时是否重新导出。",
-  topk: "每期持有或评估的头部股票数量。",
-  train_weeks: "主训练窗口长度，单位为周。",
-  valid_weeks: "主验证窗口长度，单位为周。",
-  eval_count: "主流程滚动评估次数。",
-  rolling_recent_weeks: "Rolling 汇总时回看的最近周数。",
-  step_weeks: "主流程每次向前滚动的周数。",
-  walk_forward_enabled: "是否启用 walk-forward 评估。",
-  walk_forward_start_date: "Walk-forward 评估起始日期。",
-  walk_forward_end_date: "Walk-forward 评估结束日期；为空表示持续到最新。",
-  walk_forward_train_weeks: "Walk-forward 训练窗口长度，单位为周。",
-  walk_forward_valid_weeks: "Walk-forward 验证窗口长度，单位为周。",
-  walk_forward_step_weeks: "Walk-forward 每次前移的步长，单位为周。",
-  walk_forward_eval_count: "Walk-forward 评估次数；0 通常表示按可用区间自动推断。",
-  benchmark_mode: "基准收益或对照策略的选择模式。",
-  signal_objective: "模型优化目标，例如 huber、mae、rank 等。",
-  label_recipe: "标签构造方案，决定模型预测什么目标。",
-  rebalance_interval_weeks: "组合调仓频率，单位为周。",
-  hold_buffer_rank: "保留已有持仓时允许的排名缓冲区。",
-  universe_exit_policy: "标的退出股票池后的持仓处理规则。",
-  min_liquidity_filter: "最小流动性过滤阈值。",
-  min_score_spread: "最小分数离散度要求，避免信号过于拥挤。",
-  industry_max_weight: "单行业权重上限。",
-  diagnostics_enabled: "是否生成诊断类产物。",
-  run_validation_comparison: "是否比较 native 执行与 validation 结果。",
-  validation_execution_lag_steps: "Validation 执行相对信号滞后的步数。",
-  validation_only_tradable: "Validation 是否只保留可交易标的。",
-  validation_risk_degree: "Validation 组合风险暴露比例。",
-  native_risk_degree: "Native 执行组合风险暴露比例。",
-  native_only_tradable: "Native 执行是否只保留可交易标的。",
-  account: "回测账户初始资金。",
-  seed: "随机种子，用于保证实验可复现。",
-  reproducibility_mode: "复现模式，决定是否更严格地固定随机性和线程。",
-  recipe_parallel_workers: "并行执行 recipe 的 worker 数量。",
-  model_num_threads: "单个模型训练允许使用的线程数。",
-  publish_model: "是否发布训练后的模型产物。",
-  feature_spec_path: "外部特征配置文件路径。",
-  feature_groups: "启用的特征组列表。",
-  included_features: "强制纳入的特征列名单。",
-  excluded_features: "显式排除的特征列名单。",
-};
+import { describeWorkflowConfigKey } from "@/lib/workflow-config-descriptions";
 
 export default async function RunDetailPage({ params }: { params: Promise<{ runId: string }> }) {
   const { runId } = await params;
@@ -88,11 +39,17 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
 
       <PageHeader
         title={detail.run_id}
-        description=""
+        description={detail.quick_summary.task_description ?? ""}
         badge={detail.quick_summary.artifact_status}
       />
 
       <div className="flex flex-wrap gap-3">
+        <Button asChild>
+          <Link href={`/tasks?create=run_native_workflow&sourceType=run&sourceId=${encodeURIComponent(detail.run_id)}`}>
+          Create Workflow Task
+          <CalendarCheck className="h-4 w-4" />
+          </Link>
+        </Button>
         {detail.recipes.map((recipe) => (
           <Button key={recipe.recipe_name} variant="outline" asChild>
             <Link href={`/runs/${detail.run_id}/recipes/${recipe.recipe_name}`}>{recipe.recipe_name}</Link>
@@ -216,14 +173,5 @@ function formatConfigValue(key: string, value: unknown) {
 }
 
 function describeConfigKey(key: string) {
-  if (CONFIG_DESCRIPTIONS[key]) {
-    return CONFIG_DESCRIPTIONS[key];
-  }
-  if (key.endsWith("_path")) return "文件或目录路径参数。";
-  if (key.endsWith("_date")) return "日期边界参数。";
-  if (key.endsWith("_weeks")) return "时间窗口或步长参数，单位为周。";
-  if (key.endsWith("_count")) return "计数类参数，用于控制样本数或评估次数。";
-  if (key.endsWith("_enabled")) return "功能开关参数。";
-  if (key.endsWith("_workers") || key.endsWith("_threads")) return "并发或线程资源控制参数。";
-  return "工作流运行参数。";
+  return describeWorkflowConfigKey(key);
 }

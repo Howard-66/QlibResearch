@@ -78,6 +78,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--execution-panel", default=None)
     parser.add_argument("--feature-spec", default=None)
     parser.add_argument("--output-dir", default="artifacts/native_workflow/csi300")
+    parser.add_argument("--task-description", default=None)
     parser.add_argument("--universe-profile", default="csi300")
     parser.add_argument("--start-date", default="2016-01-01")
     parser.add_argument("--end-date", default=None)
@@ -170,6 +171,7 @@ def main() -> None:
         execution_panel_path=args.execution_panel,
         feature_spec_path=args.feature_spec,
         output_dir=args.output_dir,
+        task_description=args.task_description,
         start_date=args.start_date,
         end_date=args.end_date,
         batch_size=args.batch_size,

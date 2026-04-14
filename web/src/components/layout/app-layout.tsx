@@ -54,7 +54,6 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <span className="theme-kicker hidden md:inline-flex">Artifact-first</span>
             <Button
               variant="outline"
               size="sm"
