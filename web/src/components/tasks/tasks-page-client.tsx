@@ -561,21 +561,21 @@ function TaskDetailPanel({
 }) {
   if (isLoading) {
     return (
-      <Card className="glass-card">
+      <Card className="glass-card min-w-0">
         <CardContent className="p-6 text-sm text-muted-foreground">正在加载任务详情…</CardContent>
       </Card>
     );
   }
   if (!task) {
     return (
-      <Card className="glass-card">
+      <Card className="glass-card min-w-0">
         <CardContent className="p-6 text-sm text-muted-foreground">选择一个任务后，这里会显示状态、配置、控制台输出和结果摘要。</CardContent>
       </Card>
     );
   }
 
   return (
-    <Card className="glass-card">
+    <Card className="glass-card min-w-0">
       <CardHeader className="gap-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="space-y-1">
@@ -630,7 +630,7 @@ function TaskDetailPanel({
                 <CardTitle className="text-sm">Command</CardTitle>
               </CardHeader>
               <CardContent>
-                <pre className="overflow-auto rounded-lg bg-surface-1/70 p-4 text-xs leading-6">{task.command.join(" ") || "—"}</pre>
+                <pre className="w-full overflow-x-auto whitespace-pre-wrap break-all rounded-lg bg-surface-1/70 p-4 text-xs leading-6">{task.command.join(" ") || "—"}</pre>
               </CardContent>
             </Card>
           </TabsContent>

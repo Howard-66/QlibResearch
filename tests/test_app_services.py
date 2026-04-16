@@ -164,8 +164,62 @@ def test_get_recipe_detail_backfills_drawdowns_from_native_reports(monkeypatch):
 
     assert detail.overview["rolling_net_total_return"] == pytest.approx(0.12)
     assert detail.overview["rolling_max_drawdown"] == pytest.approx(-0.08)
+    assert detail.overview["rolling_sharpe_ratio"] is None
     assert detail.overview["walk_forward_net_total_return"] == pytest.approx(0.18)
     assert detail.overview["walk_forward_max_drawdown"] == pytest.approx(-0.06)
+    assert detail.overview["walk_forward_win_rate"] is None
+
+
+def test_get_recipe_detail_reads_new_performance_metric_files(monkeypatch):
+    run_dir = Path("/tmp/demo_run")
+    index_payload = {
+        "run_id": "demo_run",
+        "quick_summary": RunQuickSummary(
+            run_id="demo_run",
+            output_dir=str(run_dir),
+            recipe_names=["baseline"],
+            baseline_recipe="baseline",
+            artifact_status="ready",
+        ).model_dump(mode="json"),
+        "overview_lookup": {"baseline": {}},
+    }
+    summary_payload = {
+        "recipe_registry": {"executed_recipes": ["baseline"]},
+        "promotion_gate": {},
+    }
+    frames = {
+        "manifest": {"used_feature_columns": ["ma20"]},
+        "rolling_summary": pd.DataFrame([{"rank_ic_ir": 0.11}]),
+        "walk_forward_summary": pd.DataFrame([{"rank_ic_ir": 0.22}]),
+        "rolling_native_report": pd.DataFrame([{"net_value": 1_120_000, "relative_drawdown": -0.08}]),
+        "walk_forward_native_report": pd.DataFrame([{"net_value": 1_180_000, "relative_drawdown": -0.06}]),
+        "rolling_performance_metrics": pd.DataFrame(
+            [{"annualized_return": 0.13, "annualized_volatility": 0.21, "sharpe_ratio": 0.62, "win_rate": 0.56, "calmar_ratio": 1.63}]
+        ),
+        "walk_forward_performance_metrics": pd.DataFrame(
+            [{"annualized_return": 0.16, "annualized_volatility": 0.24, "sharpe_ratio": 0.71, "win_rate": 0.58, "calmar_ratio": 2.67}]
+        ),
+        "feature_prefilter": pd.DataFrame(),
+        "signal_diagnostics": pd.DataFrame(),
+        "portfolio_diagnostics": pd.DataFrame(),
+        "execution_diff_summary": pd.DataFrame(),
+        "slice_regime_summary": pd.DataFrame(),
+        "latest_score_frame": pd.DataFrame(),
+    }
+
+    monkeypatch.setattr(services, "_collect_run_context", lambda run_id: (run_dir, summary_payload, index_payload))
+    monkeypatch.setattr(services, "_load_recipe_frames", lambda run_dir, recipe_name, table_names: frames)
+    monkeypatch.setattr(services, "_get_recipe_config", lambda summary_payload, recipe_name: {})
+    monkeypatch.setattr(services, "_panel_summary_for_path", lambda panel_path: None)
+    monkeypatch.setattr(services, "_resolve_artifact_path", lambda value: None)
+    monkeypatch.setattr(services, "_recipe_inventory", lambda recipe_dir, prefix: [])
+
+    detail = services.get_recipe_detail("demo_run", "baseline")
+
+    assert detail.overview["rolling_annualized_return"] == pytest.approx(0.13)
+    assert detail.overview["rolling_sharpe_ratio"] == pytest.approx(0.62)
+    assert detail.overview["walk_forward_win_rate"] == pytest.approx(0.58)
+    assert detail.overview["walk_forward_calmar_ratio"] == pytest.approx(2.67)
 
 
 def test_build_run_index_payload_backfills_recipe_overview_from_summary_and_existing_index(tmp_path):

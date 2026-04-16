@@ -13,6 +13,7 @@ import { NodeCard } from "@/components/diagnostics/node-card";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { getRecipeTables } from "@/lib/api";
 import { DataTablePayload, RecipeDetail } from "@/lib/types";
 import { formatInteger, formatNumber, formatPathName, formatPercent } from "@/lib/format";
@@ -22,10 +23,22 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
   const [activeTab, setActiveTab] = React.useState("diagnostics");
   const lazyTableNames = React.useMemo(() => {
     if (activeTab === "rolling") {
-      return ["rolling_native_report", "rolling_native_monthly_return_heatmap", "rolling_feature_importance"];
+      return [
+        "rolling_native_report",
+        "rolling_performance_metrics",
+        "rolling_native_monthly_return_heatmap",
+        "rolling_native_annual_return_heatmap",
+        "rolling_feature_importance",
+      ];
     }
     if (activeTab === "walk-forward") {
-      return ["walk_forward_native_report", "walk_forward_native_monthly_return_heatmap", "walk_forward_feature_importance"];
+      return [
+        "walk_forward_native_report",
+        "walk_forward_performance_metrics",
+        "walk_forward_native_monthly_return_heatmap",
+        "walk_forward_native_annual_return_heatmap",
+        "walk_forward_feature_importance",
+      ];
     }
     if (activeTab === "snapshot") {
       return ["latest_score_frame", "portfolio_targets"];
@@ -68,16 +81,18 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
         badge={String(detail.recipe_config.signal_objective ?? "recipe")}
       />
 
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-8">
-        <StatCard dense title="Rolling rank_ic_ir" value={formatNumber(rollingSummary.rank_ic_ir, 3)} />
-        <StatCard dense title="Rolling topk excess" value={formatPercent(rollingSummary.topk_mean_excess_return_4w, 2)} />
-        <StatCard dense title="Rolling net return" value={formatPercent(detail.overview.rolling_net_total_return, 2)} />
-        <StatCard dense title="Rolling max drawdown" value={formatPercent(detail.overview.rolling_max_drawdown, 2)} />
-        <StatCard dense title="Walk-forward rank_ic_ir" value={formatNumber(walkSummary.rank_ic_ir, 3)} />
-        <StatCard dense title="Walk-forward topk excess" value={formatPercent(walkSummary.topk_mean_excess_return_4w, 2)} />
-        <StatCard dense title="Walk-forward net return" value={formatPercent(detail.overview.walk_forward_net_total_return, 2)} />
-        <StatCard dense title="Walk-forward max drawdown" value={formatPercent(detail.overview.walk_forward_max_drawdown, 2)} />
-      </div>
+      <SectionCard title="Performance Snapshot">
+        <div className="grid gap-6 xl:grid-cols-2">
+          <PerformanceMetricPanel
+            title="Rolling"
+            metrics={buildOverviewPerformanceMetrics(detail.overview, rollingSummary, "rolling")}
+          />
+          <PerformanceMetricPanel
+            title="Walk-forward"
+            metrics={buildOverviewPerformanceMetrics(detail.overview, walkSummary, "walk_forward")}
+          />
+        </div>
+      </SectionCard>
 
       <Tabs defaultValue="diagnostics" className="space-y-4" onValueChange={setActiveTab}>
         <TabsList>
@@ -126,8 +141,16 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
             <SectionCard title="Rolling Monthly Heatmap">
               <EChartsChart option={buildMonthlyHeatmap(getTable("rolling_native_monthly_return_heatmap"), "Rolling 月度收益热力图")} />
             </SectionCard>
-            <SectionCard title="Rolling Feature Importance">
-              <EChartsChart option={buildFeatureImportance(getTable("rolling_feature_importance"), "Rolling Importance Gain")} />
+            <SectionCard title="Rolling Annual Heatmap">
+              <EChartsChart option={buildAnnualHeatmap(getTable("rolling_native_annual_return_heatmap"), "Rolling 年度收益热力图")} />
+            </SectionCard>
+          </div>
+          <div className="grid gap-6 xl:grid-cols-2">
+            <SectionCard title="Rolling Mean Gain By Feature">
+              <EChartsChart option={buildFeatureImportanceMeanChart(getTable("rolling_feature_importance"), "Rolling mean_gain_by_feature")} />
+            </SectionCard>
+            <SectionCard title="Rolling Latest Feature Date / 出现次数">
+              <EChartsChart option={buildFeatureImportanceCountChart(getTable("rolling_feature_importance"), "Rolling latest_feature_date / 出现次数")} />
             </SectionCard>
           </div>
           <SectionCard title="Rolling Summary">
@@ -163,8 +186,16 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
             <SectionCard title="Walk-forward Monthly Heatmap">
               <EChartsChart option={buildMonthlyHeatmap(getTable("walk_forward_native_monthly_return_heatmap"), "Walk-forward 月度收益热力图")} />
             </SectionCard>
-            <SectionCard title="Walk-forward Feature Importance">
-              <EChartsChart option={buildFeatureImportance(getTable("walk_forward_feature_importance"), "Walk-forward Importance Gain")} />
+            <SectionCard title="Walk-forward Annual Heatmap">
+              <EChartsChart option={buildAnnualHeatmap(getTable("walk_forward_native_annual_return_heatmap"), "Walk-forward 年度收益热力图")} />
+            </SectionCard>
+          </div>
+          <div className="grid gap-6 xl:grid-cols-2">
+            <SectionCard title="Walk-forward Mean Gain By Feature">
+              <EChartsChart option={buildFeatureImportanceMeanChart(getTable("walk_forward_feature_importance"), "Walk-forward mean_gain_by_feature")} />
+            </SectionCard>
+            <SectionCard title="Walk-forward Latest Feature Date / 出现次数">
+              <EChartsChart option={buildFeatureImportanceCountChart(getTable("walk_forward_feature_importance"), "Walk-forward latest_feature_date / 出现次数")} />
             </SectionCard>
           </div>
           <SectionCard title="Walk-forward Summary">
@@ -256,11 +287,150 @@ function LazyState({
   return null;
 }
 
-function buildFeatureImportance(table: DataTablePayload, title: string): EChartsOption {
-  const rows = [...(table?.rows ?? [])].sort((a, b) => Number(b.importance_gain ?? 0) - Number(a.importance_gain ?? 0)).slice(0, 15);
+type PerformanceMetricItem = {
+  label: string;
+  value: string;
+};
+
+const PERFORMANCE_METRIC_GUIDES: Record<string, string> = {
+  rank_ic_ir: "衡量排序信号稳定性的核心指标，越高通常说明分数和未来收益的排序关系越稳定。",
+  "topk excess": "看头部选股相对基准的平均超额收益，越高说明高分股票更能跑赢基准。",
+  "Net Return": "整个回测区间扣成本后的累计净收益，先看赚钱能力，但不要脱离回撤单独判断。",
+  "Max DD": "区间内从高点回撤的最深幅度，绝对值越小越稳。",
+  "Ann Return": "把区间收益年化后的回报水平，便于和其他策略或资产做横向比较。",
+  "Ann Vol": "按周收益波动折算的年化波动率，越高说明净值路径越不平稳。",
+  Sharpe: "单位波动对应的超额回报效率，越高越好；接近 0 说明收益对波动的补偿不明显。",
+  "Win Rate": "单期收益为正的占比，用来看策略命中率，但不能替代收益幅度判断。",
+  Calmar: "年化收益相对最大回撤的效率比，越高说明回撤承受下的收益产出越好。",
+};
+
+function formatMetricValue(value: unknown, kind: "percent" | "number") {
+  return kind === "percent" ? formatPercent(value, 2) : formatNumber(value, 2);
+}
+
+function buildOverviewPerformanceMetrics(
+  overview: Record<string, unknown>,
+  summary: Record<string, unknown>,
+  prefix: "rolling" | "walk_forward",
+): PerformanceMetricItem[] {
+  return [
+    { label: "rank_ic_ir", value: formatNumber(summary.rank_ic_ir, 3) },
+    { label: "topk excess", value: formatPercent(summary.topk_mean_excess_return_4w, 2) },
+    { label: "Net Return", value: formatMetricValue(overview[`${prefix}_net_total_return`], "percent") },
+    { label: "Max DD", value: formatMetricValue(overview[`${prefix}_max_drawdown`], "percent") },
+    { label: "Ann Return", value: formatMetricValue(overview[`${prefix}_annualized_return`], "percent") },
+    { label: "Ann Vol", value: formatMetricValue(overview[`${prefix}_annualized_volatility`], "percent") },
+    { label: "Sharpe", value: formatMetricValue(overview[`${prefix}_sharpe_ratio`], "number") },
+    { label: "Win Rate", value: formatMetricValue(overview[`${prefix}_win_rate`], "percent") },
+    { label: "Calmar", value: formatMetricValue(overview[`${prefix}_calmar_ratio`], "number") },
+  ];
+}
+
+function buildTablePerformanceMetrics(row: Record<string, unknown>): PerformanceMetricItem[] {
+  return [
+    { label: "Ann Return", value: formatMetricValue(row.annualized_return, "percent") },
+    { label: "Ann Vol", value: formatMetricValue(row.annualized_volatility, "percent") },
+    { label: "Sharpe", value: formatMetricValue(row.sharpe_ratio, "number") },
+    { label: "Win Rate", value: formatMetricValue(row.win_rate, "percent") },
+    { label: "Calmar", value: formatMetricValue(row.calmar_ratio, "number") },
+  ];
+}
+
+function PerformanceMetricPanel({
+  title,
+  metrics,
+  detail,
+}: {
+  title: string;
+  metrics: PerformanceMetricItem[];
+  detail?: string;
+}) {
+  return (
+    <div className="space-y-3">
+      <div>
+        <div className="text-sm font-semibold text-foreground">{title}</div>
+        {detail ? <div className="text-xs text-muted-foreground">{detail}</div> : null}
+      </div>
+      <TooltipProvider delayDuration={150}>
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
+          {metrics.map((metric) => (
+            <Tooltip key={`${title}-${metric.label}`}>
+              <TooltipTrigger asChild>
+                <div className="min-w-0">
+                  <StatCard compact title={metric.label} value={metric.value} />
+                </div>
+              </TooltipTrigger>
+              <TooltipContent className="max-w-64 whitespace-normal leading-5">
+                {PERFORMANCE_METRIC_GUIDES[metric.label] ?? "用于辅助判断策略收益质量和稳定性的表现指标。"}
+              </TooltipContent>
+            </Tooltip>
+          ))}
+        </div>
+      </TooltipProvider>
+    </div>
+  );
+}
+
+type AggregatedFeatureImportance = {
+  feature: string;
+  meanGain: number;
+  occurrenceCount: number;
+  latestFeatureDate: string | null;
+};
+
+function aggregateFeatureImportance(table: DataTablePayload): AggregatedFeatureImportance[] {
+  const grouped = new Map<string, { totalGain: number; occurrenceCount: number; latestFeatureDate: string | null }>();
+
+  for (const row of table?.rows ?? []) {
+    const feature = String(row.feature ?? "").trim();
+    if (!feature) {
+      continue;
+    }
+    const importanceGain = Number(row.importance_gain ?? 0);
+    const featureDate = row.feature_date ? String(row.feature_date) : null;
+    const current = grouped.get(feature) ?? { totalGain: 0, occurrenceCount: 0, latestFeatureDate: null };
+    current.totalGain += Number.isFinite(importanceGain) ? importanceGain : 0;
+    current.occurrenceCount += 1;
+    if (featureDate && (!current.latestFeatureDate || featureDate > current.latestFeatureDate)) {
+      current.latestFeatureDate = featureDate;
+    }
+    grouped.set(feature, current);
+  }
+
+  return Array.from(grouped.entries()).map(([feature, stats]) => ({
+    feature,
+    meanGain: stats.occurrenceCount > 0 ? stats.totalGain / stats.occurrenceCount : 0,
+    occurrenceCount: stats.occurrenceCount,
+    latestFeatureDate: stats.latestFeatureDate,
+  }));
+}
+
+function formatFeatureDateLabel(value: string | null): string {
+  if (!value) {
+    return "—";
+  }
+  return value.includes("T") ? value.split("T")[0] : value;
+}
+
+function buildFeatureImportanceMeanChart(table: DataTablePayload, title: string): EChartsOption {
+  const rows = aggregateFeatureImportance(table)
+    .sort((a, b) => b.meanGain - a.meanGain || b.occurrenceCount - a.occurrenceCount || a.feature.localeCompare(b.feature))
+    .slice(0, 15);
   return {
     title: { text: title, textStyle: { color: "hsl(var(--foreground))", fontSize: 13 } },
-    tooltip: { trigger: "axis" },
+    tooltip: {
+      trigger: "axis",
+      formatter: (params: Array<{ axisValueLabel?: string; data?: { meanGain?: number; occurrenceCount?: number; latestFeatureDate?: string | null } }>) => {
+        const item = params[0];
+        const data = item?.data;
+        return [
+          item?.axisValueLabel ?? "—",
+          `mean_gain: ${Number(data?.meanGain ?? 0).toFixed(2)}`,
+          `出现次数: ${Number(data?.occurrenceCount ?? 0)}`,
+          `latest_feature_date: ${formatFeatureDateLabel(data?.latestFeatureDate ?? null)}`,
+        ].join("<br/>");
+      },
+    },
     grid: { left: 120, right: 16, top: 40, bottom: 24 },
     xAxis: { type: "value" as const },
     yAxis: {
@@ -270,8 +440,63 @@ function buildFeatureImportance(table: DataTablePayload, title: string): ECharts
     series: [
       {
         type: "bar" as const,
-        data: rows.map((row) => Number(row.importance_gain ?? 0)).reverse(),
+        data: rows.map((row) => ({
+          value: row.meanGain,
+          meanGain: row.meanGain,
+          occurrenceCount: row.occurrenceCount,
+          latestFeatureDate: row.latestFeatureDate,
+        })).reverse(),
         itemStyle: { color: "hsl(var(--chart-1))" },
+        label: {
+          show: true,
+          position: "right",
+          formatter: (params: { data?: { value?: number } }) => Number(params.data?.value ?? 0).toFixed(1),
+        },
+      },
+    ],
+  } as EChartsOption;
+}
+
+function buildFeatureImportanceCountChart(table: DataTablePayload, title: string): EChartsOption {
+  const rows = aggregateFeatureImportance(table)
+    .sort((a, b) => b.occurrenceCount - a.occurrenceCount || b.meanGain - a.meanGain || a.feature.localeCompare(b.feature))
+    .slice(0, 15);
+  return {
+    title: { text: title, textStyle: { color: "hsl(var(--foreground))", fontSize: 13 } },
+    tooltip: {
+      trigger: "axis",
+      formatter: (params: Array<{ axisValueLabel?: string; data?: { value?: number; meanGain?: number; latestFeatureDate?: string | null } }>) => {
+        const item = params[0];
+        const data = item?.data;
+        return [
+          item?.axisValueLabel ?? "—",
+          `出现次数: ${Number(data?.value ?? 0)}`,
+          `latest_feature_date: ${formatFeatureDateLabel(data?.latestFeatureDate ?? null)}`,
+          `mean_gain: ${Number(data?.meanGain ?? 0).toFixed(2)}`,
+        ].join("<br/>");
+      },
+    },
+    grid: { left: 120, right: 16, top: 40, bottom: 24 },
+    xAxis: { type: "value" as const, minInterval: 1 },
+    yAxis: {
+      type: "category" as const,
+      data: rows.map((row) => row.feature).reverse(),
+    },
+    series: [
+      {
+        type: "bar" as const,
+        data: rows.map((row) => ({
+          value: row.occurrenceCount,
+          meanGain: row.meanGain,
+          latestFeatureDate: row.latestFeatureDate,
+        })).reverse(),
+        itemStyle: { color: "hsl(var(--chart-2))" },
+        label: {
+          show: true,
+          position: "right",
+          formatter: (params: { data?: { value?: number; latestFeatureDate?: string | null } }) =>
+            `${Number(params.data?.value ?? 0)} / ${formatFeatureDateLabel(params.data?.latestFeatureDate ?? null)}`,
+        },
       },
     ],
   } as EChartsOption;
@@ -295,9 +520,54 @@ function buildMonthlyHeatmap(table: DataTablePayload, title: string): EChartsOpt
     xAxis: { type: "category" as const, data: months },
     yAxis: { type: "category" as const, data: years },
     visualMap: {
+      show: false,
       min: -absoluteMax,
       max: absoluteMax,
-      calculable: true,
+      orient: "horizontal",
+      left: "center",
+      bottom: 0,
+      inRange: {
+        color: ["#198754", "#f7f1e3", "#c92a2a"],
+      },
+    },
+    series: [
+      {
+        type: "heatmap" as const,
+        data,
+        label: {
+          show: true,
+          formatter: (params: { value?: [number, number, number] | undefined }) =>
+            `${(Number(params.value?.[2] ?? 0) * 100).toFixed(1)}%`,
+        },
+      },
+    ],
+  } as EChartsOption;
+}
+
+function buildAnnualHeatmap(table: DataTablePayload, title: string): EChartsOption {
+  const row = table?.rows?.[0] ?? {};
+  const years = (table?.columns ?? []).filter((column) => /^\d{4}$/.test(column));
+  const data = years.map((year, xIndex) => [xIndex, 0, Number(row[year] ?? 0)]);
+  const absoluteMax = Math.max(
+    0.01,
+    ...data.map((entry) => Math.abs(Number(entry[2] ?? 0))),
+  );
+  return {
+    title: { text: title, textStyle: { color: "hsl(var(--foreground))", fontSize: 13 } },
+    tooltip: { position: "top" },
+    grid: { left: 16, right: 16, top: 40, bottom: 24 },
+    xAxis: { type: "category" as const, data: years },
+    yAxis: {
+      type: "category" as const,
+      data: [""],
+      axisLabel: { show: false },
+      axisTick: { show: false },
+      axisLine: { show: false },
+    },
+    visualMap: {
+      show: false,
+      min: -absoluteMax,
+      max: absoluteMax,
       orient: "horizontal",
       left: "center",
       bottom: 0,

@@ -974,6 +974,82 @@ def _build_native_report_frame(report_normal: pd.DataFrame, initial_capital: flo
     return frame
 
 
+def _compute_native_performance_metrics(report_frame: pd.DataFrame, *, account: float) -> dict[str, Any]:
+    empty_metrics = {
+        "period_start": None,
+        "period_end": None,
+        "period_count": 0,
+        "net_total_return": np.nan,
+        "annualized_return": np.nan,
+        "annualized_volatility": np.nan,
+        "sharpe_ratio": np.nan,
+        "win_rate": np.nan,
+        "max_drawdown": np.nan,
+        "calmar_ratio": np.nan,
+    }
+    if report_frame.empty:
+        return empty_metrics
+
+    frame = report_frame.copy()
+    frame["datetime"] = pd.to_datetime(frame["datetime"], errors="coerce")
+    frame["net_return"] = pd.to_numeric(frame.get("net_return"), errors="coerce")
+    frame["net_value"] = pd.to_numeric(frame.get("net_value"), errors="coerce")
+    frame["relative_drawdown"] = pd.to_numeric(frame.get("relative_drawdown"), errors="coerce")
+    frame = frame.dropna(subset=["datetime"]).sort_values("datetime")
+    if frame.empty:
+        return empty_metrics
+
+    returns = frame["net_return"].dropna()
+    net_values = frame["net_value"].dropna()
+    drawdowns = frame["relative_drawdown"].dropna()
+    period_start = pd.Timestamp(frame["datetime"].iloc[0])
+    period_end = pd.Timestamp(frame["datetime"].iloc[-1])
+    elapsed_days = max((period_end - period_start).days, 0)
+    total_return = float(net_values.iloc[-1] / float(account) - 1.0) if not net_values.empty else np.nan
+    annualized_return = (
+        (1.0 + total_return) ** (365.25 / elapsed_days) - 1.0
+        if elapsed_days > 0 and pd.notna(total_return) and total_return > -1.0
+        else np.nan
+    )
+    weekly_volatility = returns.std()
+    annualized_volatility = float(weekly_volatility * np.sqrt(52)) if pd.notna(weekly_volatility) else np.nan
+    sharpe_ratio = (
+        float(returns.mean() / weekly_volatility * np.sqrt(52))
+        if pd.notna(weekly_volatility) and weekly_volatility > 0
+        else np.nan
+    )
+    win_rate = float((returns > 0).mean()) if not returns.empty else np.nan
+    max_drawdown = float(drawdowns.min()) if not drawdowns.empty else np.nan
+    calmar_ratio = (
+        float(annualized_return / abs(max_drawdown))
+        if pd.notna(annualized_return) and pd.notna(max_drawdown) and max_drawdown < 0
+        else np.nan
+    )
+    return {
+        "period_start": str(period_start.date()),
+        "period_end": str(period_end.date()),
+        "period_count": int(len(frame)),
+        "net_total_return": total_return,
+        "annualized_return": float(annualized_return) if pd.notna(annualized_return) else np.nan,
+        "annualized_volatility": annualized_volatility,
+        "sharpe_ratio": sharpe_ratio,
+        "win_rate": win_rate,
+        "max_drawdown": max_drawdown,
+        "calmar_ratio": calmar_ratio,
+    }
+
+
+def build_native_performance_metrics_frame(
+    report_frame: pd.DataFrame,
+    *,
+    recipe_name: str,
+    bundle_name: str,
+    account: float,
+) -> pd.DataFrame:
+    metrics = _compute_native_performance_metrics(report_frame, account=account)
+    return pd.DataFrame([{"recipe": recipe_name, "bundle": bundle_name, **metrics}])
+
+
 def build_monthly_return_heatmap_frame(report_frame: pd.DataFrame, value_column: str = "net_value") -> pd.DataFrame:
     if report_frame.empty or "datetime" not in report_frame.columns or value_column not in report_frame.columns:
         return pd.DataFrame()
@@ -1164,16 +1240,25 @@ def _native_run_summary_row(
 ) -> dict[str, Any]:
     final_net_value = float(report_frame["net_value"].iloc[-1]) if not report_frame.empty else np.nan
     benchmark_value = float(report_frame["benchmark_value"].iloc[-1]) if not report_frame.empty else np.nan
+    performance_metrics = _compute_native_performance_metrics(report_frame, account=config.account)
     return {
         "recipe": recipe_name,
         "bundle": bundle_name,
         "final_net_value": final_net_value,
-        "net_total_return": final_net_value / config.account - 1.0 if pd.notna(final_net_value) else np.nan,
+        "net_total_return": performance_metrics["net_total_return"],
         "benchmark_total_return": benchmark_value / config.account - 1.0 if pd.notna(benchmark_value) else np.nan,
         "cost_drag": float(report_frame["cost"].sum()) if "cost" in report_frame.columns else 0.0,
-        "strategy_max_drawdown": float(report_frame["relative_drawdown"].min()) if "relative_drawdown" in report_frame.columns else np.nan,
+        "strategy_max_drawdown": performance_metrics["max_drawdown"],
         "strategy_excess_drawdown": float(report_frame["benchmark_excess_drawdown"].min()) if "benchmark_excess_drawdown" in report_frame.columns else np.nan,
         "turnover_mean": float(pd.to_numeric(report_frame.get("turnover"), errors="coerce").mean()) if "turnover" in report_frame.columns else np.nan,
+        "period_start": performance_metrics["period_start"],
+        "period_end": performance_metrics["period_end"],
+        "period_count": performance_metrics["period_count"],
+        "annualized_return": performance_metrics["annualized_return"],
+        "annualized_volatility": performance_metrics["annualized_volatility"],
+        "sharpe_ratio": performance_metrics["sharpe_ratio"],
+        "win_rate": performance_metrics["win_rate"],
+        "calmar_ratio": performance_metrics["calmar_ratio"],
     }
 
 
@@ -1241,6 +1326,11 @@ def _build_recipe_overview_row_from_artifacts(recipe_name: str, artifacts: Nativ
         "rolling_excess_drawdown": rolling_native_row.get("strategy_excess_drawdown"),
         "rolling_cost_drag": rolling_native_row.get("cost_drag"),
         "rolling_turnover_mean": rolling_native_row.get("turnover_mean"),
+        "rolling_annualized_return": rolling_native_row.get("annualized_return"),
+        "rolling_annualized_volatility": rolling_native_row.get("annualized_volatility"),
+        "rolling_sharpe_ratio": rolling_native_row.get("sharpe_ratio"),
+        "rolling_win_rate": rolling_native_row.get("win_rate"),
+        "rolling_calmar_ratio": rolling_native_row.get("calmar_ratio"),
         "walk_forward_rank_ic_ir": walk_forward_summary_row.get("rank_ic_ir"),
         "walk_forward_topk_mean_excess_return_4w": walk_forward_summary_row.get("topk_mean_excess_return_4w"),
         "walk_forward_net_total_return": walk_forward_native_row.get("net_total_return"),
@@ -1250,6 +1340,11 @@ def _build_recipe_overview_row_from_artifacts(recipe_name: str, artifacts: Nativ
         "walk_forward_excess_drawdown": walk_forward_native_row.get("strategy_excess_drawdown"),
         "walk_forward_cost_drag": walk_forward_native_row.get("cost_drag"),
         "walk_forward_turnover_mean": walk_forward_native_row.get("turnover_mean"),
+        "walk_forward_annualized_return": walk_forward_native_row.get("annualized_return"),
+        "walk_forward_annualized_volatility": walk_forward_native_row.get("annualized_volatility"),
+        "walk_forward_sharpe_ratio": walk_forward_native_row.get("sharpe_ratio"),
+        "walk_forward_win_rate": walk_forward_native_row.get("win_rate"),
+        "walk_forward_calmar_ratio": walk_forward_native_row.get("calmar_ratio"),
     }
 
 
@@ -1521,6 +1616,12 @@ def run_native_recipe(
         bundle["feature_importance"].to_csv(recipe_dir / f"{bundle_name}_feature_importance.csv", index=False)
         native_report = _build_native_report_frame(native_results[bundle_name].artifacts.report_normal, config.account)
         native_report.to_csv(recipe_dir / f"{bundle_name}_native_report.csv", index=False)
+        build_native_performance_metrics_frame(
+            native_report,
+            recipe_name=recipe.name,
+            bundle_name=bundle_name,
+            account=config.account,
+        ).to_csv(recipe_dir / f"{bundle_name}_performance_metrics.csv", index=False)
         build_monthly_return_heatmap_frame(native_report).to_csv(
             recipe_dir / f"{bundle_name}_native_monthly_return_heatmap.csv"
         )

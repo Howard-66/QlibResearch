@@ -96,7 +96,9 @@ REQUIRED_RECIPE_ARTIFACTS = {
 OPTIONAL_RECIPE_CSVS = {
     "feature_corr_candidates.csv",
     "rolling_predictions.csv",
+    "rolling_performance_metrics.csv",
     "walk_forward_predictions.csv",
+    "walk_forward_performance_metrics.csv",
     "rolling_native_annual_return_heatmap.csv",
     "walk_forward_native_annual_return_heatmap.csv",
 }
@@ -112,6 +114,8 @@ RUN_INDEX_RECIPE_FILES = {
     "execution_diff_summary.csv",
     "rolling_native_report.csv",
     "walk_forward_native_report.csv",
+    "rolling_performance_metrics.csv",
+    "walk_forward_performance_metrics.csv",
 }
 
 RECIPE_TABLE_FILES = {
@@ -130,6 +134,8 @@ RECIPE_TABLE_FILES = {
     "walk_forward_feature_importance": "walk_forward_feature_importance.csv",
     "latest_score_frame": "latest_score_frame.csv",
     "portfolio_targets": "portfolio_targets.csv",
+    "rolling_performance_metrics": "rolling_performance_metrics.csv",
+    "walk_forward_performance_metrics": "walk_forward_performance_metrics.csv",
     "rolling_native_monthly_return_heatmap": "rolling_native_monthly_return_heatmap.csv",
     "walk_forward_native_monthly_return_heatmap": "walk_forward_native_monthly_return_heatmap.csv",
     "rolling_native_annual_return_heatmap": "rolling_native_annual_return_heatmap.csv",
@@ -344,6 +350,12 @@ def _safe_native_report_max_drawdown(frame: pd.DataFrame) -> float | None:
     return None
 
 
+def _performance_metrics_row(frame: pd.DataFrame) -> dict[str, Any]:
+    if frame.empty:
+        return {}
+    return {str(key): _normalize_value(value) for key, value in frame.iloc[0].to_dict().items()}
+
+
 def _summary_overview_lookup(summary_payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
     raw_lookup = summary_payload.get("overview_lookup", {})
     if not isinstance(raw_lookup, dict):
@@ -400,9 +412,13 @@ def _build_recipe_overview_row(
 ) -> dict[str, Any]:
     rolling_summary = recipe_frames.get("rolling_summary", pd.DataFrame())
     walk_summary = recipe_frames.get("walk_forward_summary", pd.DataFrame())
+    rolling_performance = recipe_frames.get("rolling_performance_metrics", pd.DataFrame())
+    walk_forward_performance = recipe_frames.get("walk_forward_performance_metrics", pd.DataFrame())
     manifest = recipe_frames.get("manifest", {}) if isinstance(recipe_frames.get("manifest", {}), dict) else {}
     rolling_row = _summary_row(rolling_summary)
     walk_row = _summary_row(walk_summary)
+    rolling_performance_row = _performance_metrics_row(rolling_performance)
+    walk_forward_performance_row = _performance_metrics_row(walk_forward_performance)
     computed_row = {
         "recipe": recipe_name,
         "used_feature_count": rolling_row.get("used_feature_count") or walk_row.get("used_feature_count") or len(manifest.get("used_feature_columns", [])),
@@ -410,10 +426,20 @@ def _build_recipe_overview_row(
         "rolling_topk_mean_excess_return_4w": rolling_row.get("topk_mean_excess_return_4w"),
         "rolling_net_total_return": _safe_native_report_return(recipe_frames.get("rolling_native_report", pd.DataFrame())),
         "rolling_max_drawdown": _safe_native_report_max_drawdown(recipe_frames.get("rolling_native_report", pd.DataFrame())),
+        "rolling_annualized_return": rolling_performance_row.get("annualized_return"),
+        "rolling_annualized_volatility": rolling_performance_row.get("annualized_volatility"),
+        "rolling_sharpe_ratio": rolling_performance_row.get("sharpe_ratio"),
+        "rolling_win_rate": rolling_performance_row.get("win_rate"),
+        "rolling_calmar_ratio": rolling_performance_row.get("calmar_ratio"),
         "walk_forward_rank_ic_ir": walk_row.get("rank_ic_ir"),
         "walk_forward_topk_mean_excess_return_4w": walk_row.get("topk_mean_excess_return_4w"),
         "walk_forward_net_total_return": _safe_native_report_return(recipe_frames.get("walk_forward_native_report", pd.DataFrame())),
         "walk_forward_max_drawdown": _safe_native_report_max_drawdown(recipe_frames.get("walk_forward_native_report", pd.DataFrame())),
+        "walk_forward_annualized_return": walk_forward_performance_row.get("annualized_return"),
+        "walk_forward_annualized_volatility": walk_forward_performance_row.get("annualized_volatility"),
+        "walk_forward_sharpe_ratio": walk_forward_performance_row.get("sharpe_ratio"),
+        "walk_forward_win_rate": walk_forward_performance_row.get("win_rate"),
+        "walk_forward_calmar_ratio": walk_forward_performance_row.get("calmar_ratio"),
     }
     return _merge_overview_rows(
         computed_row,
@@ -540,6 +566,8 @@ def _load_recipe_summary_inputs(recipe_dir: Path) -> dict[str, Any]:
         "execution_diff_summary": _safe_read_csv(recipe_dir / "execution_diff_summary.csv"),
         "rolling_native_report": _safe_read_csv(recipe_dir / "rolling_native_report.csv"),
         "walk_forward_native_report": _safe_read_csv(recipe_dir / "walk_forward_native_report.csv"),
+        "rolling_performance_metrics": _safe_read_csv(recipe_dir / "rolling_performance_metrics.csv"),
+        "walk_forward_performance_metrics": _safe_read_csv(recipe_dir / "walk_forward_performance_metrics.csv"),
     }
 
 
@@ -1147,7 +1175,14 @@ def get_recipe_detail(run_id: str, recipe_name: str) -> RecipeDetail:
     recipe_frames = _load_recipe_frames(
         run_dir,
         recipe_name,
-        RUN_DETAIL_NODE_TABLES.union(RECIPE_DETAIL_INITIAL_TABLES).union({"rolling_native_report", "walk_forward_native_report"}),
+        RUN_DETAIL_NODE_TABLES.union(RECIPE_DETAIL_INITIAL_TABLES).union(
+            {
+                "rolling_native_report",
+                "walk_forward_native_report",
+                "rolling_performance_metrics",
+                "walk_forward_performance_metrics",
+            }
+        ),
     )
     overview = _resolve_recipe_overview(
         recipe_name=recipe_name,

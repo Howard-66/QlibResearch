@@ -12,6 +12,7 @@ from qlib_research.core.qlib_native_workflow import (
     _build_native_workflow_summary_payload,
     _build_parallel_recipe_heartbeat,
     _prime_parallel_workflow_inputs,
+    build_native_performance_metrics_frame,
     build_annual_return_heatmap_frame,
     build_monthly_return_heatmap_frame,
     build_native_recipe_registry,
@@ -128,6 +129,11 @@ def test_build_native_workflow_summary_payload_collects_recipe_overview(tmp_path
                         "strategy_excess_drawdown": -0.03,
                         "cost_drag": 0.01,
                         "turnover_mean": 0.25,
+                        "annualized_return": 0.15,
+                        "annualized_volatility": 0.22,
+                        "sharpe_ratio": 0.68,
+                        "win_rate": 0.57,
+                        "calmar_ratio": 2.1,
                     },
                     {
                         "bundle": "walk_forward",
@@ -138,6 +144,11 @@ def test_build_native_workflow_summary_payload_collects_recipe_overview(tmp_path
                         "strategy_excess_drawdown": -0.02,
                         "cost_drag": 0.02,
                         "turnover_mean": 0.3,
+                        "annualized_return": 0.11,
+                        "annualized_volatility": 0.18,
+                        "sharpe_ratio": 0.61,
+                        "win_rate": 0.54,
+                        "calmar_ratio": 2.2,
                     },
                 ]
             ),
@@ -161,9 +172,41 @@ def test_build_native_workflow_summary_payload_collects_recipe_overview(tmp_path
     assert overview["rolling_rank_ic_ir"] == pytest.approx(0.11)
     assert overview["rolling_net_total_return"] == pytest.approx(0.12)
     assert overview["rolling_max_drawdown"] == pytest.approx(-0.07)
+    assert overview["rolling_sharpe_ratio"] == pytest.approx(0.68)
+    assert overview["rolling_win_rate"] == pytest.approx(0.57)
     assert overview["walk_forward_rank_ic_ir"] == pytest.approx(0.07)
     assert overview["walk_forward_net_total_return"] == pytest.approx(0.08)
     assert overview["walk_forward_max_drawdown"] == pytest.approx(-0.05)
+    assert overview["walk_forward_annualized_return"] == pytest.approx(0.11)
+    assert overview["walk_forward_calmar_ratio"] == pytest.approx(2.2)
+
+
+def test_build_native_performance_metrics_frame_computes_weekly_metrics():
+    report = pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(["2026-01-02", "2026-01-09", "2026-01-16"]),
+            "net_value": [105.0, 102.9, 105.987],
+            "net_return": [0.05, -0.02, 0.03],
+            "relative_drawdown": [0.0, -0.02, 0.0],
+        }
+    )
+
+    metrics = build_native_performance_metrics_frame(
+        report,
+        recipe_name="baseline",
+        bundle_name="rolling",
+        account=100.0,
+    ).iloc[0]
+
+    assert metrics["period_start"] == "2026-01-02"
+    assert metrics["period_end"] == "2026-01-16"
+    assert metrics["period_count"] == 3
+    assert metrics["net_total_return"] == pytest.approx(0.05987)
+    assert metrics["annualized_volatility"] == pytest.approx(0.2601, rel=1e-3)
+    assert metrics["sharpe_ratio"] == pytest.approx(4.0, rel=1e-2)
+    assert metrics["win_rate"] == pytest.approx(2 / 3)
+    assert metrics["max_drawdown"] == pytest.approx(-0.02)
+    assert metrics["calmar_ratio"] > 0
 
 
 def test_run_native_notebook_workflow_accepts_cli_style_overrides(tmp_path):

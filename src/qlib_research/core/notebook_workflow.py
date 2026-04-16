@@ -97,6 +97,7 @@ NATIVE_RECIPE_CSV_FILES = {
     "rolling_feature_importance": "rolling_feature_importance.csv",
     "rolling_native_report": "rolling_native_report.csv",
     "rolling_native_benchmark": "rolling_native_benchmark.csv",
+    "rolling_performance_metrics": "rolling_performance_metrics.csv",
     "rolling_native_monthly_return_heatmap": "rolling_native_monthly_return_heatmap.csv",
     "rolling_native_annual_return_heatmap": "rolling_native_annual_return_heatmap.csv",
     "walk_forward_predictions": "walk_forward_predictions.csv",
@@ -105,6 +106,7 @@ NATIVE_RECIPE_CSV_FILES = {
     "walk_forward_feature_importance": "walk_forward_feature_importance.csv",
     "walk_forward_native_report": "walk_forward_native_report.csv",
     "walk_forward_native_benchmark": "walk_forward_native_benchmark.csv",
+    "walk_forward_performance_metrics": "walk_forward_performance_metrics.csv",
     "walk_forward_native_monthly_return_heatmap": "walk_forward_native_monthly_return_heatmap.csv",
     "walk_forward_native_annual_return_heatmap": "walk_forward_native_annual_return_heatmap.csv",
 }
