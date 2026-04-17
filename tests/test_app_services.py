@@ -473,12 +473,29 @@ def test_compare_recipe_items_returns_recipe_level_payload(monkeypatch):
     }
     baseline_frames = {
         "manifest": {},
-        "rolling_summary": pd.DataFrame([{"rank_ic_ir": 0.21, "topk_mean_excess_return_4w": 0.03, "coverage_mean": 298}]),
+        "rolling_summary": pd.DataFrame(
+            [{"rank_ic_ir": 0.21, "topk_mean_excess_return_4w": 0.03, "topk_hit_rate": 0.61, "coverage_mean": 298}]
+        ),
         "rolling_native_report": pd.DataFrame(
             [
-                {"datetime": "2026-01-02", "net_value": 1_000_000, "benchmark_value": 1_000_000, "turnover": 0.3},
-                {"datetime": "2026-01-09", "net_value": 1_120_000, "benchmark_value": 1_050_000, "turnover": 0.6},
+                {
+                    "datetime": "2026-01-02",
+                    "net_value": 1_000_000,
+                    "benchmark_value": 1_000_000,
+                    "turnover": 0.3,
+                    "relative_drawdown": -0.08,
+                },
+                {
+                    "datetime": "2026-01-09",
+                    "net_value": 1_120_000,
+                    "benchmark_value": 1_050_000,
+                    "turnover": 0.6,
+                    "relative_drawdown": -0.03,
+                },
             ]
+        ),
+        "rolling_performance_metrics": pd.DataFrame(
+            [{"annualized_return": 0.18, "sharpe_ratio": 1.12, "calmar_ratio": 2.4}]
         ),
         "execution_diff_summary": pd.DataFrame(
             [{"bundle": "rolling", "native_minus_validation_return": 0.02, "native_max_drawdown": -0.08}]
@@ -490,16 +507,34 @@ def test_compare_recipe_items_returns_recipe_level_payload(monkeypatch):
         "latest_score_frame": pd.DataFrame([{"instrument": "AAA.SH", "score": 0.5}]),
         "walk_forward_summary": pd.DataFrame(),
         "walk_forward_native_report": pd.DataFrame(),
+        "walk_forward_performance_metrics": pd.DataFrame(),
         "walk_forward_feature_importance": pd.DataFrame(),
     }
     candidate_frames = {
         "manifest": {},
-        "rolling_summary": pd.DataFrame([{"rank_ic_ir": 0.18, "topk_mean_excess_return_4w": 0.02, "coverage_mean": 260}]),
+        "rolling_summary": pd.DataFrame(
+            [{"rank_ic_ir": 0.18, "topk_mean_excess_return_4w": 0.02, "topk_hit_rate": 0.55, "coverage_mean": 260}]
+        ),
         "rolling_native_report": pd.DataFrame(
             [
-                {"datetime": "2026-01-02", "net_value": 1_000_000, "benchmark_value": 1_000_000, "turnover": 0.2},
-                {"datetime": "2026-01-09", "net_value": 1_080_000, "benchmark_value": 1_050_000, "turnover": 0.4},
+                {
+                    "datetime": "2026-01-02",
+                    "net_value": 1_000_000,
+                    "benchmark_value": 1_000_000,
+                    "turnover": 0.2,
+                    "relative_drawdown": -0.05,
+                },
+                {
+                    "datetime": "2026-01-09",
+                    "net_value": 1_080_000,
+                    "benchmark_value": 1_050_000,
+                    "turnover": 0.4,
+                    "relative_drawdown": -0.02,
+                },
             ]
+        ),
+        "rolling_performance_metrics": pd.DataFrame(
+            [{"annualized_return": 0.14, "sharpe_ratio": 0.95, "calmar_ratio": 1.8}]
         ),
         "execution_diff_summary": pd.DataFrame(
             [{"bundle": "rolling", "native_minus_validation_return": 0.01, "native_max_drawdown": -0.05}]
@@ -511,6 +546,7 @@ def test_compare_recipe_items_returns_recipe_level_payload(monkeypatch):
         "latest_score_frame": pd.DataFrame([{"instrument": "BBB.SZ", "score": 0.4}]),
         "walk_forward_summary": pd.DataFrame(),
         "walk_forward_native_report": pd.DataFrame(),
+        "walk_forward_performance_metrics": pd.DataFrame(),
         "walk_forward_feature_importance": pd.DataFrame(),
     }
 
@@ -530,6 +566,13 @@ def test_compare_recipe_items_returns_recipe_level_payload(monkeypatch):
 
     assert len(response.items) == 2
     assert response.summary_metrics.rows[0]["rank_ic_ir"] == 0.21
+    assert response.summary_metrics.rows[0]["topk_hit_rate"] == pytest.approx(0.61)
+    assert response.summary_metrics.rows[0]["net_total_return"] == pytest.approx(0.12)
+    assert response.summary_metrics.rows[0]["max_drawdown"] == pytest.approx(-0.08)
+    assert response.summary_metrics.rows[0]["annualized_return"] == pytest.approx(0.18)
+    assert response.summary_metrics.rows[0]["sharpe_ratio"] == pytest.approx(1.12)
+    assert "native_minus_validation_return" not in response.summary_metrics.columns
+    assert "native_max_drawdown" not in response.summary_metrics.columns
     assert len(response.net_value_curves) == 3
     assert response.net_value_curves[-1].role == "benchmark"
     assert response.net_value_curves[-1].label == "Shared benchmark"

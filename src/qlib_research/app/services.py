@@ -171,6 +171,8 @@ COMPARE_REQUIRED_TABLES = {
     "walk_forward_summary",
     "rolling_native_report",
     "walk_forward_native_report",
+    "rolling_performance_metrics",
+    "walk_forward_performance_metrics",
     "rolling_feature_importance",
     "walk_forward_feature_importance",
 }
@@ -1276,12 +1278,14 @@ def compare_recipe_items(items: list[CompareItemRef]) -> CompareResponse:
         overview = _recipe_overview_lookup_from_index_payload(index_payload).get(item.recipe_name, {})
         summary_frame = recipe_frames.get(f"{item.bundle}_summary", pd.DataFrame())
         report_frame = recipe_frames.get(f"{item.bundle}_native_report", pd.DataFrame())
+        performance_frame = recipe_frames.get(f"{item.bundle}_performance_metrics", pd.DataFrame())
         exec_frame = recipe_frames.get("execution_diff_summary", pd.DataFrame())
         slice_frame = recipe_frames.get("slice_regime_summary", pd.DataFrame())
         importance_frame = recipe_frames.get(f"{item.bundle}_feature_importance", pd.DataFrame())
         snapshot_frame = recipe_frames.get("latest_score_frame", pd.DataFrame())
         summary_row = _summary_row(summary_frame)
         report_tail = _last_row(report_frame)
+        performance_row = _performance_metrics_row(performance_frame)
         exec_rows = exec_frame.to_dict(orient="records") if not exec_frame.empty else []
         matching_exec = next((row for row in exec_rows if row.get("bundle") == item.bundle), {})
         base_label = f"{item.run_id} / {item.recipe_name} / {item.bundle}"
@@ -1290,12 +1294,15 @@ def compare_recipe_items(items: list[CompareItemRef]) -> CompareResponse:
         metrics = {
             "rank_ic_ir": summary_row.get("rank_ic_ir"),
             "topk_mean_excess_return_4w": summary_row.get("topk_mean_excess_return_4w"),
+            "topk_hit_rate": summary_row.get("topk_hit_rate"),
             "coverage_mean": summary_row.get("coverage_mean"),
             "used_feature_count": summary_row.get("used_feature_count") or overview.get("used_feature_count"),
-            "net_value": report_tail.get("net_value"),
+            "net_total_return": _safe_native_report_return(report_frame),
+            "max_drawdown": _safe_native_report_max_drawdown(report_frame),
+            "annualized_return": performance_row.get("annualized_return"),
+            "sharpe_ratio": performance_row.get("sharpe_ratio"),
+            "calmar_ratio": performance_row.get("calmar_ratio"),
             "turnover": report_tail.get("turnover"),
-            "native_minus_validation_return": matching_exec.get("native_minus_validation_return"),
-            "native_max_drawdown": matching_exec.get("native_max_drawdown"),
         }
         compare_items.append(
             CompareItemResult(

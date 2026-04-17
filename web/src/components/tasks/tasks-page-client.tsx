@@ -464,7 +464,7 @@ export function TasksPageClient() {
                 </div>
               </div>
             </CardHeader>
-            <CardContent className="space-y-3">
+            <CardContent className="space-y-3 max-h-[400px] overflow-y-auto">
               {historyTasks.length ? (
                 historyTasks.map((task) => (
                   <TaskListItem
