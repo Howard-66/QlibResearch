@@ -15,12 +15,6 @@ export default async function PanelsPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        title="Panels"
-        description=""
-        badge={`${panels.length} panels`}
-      />
-
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <StatCard title="Total Panels" value={`${panels.length}`} />
         <StatCard title="CSV Panels" value={`${panels.filter((panel) => panel.format === "csv").length}`} />

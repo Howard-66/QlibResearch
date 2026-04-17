@@ -334,12 +334,6 @@ export function TasksPageClient() {
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        title="Tasks"
-        description=""
-        badge={`${taskCount} tasks`}
-      />
-
       <div className="flex flex-wrap items-center gap-3">
         <Button onClick={() => openManualEditor("export_panel")}>Add Task</Button>
         <Button
@@ -537,10 +531,10 @@ export function TasksPageClient() {
             <DialogFooter>
               <Button onClick={handleSubmitEditor} disabled={isSubmitting}>
                 {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                提交任务
+                Submit Task
               </Button>
               <Button variant="outline" onClick={() => setEditorOpen(false)}>
-                取消
+                Cancel
               </Button>
             </DialogFooter>
           </div>

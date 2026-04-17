@@ -30,12 +30,6 @@ export function RunsPageClient({ runs }: { runs: RunListItem[] }) {
 
   return (
     <div className="space-y-5">
-      <PageHeader
-        title="Workflow Runs List"
-        description="按最近 workflow runs 浏览研究输出。点击某次运行卡片后，会直接在卡片内展开 quick-judge 概要，帮助先判断值不值得继续深挖。"
-        badge={`${runs.length} runs`}
-      />
-
       <div className="space-y-3">
         {runs.map((run) => {
           const summary = run.quick_summary;

@@ -14,12 +14,6 @@ export default async function OverviewPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        title="Overview"
-        description=""
-        badge="QlibResearch WebApp"
-      />
-
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <StatCard title="Runs" value={`${overview.total_runs}`} detail="按最近修改时间排序" />
         <StatCard title="Panels" value={`${overview.total_panels}`} detail="panel 目录只读浏览" />

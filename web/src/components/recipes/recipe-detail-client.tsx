@@ -75,12 +75,6 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        title={detail.recipe_name}
-        description=""
-        badge={String(detail.recipe_config.signal_objective ?? "recipe")}
-      />
-
       <SectionCard title="Performance Snapshot">
         <div className="grid gap-6 xl:grid-cols-2">
           <PerformanceMetricPanel

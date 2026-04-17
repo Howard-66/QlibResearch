@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Trash2 } from "lucide-react";
 import { getCompare } from "@/lib/api";
 import { CompareItemRef, CompareResponse, CompareTimeseriesSeries, RunListItem } from "@/lib/types";
 
@@ -43,11 +44,6 @@ export function ComparePageClient({
   if (!mounted) {
     return (
       <div className="space-y-6">
-        <PageHeader
-          title="Compare"
-          description="对比粒度固定在 `(run, recipe, bundle)`。你可以同 run 比不同 recipe，也可以跨 run 比同 recipe 或不同 recipe。"
-          badge="2-4 compare items"
-        />
         <div className="grid gap-4 xl:grid-cols-2">
           {Array.from({ length: 2 }).map((_, index) => (
             <Card key={index} className="glass-card">
@@ -68,12 +64,6 @@ export function ComparePageClient({
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        title="Compare"
-        description="对比粒度固定在 `(run, recipe, bundle)`。你可以同 run 比不同 recipe，也可以跨 run 比同 recipe 或不同 recipe。"
-        badge="2-4 compare items"
-      />
-
       <div className="grid gap-4 xl:grid-cols-2">
         {items.map((item, index) => (
           <CompareSelector
@@ -99,13 +89,13 @@ export function ComparePageClient({
             setItems([...items, buildFallbackSelection(runs, items.length)]);
           }}
         >
-          新增对比项
+          New Compare Item
         </Button>
         <Button
           onClick={() => setSubmittedItems(items)}
           disabled={items.length < 2 || items.length > 4}
         >
-          开始对比
+          Start Comparison
         </Button>
         {compareQuery.isLoading ? <Badge variant="info">对比中…</Badge> : null}
         {compareQuery.error ? <Badge variant="destructive">对比加载失败</Badge> : null}
@@ -200,10 +190,10 @@ function CompareSelector({
     <Card className="glass-card">
       <CardHeader>
         <div className="flex items-center justify-between gap-3">
-          <CardTitle className="text-base">对比项 {index + 1}</CardTitle>
+          <CardTitle className="text-base">Compare Item {index + 1}</CardTitle>
           {onRemove ? (
-            <Button size="sm" variant="ghost" onClick={onRemove}>
-              删除
+            <Button size="sm" variant="ghost" className="h-8 w-8 p-0" onClick={onRemove}>
+              <Trash2 className="h-4 w-4" />
             </Button>
           ) : null}
         </div>

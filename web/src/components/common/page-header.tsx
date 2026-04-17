@@ -1,9 +1,8 @@
 import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 
 export function PageHeader({
   kicker,
-  title,
-  description,
   badge,
 }: {
   kicker?: string;
@@ -11,16 +10,12 @@ export function PageHeader({
   description: string;
   badge?: string;
 }) {
+  if (!kicker && !badge) return null;
+
   return (
-    <div className="space-y-3">
+    <div className={cn("flex flex-wrap items-center gap-3", kicker ? "justify-between" : "justify-end")}>
       {kicker ? <div className="theme-kicker">{kicker}</div> : null}
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="space-y-1">
-          <h1 className="text-3xl font-semibold tracking-tight text-gradient-blue">{title}</h1>
-          <p className="max-w-3xl text-sm text-muted-foreground">{description}</p>
-        </div>
-        {badge ? <Badge variant="info">{badge}</Badge> : null}
-      </div>
+      {badge ? <Badge variant="info">{badge}</Badge> : null}
     </div>
   );
 }

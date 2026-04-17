@@ -5,14 +5,6 @@ import { PageHeader } from "@/components/common/page-header";
 import { DataTable } from "@/components/data/data-table";
 import { NodeCard } from "@/components/diagnostics/node-card";
 import { RunArtifactInventory } from "@/components/runs/run-artifact-inventory";
-import {
-  Breadcrumb,
-  BreadcrumbItem,
-  BreadcrumbLink,
-  BreadcrumbList,
-  BreadcrumbPage,
-  BreadcrumbSeparator,
-} from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { getRunDetail } from "@/lib/api";
@@ -25,24 +17,6 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
 
   return (
     <div className="space-y-6">
-      <Breadcrumb>
-        <BreadcrumbList>
-          <BreadcrumbItem>
-            <BreadcrumbLink href="/runs">Runs</BreadcrumbLink>
-          </BreadcrumbItem>
-          <BreadcrumbSeparator />
-          <BreadcrumbItem>
-            <BreadcrumbPage>{detail.run_id}</BreadcrumbPage>
-          </BreadcrumbItem>
-        </BreadcrumbList>
-      </Breadcrumb>
-
-      <PageHeader
-        title={detail.run_id}
-        description={detail.quick_summary.task_description ?? ""}
-        badge={detail.quick_summary.artifact_status}
-      />
-
       <div className="flex flex-wrap gap-3">
         <Button asChild>
           <Link href={`/tasks?create=run_native_workflow&sourceType=run&sourceId=${encodeURIComponent(detail.run_id)}`}>

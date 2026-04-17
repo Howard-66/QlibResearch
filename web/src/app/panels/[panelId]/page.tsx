@@ -16,14 +16,15 @@ export default async function PanelDetailPage({ params }: { params: Promise<{ pa
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        title={panel.name}
-        description={panel.task_description ?? "Panel 详情页会展示样本规模、列目录、空值覆盖和样例记录，方便判断当前 panel 是否适合继续被 workflow 消费。"}
-        badge={panel.enrichment_scope ?? "unknown"}
-      />
-
       <div className="flex flex-wrap gap-3">
+        <Button asChild>
+          <Link href={`/tasks?create=export_panel&sourceType=panel&sourceId=${encodeURIComponent(panel.panel_id)}`}>
+          Create Export Task
+          <CalendarCheck className="h-4 w-4" />
+          </Link>
+        </Button>
         <Badge
+          className="h-[22px] text-[11px] px-2"
           variant={
             panel.universe_mode === "fixed_universe"
               ? "warning"
@@ -38,13 +39,7 @@ export default async function PanelDetailPage({ params }: { params: Promise<{ pa
               ? "Historical Membership"
               : "Unknown Universe Mode"}
         </Badge>
-        {panel.universe_profile ? <Badge variant="outline">{panel.universe_profile}</Badge> : null}
-        <Button asChild>
-          <Link href={`/tasks?create=export_panel&sourceType=panel&sourceId=${encodeURIComponent(panel.panel_id)}`}>
-          Create Export Task
-          <CalendarCheck className="h-4 w-4" />
-          </Link>
-        </Button>
+        {panel.universe_profile ? <Badge variant="outline" className="h-[22px] text-[11px] px-2">{panel.universe_profile}</Badge> : null}        
       </div>
 
       {panel.universe_mode === "historical_membership" ? (
