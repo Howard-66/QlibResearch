@@ -6,9 +6,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-TaskKind = Literal["export_panel", "run_native_workflow", "run_convergence", "publish_model", "sync_model"]
+TaskKind = Literal["export_panel", "run_native_workflow", "run_convergence", "publish_model", "sync_model", "run_research_analysis"]
 TaskStatus = Literal["queued", "running", "stopping", "succeeded", "failed", "cancelled"]
 DiagnosticStatus = Literal["healthy", "warning", "danger", "missing", "info"]
+ResearchVerdict = Literal["incumbent", "promoted", "rejected", "needs_explanation", "hold", "reject", "investigate"]
 NodeKey = Literal[
     "panel_input",
     "label_definition",
@@ -43,6 +44,31 @@ class ArtifactRef(BaseModel):
     updated_at: str | None = None
 
 
+class AnalysisReportRef(BaseModel):
+    name: str
+    path: str
+    exists: bool = True
+    engine: str | None = None
+    template: str | None = None
+    verdict: str | None = None
+    updated_at: str | None = None
+    content_type: Literal["markdown", "json", "text"] | None = None
+    content_preview: str | None = None
+
+
+class ResearchSummary(BaseModel):
+    headline: str | None = None
+    verdict: str | None = None
+    key_findings: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    recommended_next_actions: list[str] = Field(default_factory=list)
+    current_problem: str | None = None
+    recommended_action: str | None = None
+    incumbent_recipe: str | None = None
+    promoted_recipe: str | None = None
+    metrics: dict[str, Any] = Field(default_factory=dict)
+
+
 class DiagnosticNode(BaseModel):
     key: NodeKey
     status: DiagnosticStatus
@@ -70,6 +96,10 @@ class RunQuickSummary(BaseModel):
     baseline_metrics: dict[str, Any] = Field(default_factory=dict)
     has_execution_gap_issue: bool = False
     has_missing_artifacts: bool = False
+    research_status: ResearchVerdict | None = None
+    incumbent_recipe: str | None = None
+    current_problem: str | None = None
+    recommended_action: str | None = None
     updated_at: str | None = None
 
 
@@ -103,8 +133,10 @@ class RunDetail(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
     recipe_registry: dict[str, Any] = Field(default_factory=dict)
     promotion_gate: dict[str, Any] = Field(default_factory=dict)
+    research_summary: ResearchSummary = Field(default_factory=ResearchSummary)
     nodes: list[DiagnosticNode] = Field(default_factory=list)
     recipes: list[RecipeSummary] = Field(default_factory=list)
+    analysis_reports: list[AnalysisReportRef] = Field(default_factory=list)
     artifact_inventory: list[ArtifactRef] = Field(default_factory=list)
 
 
@@ -119,8 +151,10 @@ class RecipeDetail(BaseModel):
     recipe_config: dict[str, Any] = Field(default_factory=dict)
     manifest: dict[str, Any] = Field(default_factory=dict)
     overview: dict[str, Any] = Field(default_factory=dict)
+    research_summary: ResearchSummary = Field(default_factory=ResearchSummary)
     nodes: list[DiagnosticNode] = Field(default_factory=list)
     tables: dict[str, DataTablePayload] = Field(default_factory=dict)
+    analysis_reports: list[AnalysisReportRef] = Field(default_factory=list)
     artifact_inventory: list[ArtifactRef] = Field(default_factory=list)
 
 
@@ -186,6 +220,10 @@ class CompareResponse(BaseModel):
     slice_stability: DataTablePayload = Field(default_factory=DataTablePayload)
     feature_importance: dict[str, DataTablePayload] = Field(default_factory=dict)
     latest_signal_snapshot: dict[str, DataTablePayload] = Field(default_factory=dict)
+    signal_realization: dict[str, DataTablePayload] = Field(default_factory=dict)
+    sector_exposure: dict[str, DataTablePayload] = Field(default_factory=dict)
+    holding_count_drift: dict[str, DataTablePayload] = Field(default_factory=dict)
+    analysis_summary: ResearchSummary = Field(default_factory=ResearchSummary)
 
 
 class OverviewResponse(BaseModel):
@@ -231,10 +269,25 @@ class RunNativeWorkflowTaskRequest(BaseModel):
 
 
 class TaskSourceRef(BaseModel):
-    kind: Literal["manual", "run", "panel"]
+    kind: Literal["manual", "run", "panel", "recipe", "compare"]
     source_id: str
     label: str | None = None
     path: str | None = None
+
+
+class RunResearchAnalysisTaskRequest(BaseModel):
+    display_name: str | None = None
+    description: str | None = None
+    requested_by: str | None = None
+    source_ref: TaskSourceRef | None = None
+    source_kind: Literal["run", "recipe", "compare"] = "run"
+    run_id: str | None = None
+    recipe_name: str | None = None
+    compare_items: list[dict[str, Any]] | None = None
+    analysis_template: Literal["investment_report", "experiment_review", "ui_insight", "anomaly_diagnosis"] = "investment_report"
+    analysis_engine: Literal["auto", "codex_cli", "claude_cli"] = "codex_cli"
+    skills: list[str] | None = None
+    output_dir: str | None = None
 
 
 class ResearchTaskSummary(BaseModel):
@@ -282,7 +335,7 @@ class TaskBoardResponse(BaseModel):
 
 
 class TaskPresetResponse(BaseModel):
-    task_kind: Literal["export_panel", "run_native_workflow"]
+    task_kind: Literal["export_panel", "run_native_workflow", "run_research_analysis"]
     display_name: str | None = None
     source_ref: TaskSourceRef
     payload: dict[str, Any] = Field(default_factory=dict)

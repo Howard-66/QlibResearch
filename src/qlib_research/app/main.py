@@ -18,6 +18,7 @@ from qlib_research.app.contracts import (
     RecipeDetail,
     RecipeTablesResponse,
     RecipeSummary,
+    RunResearchAnalysisTaskRequest,
     ResearchTaskDetail,
     ResearchTaskSummary,
     RunDetail,
@@ -32,12 +33,15 @@ from qlib_research.app.services import (
     compare_recipe_items,
     create_export_panel_task,
     create_native_workflow_task,
+    create_research_analysis_task,
     get_overview,
     get_panel_detail,
     get_recipe_detail,
     get_recipe_tables,
+    get_recipe_analysis_task_preset,
     get_run_detail,
     get_run_artifact_inventory,
+    get_run_analysis_task_preset,
     get_task,
     get_task_logs,
     get_panel_task_preset,
@@ -168,6 +172,11 @@ def api_create_native_workflow_task(request: RunNativeWorkflowTaskRequest) -> Re
     return create_native_workflow_task(request)
 
 
+@app.post("/api/tasks/run-research-analysis", response_model=ResearchTaskSummary)
+def api_create_research_analysis_task(request: RunResearchAnalysisTaskRequest) -> ResearchTaskSummary:
+    return create_research_analysis_task(request)
+
+
 @app.post("/api/tasks/run-queue", response_model=TaskBoardResponse)
 def api_run_task_queue() -> TaskBoardResponse:
     return run_task_queue()
@@ -206,6 +215,22 @@ def api_get_panel_task_preset(panel_id: str) -> TaskPresetResponse:
 def api_get_run_task_preset(run_id: str) -> TaskPresetResponse:
     try:
         return get_run_task_preset(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/tasks/presets/runs/{run_id}/analysis", response_model=TaskPresetResponse)
+def api_get_run_analysis_task_preset(run_id: str) -> TaskPresetResponse:
+    try:
+        return get_run_analysis_task_preset(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/tasks/presets/runs/{run_id}/recipes/{recipe_name}/analysis", response_model=TaskPresetResponse)
+def api_get_recipe_analysis_task_preset(run_id: str, recipe_name: str) -> TaskPresetResponse:
+    try:
+        return get_recipe_analysis_task_preset(run_id, recipe_name)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

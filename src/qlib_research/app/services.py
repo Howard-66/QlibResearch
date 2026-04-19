@@ -8,6 +8,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import shlex
 import signal
@@ -20,6 +21,7 @@ import numpy as np
 import pandas as pd
 
 from qlib_research.app.contracts import (
+    AnalysisReportRef,
     ArtifactRef,
     ArtifactInventoryResponse,
     CompareItemRef,
@@ -37,6 +39,8 @@ from qlib_research.app.contracts import (
     RecipeDetail,
     RecipeTablesResponse,
     RecipeSummary,
+    ResearchSummary,
+    RunResearchAnalysisTaskRequest,
     ResearchTaskDetail,
     ResearchTaskSummary,
     RunDetail,
@@ -95,19 +99,24 @@ REQUIRED_RECIPE_ARTIFACTS = {
 
 OPTIONAL_RECIPE_CSVS = {
     "feature_corr_candidates.csv",
+    "holding_count_drift.csv",
+    "regime_gate_diagnostics.csv",
     "rolling_predictions.csv",
     "rolling_performance_metrics.csv",
     "walk_forward_predictions.csv",
     "walk_forward_performance_metrics.csv",
     "rolling_native_annual_return_heatmap.csv",
+    "sector_exposure_history.csv",
+    "signal_realization_bridge.csv",
     "walk_forward_native_annual_return_heatmap.csv",
 }
 
 RUN_INDEX_FILENAME = "workbench_run_index.json"
-RUN_INDEX_SCHEMA_VERSION = 2
+RUN_INDEX_SCHEMA_VERSION = 3
 PANEL_SUMMARY_CACHE_DIRNAME = ".workbench_cache"
 
 RUN_INDEX_RECIPE_FILES = {
+    "experiment_scorecard.json",
     "native_workflow_manifest.json",
     "rolling_summary.csv",
     "walk_forward_summary.csv",
@@ -130,6 +139,10 @@ RECIPE_TABLE_FILES = {
     "walk_forward_native_report": "walk_forward_native_report.csv",
     "execution_diff_summary": "execution_diff_summary.csv",
     "slice_regime_summary": "slice_regime_summary.csv",
+    "signal_realization_bridge": "signal_realization_bridge.csv",
+    "holding_count_drift": "holding_count_drift.csv",
+    "sector_exposure_history": "sector_exposure_history.csv",
+    "regime_gate_diagnostics": "regime_gate_diagnostics.csv",
     "rolling_feature_importance": "rolling_feature_importance.csv",
     "walk_forward_feature_importance": "walk_forward_feature_importance.csv",
     "latest_score_frame": "latest_score_frame.csv",
@@ -151,6 +164,10 @@ RUN_DETAIL_NODE_TABLES = {
     "execution_diff_summary",
     "slice_regime_summary",
     "latest_score_frame",
+    "signal_realization_bridge",
+    "holding_count_drift",
+    "sector_exposure_history",
+    "regime_gate_diagnostics",
 }
 
 RECIPE_DETAIL_INITIAL_TABLES = {
@@ -161,6 +178,10 @@ RECIPE_DETAIL_INITIAL_TABLES = {
     "walk_forward_summary",
     "execution_diff_summary",
     "slice_regime_summary",
+    "signal_realization_bridge",
+    "holding_count_drift",
+    "sector_exposure_history",
+    "regime_gate_diagnostics",
 }
 
 COMPARE_REQUIRED_TABLES = {
@@ -175,6 +196,10 @@ COMPARE_REQUIRED_TABLES = {
     "walk_forward_performance_metrics",
     "rolling_feature_importance",
     "walk_forward_feature_importance",
+    "signal_realization_bridge",
+    "holding_count_drift",
+    "sector_exposure_history",
+    "regime_gate_diagnostics",
 }
 
 _RUN_INDEX_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -267,6 +292,259 @@ def _artifact_ref(path: Path, *, name: str | None = None) -> ArtifactRef:
     )
 
 
+def _scorecard_path(base_dir: Path) -> Path:
+    return base_dir / "experiment_scorecard.json"
+
+
+def _analysis_dir(base_dir: Path) -> Path:
+    return base_dir / "analysis"
+
+
+def _latest_summary_markdown_path(base_dir: Path) -> Path:
+    return _analysis_dir(base_dir) / "latest_summary.md"
+
+
+def _normalize_markdown_heading(value: str) -> str:
+    normalized = value.strip().lower()
+    normalized = re.sub(r"^(?:第\s*)?\d+(?:\.\d+)*\s*[).、．-]?\s*", "", normalized)
+    normalized = re.sub(r"^第[一二三四五六七八九十百千]+[章节部分]\s*", "", normalized)
+    if normalized in {"主线建议", "recommended action", "main recommendation", "investment thesis", "核心建议"}:
+        return "recommended_action"
+    if normalized in {"current problem", "当前问题", "核心问题", "当前主要问题", "current issue"}:
+        return "current_problem"
+    if normalized in {"key findings", "关键发现", "核心发现", "主要结论", "结论摘要", "核心判断"}:
+        return "key_findings"
+    if normalized in {"risks", "风险", "主要风险", "风险与约束", "当前研究的主要问题", "当前结果的主要问题", "方法学约束", "方法学问题"}:
+        return "risks"
+    if normalized in {
+        "recommended next actions",
+        "next actions",
+        "recommended next experiments",
+        "后续动作",
+        "下一步动作",
+        "下一步实验",
+        "建议动作",
+        "优化方案",
+        "实验方案",
+        "实验优先级",
+    }:
+        return "recommended_next_actions"
+    return normalized
+
+
+def _parse_markdown_metadata_line(line: str) -> tuple[str, str] | None:
+    raw = line.strip()
+    if raw.startswith("- "):
+        raw = raw[2:].strip()
+    for separator in (":", "："):
+        if separator not in raw:
+            continue
+        key, value = raw.split(separator, 1)
+        key = key.strip().lower()
+        value = value.strip()
+        if not key or not value:
+            return None
+        return key, value
+    return None
+
+
+def _parse_markdown_list_item(line: str) -> str | None:
+    raw = line.strip()
+    for pattern in (r"^[-*]\s+", r"^\d+[.)]\s+", r"^[（(]\d+[）)]\s+"):
+        if re.match(pattern, raw):
+            return re.sub(pattern, "", raw, count=1).strip()
+    return None
+
+
+def _parse_latest_summary_markdown(base_dir: Path) -> dict[str, Any]:
+    path = _latest_summary_markdown_path(base_dir)
+    if not path.exists():
+        return {}
+    text = path.read_text(encoding="utf-8")
+    lines = text.replace("\r\n", "\n").split("\n")
+    title: str | None = None
+    metadata: dict[str, str] = {}
+    sections: dict[str, list[str]] = {}
+    current_section: str | None = None
+    in_code_block = False
+
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+        if stripped.startswith("# "):
+            if title is None:
+                title = stripped[2:].strip()
+            current_section = None
+            continue
+        if stripped.startswith("## "):
+            current_section = _normalize_markdown_heading(stripped[3:].strip())
+            sections.setdefault(current_section, [])
+            continue
+        if stripped.startswith("### "):
+            if current_section is not None:
+                sections.setdefault(current_section, []).append(stripped[4:].strip())
+            continue
+        metadata_item = _parse_markdown_metadata_line(stripped)
+        if current_section is None and metadata_item is not None:
+            key, value = metadata_item
+            metadata[key] = value
+            continue
+        list_item = _parse_markdown_list_item(stripped)
+        if list_item is not None:
+            if current_section is not None:
+                sections.setdefault(current_section, []).append(list_item)
+            continue
+        if current_section is not None:
+            sections.setdefault(current_section, []).append(stripped)
+
+    return {
+        "headline": title,
+        "verdict": metadata.get("verdict"),
+        "current_problem": (
+            (sections.get("current_problem") or [None])[0]
+            or metadata.get("current problem")
+            or metadata.get("当前问题")
+        ),
+        "recommended_action": (
+            (sections.get("recommended_action") or [None])[0]
+            or metadata.get("recommended action")
+            or metadata.get("主线建议")
+        ),
+        "key_findings": sections.get("key_findings", []),
+        "risks": sections.get("risks", []),
+        "recommended_next_actions": sections.get("recommended_next_actions", []),
+    }
+
+
+def _merge_research_summaries(primary: ResearchSummary, markdown_payload: dict[str, Any]) -> ResearchSummary:
+    if not markdown_payload:
+        return primary
+    return primary.model_copy(
+        update={
+            "headline": markdown_payload.get("headline") or primary.headline,
+            "verdict": markdown_payload.get("verdict") or primary.verdict,
+            "key_findings": markdown_payload.get("key_findings") or primary.key_findings,
+            "risks": markdown_payload.get("risks") or primary.risks,
+            "recommended_next_actions": markdown_payload.get("recommended_next_actions") or primary.recommended_next_actions,
+            "current_problem": markdown_payload.get("current_problem") or primary.current_problem,
+            "recommended_action": markdown_payload.get("recommended_action") or primary.recommended_action,
+        }
+    )
+
+
+def _read_research_summary(base_dir: Path) -> ResearchSummary:
+    payload = _safe_read_json(_scorecard_path(base_dir), {})
+    summary = ResearchSummary()
+    if isinstance(payload, dict) and payload:
+        summary = ResearchSummary(
+            headline=payload.get("headline"),
+            verdict=payload.get("verdict"),
+            key_findings=[str(item) for item in payload.get("key_findings", []) if item is not None],
+            risks=[str(item) for item in payload.get("risks", []) if item is not None],
+            recommended_next_actions=[
+                str(item)
+                for item in (
+                    payload.get("recommended_next_actions")
+                    or payload.get("recommended_next_experiments")
+                    or []
+                )
+                if item is not None
+            ],
+            current_problem=payload.get("current_problem"),
+            recommended_action=payload.get("recommended_action"),
+            incumbent_recipe=payload.get("incumbent_recipe"),
+            promoted_recipe=payload.get("promoted_recipe"),
+            metrics=sanitize_for_json(payload.get("metrics", {})),
+        )
+    return _merge_research_summaries(summary, _parse_latest_summary_markdown(base_dir))
+
+
+def _fallback_run_research_summary(index_payload: dict[str, Any]) -> ResearchSummary:
+    quick_summary = index_payload.get("quick_summary", {})
+    baseline_metrics = quick_summary.get("baseline_metrics", {}) if isinstance(quick_summary, dict) else {}
+    artifact_status = quick_summary.get("artifact_status") if isinstance(quick_summary, dict) else None
+    return ResearchSummary(
+        headline=f"当前基线：{quick_summary.get('baseline_recipe') or 'baseline'}",
+        verdict=quick_summary.get("research_status"),
+        key_findings=[
+            f"Walk-forward rank_ic_ir {baseline_metrics.get('walk_forward_rank_ic_ir')}",
+            f"Walk-forward net return {baseline_metrics.get('walk_forward_net_total_return')}",
+        ],
+        risks=[str(quick_summary.get("current_problem"))] if quick_summary.get("current_problem") else [],
+        recommended_next_actions=[str(quick_summary.get("recommended_action"))] if quick_summary.get("recommended_action") else [],
+        current_problem=quick_summary.get("current_problem"),
+        recommended_action=quick_summary.get("recommended_action"),
+        incumbent_recipe=quick_summary.get("baseline_recipe"),
+        promoted_recipe=quick_summary.get("incumbent_recipe") or quick_summary.get("baseline_recipe"),
+        metrics={"artifact_status": artifact_status, **sanitize_for_json(baseline_metrics)},
+    )
+
+
+def _fallback_recipe_research_summary(recipe_name: str, overview: dict[str, Any]) -> ResearchSummary:
+    return ResearchSummary(
+        headline=f"{recipe_name} 暂无 scorecard，先按概览指标查看",
+        key_findings=[
+            f"Walk-forward 年化收益 {overview.get('walk_forward_annualized_return')}",
+            f"Walk-forward 最大回撤 {overview.get('walk_forward_max_drawdown')}",
+        ],
+        metrics=sanitize_for_json(overview),
+    )
+
+
+def _scan_analysis_reports(base_dir: Path) -> list[AnalysisReportRef]:
+    analysis_dir = _analysis_dir(base_dir)
+    if not analysis_dir.exists():
+        return []
+    refs: list[AnalysisReportRef] = []
+    latest_json_payload = _safe_read_json(analysis_dir / "latest_summary.json", {})
+    for path in sorted(analysis_dir.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True):
+        if not path.is_file():
+            continue
+        engine = None
+        template = None
+        verdict = None
+        content_type = "text"
+        content_preview = None
+        if path.suffix.lower() == ".json":
+            payload = _safe_read_json(path, {})
+            if isinstance(payload, dict):
+                engine = payload.get("engine")
+                template = payload.get("template")
+                verdict = payload.get("verdict")
+                content_preview = json.dumps(sanitize_for_json(payload), ensure_ascii=False, indent=2)
+                content_type = "json"
+        elif isinstance(latest_json_payload, dict) and latest_json_payload:
+            engine = latest_json_payload.get("engine")
+            template = latest_json_payload.get("template")
+            verdict = latest_json_payload.get("verdict")
+            try:
+                content_preview = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                content_preview = None
+            content_type = "markdown" if path.suffix.lower() == ".md" else "text"
+        refs.append(
+            AnalysisReportRef(
+                name=path.name,
+                path=str(path),
+                exists=True,
+                engine=engine,
+                template=template,
+                verdict=verdict,
+                updated_at=_path_updated_at(path),
+                content_type=content_type,
+                content_preview=content_preview,
+            )
+        )
+    return refs
+
+
 def _list_run_dirs() -> list[Path]:
     if not NATIVE_WORKFLOW_ROOT.exists():
         return []
@@ -299,14 +577,28 @@ def _list_task_dirs() -> list[Path]:
 
 def _recipe_inventory(recipe_dir: Path, *, prefix: str | None = None) -> list[ArtifactRef]:
     files = []
-    for filename in sorted(REQUIRED_RECIPE_ARTIFACTS):
+    for filename in sorted(REQUIRED_RECIPE_ARTIFACTS.union(OPTIONAL_RECIPE_CSVS).union({"experiment_scorecard.json"})):
         display_name = f"{prefix}/{filename}" if prefix else filename
         files.append(_artifact_ref(recipe_dir / filename, name=display_name))
+    analysis_dir = _analysis_dir(recipe_dir)
+    if analysis_dir.exists():
+        for path in sorted(analysis_dir.iterdir()):
+            if path.is_file():
+                display_name = f"{prefix}/analysis/{path.name}" if prefix else f"analysis/{path.name}"
+                files.append(_artifact_ref(path, name=display_name))
     return files
 
 
 def _run_inventory(run_dir: Path, recipe_names: Iterable[str]) -> list[ArtifactRef]:
-    inventory = [_artifact_ref(run_dir / "native_workflow_summary.json")]
+    inventory = [
+        _artifact_ref(run_dir / "native_workflow_summary.json"),
+        _artifact_ref(run_dir / "experiment_scorecard.json"),
+    ]
+    analysis_dir = _analysis_dir(run_dir)
+    if analysis_dir.exists():
+        for path in sorted(analysis_dir.iterdir()):
+            if path.is_file():
+                inventory.append(_artifact_ref(path, name=f"analysis/{path.name}"))
     for recipe_name in recipe_names:
         inventory.extend(_recipe_inventory(run_dir / recipe_name, prefix=recipe_name))
     return inventory
@@ -596,6 +888,7 @@ def _build_run_index_payload(run_dir: Path, *, existing_payload: dict[str, Any] 
     summary_overview_lookup = _summary_overview_lookup(summary_payload)
     existing_overview_lookup = _recipe_overview_lookup_from_index_payload(existing_payload)
     baseline_recipe = _select_baseline_recipe(recipe_names)
+    run_research_summary = _read_research_summary(run_dir)
 
     overview_lookup: dict[str, dict[str, Any]] = {}
     recipes: list[RecipeSummary] = []
@@ -661,6 +954,10 @@ def _build_run_index_payload(run_dir: Path, *, existing_payload: dict[str, Any] 
         },
         has_execution_gap_issue=has_execution_gap_issue,
         has_missing_artifacts=artifact_status != "ready",
+        research_status=run_research_summary.verdict,
+        incumbent_recipe=run_research_summary.promoted_recipe or run_research_summary.incumbent_recipe or baseline_recipe,
+        current_problem=run_research_summary.current_problem,
+        recommended_action=run_research_summary.recommended_action,
         updated_at=_path_updated_at(run_dir),
     )
     return {
@@ -668,6 +965,7 @@ def _build_run_index_payload(run_dir: Path, *, existing_payload: dict[str, Any] 
         "run_id": run_id,
         "updated_at": quick_summary.updated_at,
         "quick_summary": quick_summary.model_dump(mode="json"),
+        "research_summary": run_research_summary.model_dump(mode="json"),
         "recipes": [recipe.model_dump(mode="json") for recipe in recipes],
         "overview_lookup": sanitize_for_json(overview_lookup),
     }
@@ -741,6 +1039,55 @@ def _build_table_payloads(recipe_frames: dict[str, Any], table_names: Iterable[s
         else:
             tables[table_name] = _frame_to_payload(frame)
     return tables
+
+
+def filter_table_by_bundle(frame: pd.DataFrame, bundle: str) -> pd.DataFrame:
+    if frame.empty or "bundle" not in frame.columns:
+        return frame
+    return frame.loc[frame["bundle"].astype(str) == str(bundle)].copy()
+
+
+def _build_compare_analysis_summary(
+    items: list[CompareItemResult],
+    execution_rows: list[dict[str, Any]],
+) -> ResearchSummary:
+    if not items:
+        return ResearchSummary()
+    ranked = sorted(
+        items,
+        key=lambda item: (
+            float(item.metrics.get("annualized_return") or item.metrics.get("net_total_return") or -999),
+            float(item.metrics.get("sharpe_ratio") or -999),
+        ),
+        reverse=True,
+    )
+    winner = ranked[0]
+    worst_execution = None
+    if execution_rows:
+        worst_execution = max(
+            execution_rows,
+            key=lambda row: abs(float(row.get("native_minus_validation_return") or 0.0)),
+        )
+    verdict = "promote" if len(ranked) > 1 and winner.metrics.get("net_total_return") is not None else "investigate"
+    risks = []
+    if worst_execution and abs(float(worst_execution.get("native_minus_validation_return") or 0.0)) >= 0.05:
+        risks.append(f"{worst_execution.get('item')} 执行偏差较大，需先解释 native 与 validation 差异")
+        verdict = "investigate"
+    return ResearchSummary(
+        headline=f"当前对比领先项：{winner.label}",
+        verdict=verdict,
+        key_findings=[
+            f"{winner.label} 当前净收益/年化最优",
+            f"Sharpe {winner.metrics.get('sharpe_ratio')}, Max DD {winner.metrics.get('max_drawdown')}",
+        ],
+        risks=risks,
+        recommended_next_actions=[
+            "优先查看 signal realization bridge 与 holding count drift，确认收益兑现路径",
+            "再结合行业暴露判断是否可以 promote",
+        ],
+        promoted_recipe=winner.ref.recipe_name,
+        metrics={"winner": winner.metrics},
+    )
 
 
 def _load_panel_summary_payload(path: Path) -> dict[str, Any]:
@@ -1127,6 +1474,9 @@ def get_run_detail(run_id: str) -> RunDetail:
         recipe_configs.get(baseline_recipe or "", {}),
         panel_summary,
     ) if baseline_recipe else []
+    research_summary = _read_research_summary(run_dir)
+    if not research_summary.headline:
+        research_summary = _fallback_run_research_summary(index_payload)
     return RunDetail(
         run_id=run_id,
         output_dir=str(run_dir),
@@ -1134,8 +1484,10 @@ def get_run_detail(run_id: str) -> RunDetail:
         config=sanitize_for_json(summary_payload.get("config", {})),
         recipe_registry=sanitize_for_json(summary_payload.get("recipe_registry", {})),
         promotion_gate=sanitize_for_json(summary_payload.get("promotion_gate", {})),
+        research_summary=research_summary,
         nodes=nodes,
         recipes=recipe_summaries,
+        analysis_reports=_scan_analysis_reports(run_dir),
         artifact_inventory=[],
     )
 
@@ -1195,15 +1547,21 @@ def get_recipe_detail(run_id: str, recipe_name: str) -> RecipeDetail:
     )
     tables = _build_table_payloads(recipe_frames, RECIPE_DETAIL_INITIAL_TABLES)
     nodes = _build_recipe_nodes(recipe_name, recipe_frames, recipe_config, panel_summary)
+    recipe_dir = run_dir / recipe_name
+    research_summary = _read_research_summary(recipe_dir)
+    if not research_summary.headline:
+        research_summary = _fallback_recipe_research_summary(recipe_name, overview)
     return RecipeDetail(
         run_id=run_id,
         recipe_name=recipe_name,
         recipe_config=sanitize_for_json(recipe_config),
         manifest=sanitize_for_json(recipe_frames.get("manifest", {})),
         overview=overview,
+        research_summary=research_summary,
         nodes=nodes,
         tables=tables,
-        artifact_inventory=_recipe_inventory(run_dir / recipe_name, prefix=recipe_name),
+        analysis_reports=_scan_analysis_reports(recipe_dir),
+        artifact_inventory=_recipe_inventory(recipe_dir, prefix=recipe_name),
     )
 
 
@@ -1257,6 +1615,9 @@ def compare_recipe_items(items: list[CompareItemRef]) -> CompareResponse:
     slice_rows: list[dict[str, Any]] = []
     feature_importance: dict[str, DataTablePayload] = {}
     snapshots: dict[str, DataTablePayload] = {}
+    signal_realization: dict[str, DataTablePayload] = {}
+    sector_exposure: dict[str, DataTablePayload] = {}
+    holding_count_drift: dict[str, DataTablePayload] = {}
     net_value_curves: list[CompareTimeseriesSeries] = []
     benchmark_candidates: list[list[CompareTimeseriesPoint]] = []
 
@@ -1283,6 +1644,9 @@ def compare_recipe_items(items: list[CompareItemRef]) -> CompareResponse:
         slice_frame = recipe_frames.get("slice_regime_summary", pd.DataFrame())
         importance_frame = recipe_frames.get(f"{item.bundle}_feature_importance", pd.DataFrame())
         snapshot_frame = recipe_frames.get("latest_score_frame", pd.DataFrame())
+        signal_realization_frame = filter_table_by_bundle(recipe_frames.get("signal_realization_bridge", pd.DataFrame()), item.bundle)
+        sector_exposure_frame = filter_table_by_bundle(recipe_frames.get("sector_exposure_history", pd.DataFrame()), item.bundle)
+        holding_drift_frame = filter_table_by_bundle(recipe_frames.get("holding_count_drift", pd.DataFrame()), item.bundle)
         summary_row = _summary_row(summary_frame)
         report_tail = _last_row(report_frame)
         performance_row = _performance_metrics_row(performance_frame)
@@ -1344,6 +1708,9 @@ def compare_recipe_items(items: list[CompareItemRef]) -> CompareResponse:
         if sort_column and not snapshot_df.empty:
             snapshot_df = snapshot_df.sort_values(sort_column, ascending=False).head(20)
         snapshots[label] = _frame_to_payload(snapshot_df)
+        signal_realization[label] = _frame_to_payload(signal_realization_frame)
+        sector_exposure[label] = _frame_to_payload(sector_exposure_frame)
+        holding_count_drift[label] = _frame_to_payload(holding_drift_frame)
 
     if benchmark_candidates and len(benchmark_candidates) == len(items):
         first_signature = _compare_curve_signature(benchmark_candidates[0])
@@ -1365,6 +1732,10 @@ def compare_recipe_items(items: list[CompareItemRef]) -> CompareResponse:
         slice_stability=_frame_to_payload(pd.DataFrame(slice_rows)),
         feature_importance=feature_importance,
         latest_signal_snapshot=snapshots,
+        signal_realization=signal_realization,
+        sector_exposure=sector_exposure,
+        holding_count_drift=holding_count_drift,
+        analysis_summary=_build_compare_analysis_summary(compare_items, execution_rows),
     )
 
 
@@ -1833,6 +2204,70 @@ def create_native_workflow_task(request: RunNativeWorkflowTaskRequest) -> Resear
     return _enqueue_task(summary)
 
 
+def _default_analysis_output_dir(request: RunResearchAnalysisTaskRequest) -> str:
+    if request.output_dir:
+        return request.output_dir
+    if request.source_kind == "recipe" and request.run_id and request.recipe_name:
+        return str(NATIVE_WORKFLOW_ROOT / request.run_id / request.recipe_name / "analysis")
+    if request.source_kind == "run" and request.run_id:
+        return str(NATIVE_WORKFLOW_ROOT / request.run_id / "analysis")
+    if request.source_kind == "compare":
+        compare_id = datetime.now().strftime("%Y%m%d%H%M%S")
+        return str(ARTIFACTS_ROOT / "compare_analysis" / compare_id / "analysis")
+    return str(ARTIFACTS_ROOT / "analysis")
+
+
+def _build_research_analysis_command(request: RunResearchAnalysisTaskRequest, output_dir: str) -> list[str]:
+    command = [
+        "uv",
+        "run",
+        "python",
+        "scripts/run_research_analysis.py",
+        "--source-kind",
+        request.source_kind,
+        "--analysis-template",
+        request.analysis_template,
+        "--analysis-engine",
+        request.analysis_engine,
+        "--output-dir",
+        output_dir,
+    ]
+    if request.run_id:
+        command += ["--run-id", request.run_id]
+    if request.recipe_name:
+        command += ["--recipe-name", request.recipe_name]
+    for skill in request.skills or []:
+        command += ["--skill", skill]
+    if request.compare_items:
+        command += ["--compare-items-json", json.dumps(sanitize_for_json(request.compare_items), ensure_ascii=False)]
+    return command
+
+
+def create_research_analysis_task(request: RunResearchAnalysisTaskRequest) -> ResearchTaskSummary:
+    TASKS_ROOT.mkdir(parents=True, exist_ok=True)
+    task_id = f"task-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+    output_dir = _default_analysis_output_dir(request)
+    task_paths = _task_paths(task_id)
+    summary = ResearchTaskSummary(
+        task_id=task_id,
+        task_kind="run_research_analysis",
+        status="queued",
+        display_name=request.display_name or "Run Research Analysis",
+        description=request.description,
+        requested_by=request.requested_by,
+        created_at=_now_iso(),
+        output_dir=str(_resolve_artifact_path(output_dir) or output_dir),
+        message="Task queued",
+        command=_build_research_analysis_command(request, output_dir),
+        config_payload=request.model_dump(mode="json"),
+        logs={"stdout": str(task_paths[2]), "stderr": str(task_paths[3])},
+        metadata={"cwd": str(PROJECT_ROOT)},
+        source_ref=_default_task_source(request.source_ref),
+        result_path=str(task_paths[4]),
+    )
+    return _enqueue_task(summary)
+
+
 def update_task_status(task_dir: Path, **updates: Any) -> ResearchTaskSummary:
     task_file = task_dir / "task.json"
     payload = _safe_read_json(task_file, {})
@@ -1961,6 +2396,50 @@ def get_run_task_preset(run_id: str) -> TaskPresetResponse:
             "source_ref": {"kind": "run", "source_id": detail.run_id, "label": detail.run_id, "path": detail.output_dir},
             "config_payload": payload,
             "recipe_names": [recipe.recipe_name for recipe in detail.recipes],
+        },
+    )
+
+
+def get_run_analysis_task_preset(run_id: str) -> TaskPresetResponse:
+    detail = get_run_detail(run_id)
+    return TaskPresetResponse(
+        task_kind="run_research_analysis",
+        display_name=f"Analyze {detail.run_id}",
+        source_ref=TaskSourceRef(kind="run", source_id=detail.run_id, label=detail.run_id, path=detail.output_dir),
+        payload={
+            "display_name": f"Analyze {detail.run_id}",
+            "description": detail.research_summary.headline,
+            "requested_by": "webapp",
+            "source_ref": {"kind": "run", "source_id": detail.run_id, "label": detail.run_id, "path": detail.output_dir},
+            "source_kind": "run",
+            "run_id": detail.run_id,
+            "analysis_template": "investment_report",
+            "analysis_engine": "codex_cli",
+            "skills": [],
+            "output_dir": str(Path(detail.output_dir) / "analysis"),
+        },
+    )
+
+
+def get_recipe_analysis_task_preset(run_id: str, recipe_name: str) -> TaskPresetResponse:
+    detail = get_recipe_detail(run_id, recipe_name)
+    recipe_dir = NATIVE_WORKFLOW_ROOT / run_id / recipe_name
+    return TaskPresetResponse(
+        task_kind="run_research_analysis",
+        display_name=f"Analyze {run_id}/{recipe_name}",
+        source_ref=TaskSourceRef(kind="recipe", source_id=f"{run_id}:{recipe_name}", label=recipe_name, path=str(recipe_dir)),
+        payload={
+            "display_name": f"Analyze {run_id}/{recipe_name}",
+            "description": detail.research_summary.headline,
+            "requested_by": "webapp",
+            "source_ref": {"kind": "recipe", "source_id": f"{run_id}:{recipe_name}", "label": recipe_name, "path": str(recipe_dir)},
+            "source_kind": "recipe",
+            "run_id": run_id,
+            "recipe_name": recipe_name,
+            "analysis_template": "experiment_review",
+            "analysis_engine": "codex_cli",
+            "skills": [],
+            "output_dir": str(recipe_dir / "analysis"),
         },
     )
 

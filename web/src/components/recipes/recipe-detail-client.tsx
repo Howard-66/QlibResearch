@@ -1,20 +1,25 @@
 "use client";
 
 import type { EChartsOption } from "echarts";
+import Link from "next/link";
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Bot } from "lucide-react";
 
 import { EChartsChart } from "@/components/charts/echarts-chart";
+import { LatestSummaryLayout } from "@/components/common/latest-summary-layout";
+import { MarkdownPreviewDialog } from "@/components/common/markdown-preview-dialog";
 import { TrendChart } from "@/components/charts/trend-chart";
-import { PageHeader } from "@/components/common/page-header";
 import { StatCard } from "@/components/common/stat-card";
 import { DataTable } from "@/components/data/data-table";
 import { NodeCard } from "@/components/diagnostics/node-card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { getRecipeTables } from "@/lib/api";
+import { parseLatestSummaryMarkdown } from "@/lib/latest-summary";
 import { DataTablePayload, RecipeDetail } from "@/lib/types";
 import { formatInteger, formatNumber, formatPathName, formatPercent } from "@/lib/format";
 
@@ -42,6 +47,12 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
     }
     if (activeTab === "snapshot") {
       return ["latest_score_frame", "portfolio_targets"];
+    }
+    if (activeTab === "realization") {
+      return ["signal_realization_bridge", "holding_count_drift"];
+    }
+    if (activeTab === "exposure") {
+      return ["sector_exposure_history", "regime_gate_diagnostics"];
     }
     return [];
   }, [activeTab]);
@@ -72,10 +83,28 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
   const walkSliceStability = React.useMemo(() => filterTableByBundle(getTable("slice_regime_summary"), "walk_forward"), [getTable]);
   const rollingExecutionGap = React.useMemo(() => filterTableByBundle(getTable("execution_diff_summary"), "rolling"), [getTable]);
   const walkExecutionGap = React.useMemo(() => filterTableByBundle(getTable("execution_diff_summary"), "walk_forward"), [getTable]);
+  const latestSummaryMarkdown = React.useMemo(
+    () => detail.analysis_reports.find((item) => item.name === "latest_summary.md")?.content_preview ?? null,
+    [detail.analysis_reports],
+  );
+  const parsedLatestSummary = React.useMemo(
+    () => (latestSummaryMarkdown ? parseLatestSummaryMarkdown(latestSummaryMarkdown) : null),
+    [latestSummaryMarkdown],
+  );
+  const summaryVerdict = parsedLatestSummary?.verdict ?? detail.research_summary.verdict;
 
   return (
     <div className="space-y-6">
       <SectionCard title="Performance Snapshot">
+        <div className="mb-4 flex flex-wrap gap-2">
+          <Button size="sm" variant="outline" asChild>
+            <Link href={`/tasks?create=run_research_analysis&sourceType=recipe&sourceId=${encodeURIComponent(`${detail.run_id}:${detail.recipe_name}`)}`}>
+              Generate Analysis Task
+              <Bot className="h-4 w-4" />
+            </Link>
+          </Button>
+          {summaryVerdict ? <Badge variant="info">{summaryVerdict}</Badge> : null}
+        </div>
         <div className="grid gap-6 xl:grid-cols-2">
           <PerformanceMetricPanel
             title="Rolling"
@@ -88,12 +117,15 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
         </div>
       </SectionCard>
 
-      <Tabs defaultValue="diagnostics" className="space-y-4" onValueChange={setActiveTab}>
+      <Tabs defaultValue="interpretation" className="space-y-4" onValueChange={setActiveTab}>
         <TabsList>
-          <TabsTrigger value="diagnostics">诊断总览</TabsTrigger>
+          <TabsTrigger value="interpretation">Interpretation</TabsTrigger>
+          <TabsTrigger value="diagnostics">Diagnostics</TabsTrigger>
           <TabsTrigger value="feature">Feature</TabsTrigger>
           <TabsTrigger value="rolling">Rolling</TabsTrigger>
           <TabsTrigger value="walk-forward">Walk Forward</TabsTrigger>
+          <TabsTrigger value="realization">Portfolio Realization</TabsTrigger>
+          <TabsTrigger value="exposure">Exposure</TabsTrigger>
           <TabsTrigger value="snapshot">Snapshot</TabsTrigger>
           <TabsTrigger value="artifacts">Artifacts</TabsTrigger>
         </TabsList>
@@ -219,6 +251,51 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
           </SectionCard>
         </TabsContent>
 
+        <TabsContent value="realization" className="space-y-6">
+          <LazyState queryState={lazyTablesQuery} />
+          <SectionCard title="Signal To Portfolio Bridge">
+            <DataTable table={getTable("signal_realization_bridge")} maxRows={20} />
+          </SectionCard>
+          <SectionCard title="Holding Count Drift">
+            <DataTable table={getTable("holding_count_drift")} maxRows={20} />
+          </SectionCard>
+        </TabsContent>
+
+        <TabsContent value="exposure" className="space-y-6">
+          <LazyState queryState={lazyTablesQuery} />
+          <SectionCard title="Sector Exposure History">
+            <DataTable table={getTable("sector_exposure_history")} maxRows={20} />
+          </SectionCard>
+          <SectionCard title="Regime Gate Diagnostics">
+            <DataTable table={getTable("regime_gate_diagnostics")} maxRows={20} />
+          </SectionCard>
+        </TabsContent>
+
+        <TabsContent value="interpretation" className="space-y-6">
+          <SectionCard title="Interpretation Summary">
+            <div className="space-y-4">
+              {latestSummaryMarkdown ? (
+                <div className="flex justify-end">
+                  <MarkdownPreviewDialog
+                    title={`${detail.run_id}/${detail.recipe_name} · Research Summary`}
+                    content={latestSummaryMarkdown}
+                    triggerLabel="查看详情"
+                  />
+                </div>
+              ) : null}
+              {latestSummaryMarkdown ? (
+                <LatestSummaryLayout content={latestSummaryMarkdown} mode="compact" />
+              ) : (
+                <>
+                  <SummaryList title="Key Findings" items={detail.research_summary.key_findings} />
+                  <SummaryList title="Risks" items={detail.research_summary.risks} />
+                  <SummaryList title="Next Actions" items={detail.research_summary.recommended_next_actions} />
+                </>
+              )}
+            </div>
+          </SectionCard>
+        </TabsContent>
+
         <TabsContent value="artifacts">
           <SectionCard title="Artifact Inventory">
             <DataTable
@@ -261,6 +338,25 @@ function SectionCard({ title, children }: { title: string; children: React.React
       </CardHeader>
       <CardContent>{children}</CardContent>
     </Card>
+  );
+}
+
+function SummaryList({ title, items }: { title: string; items: string[] }) {
+  return (
+    <div className="space-y-2">
+      <div className="text-sm font-medium">{title}</div>
+      {items.length ? (
+        <div className="space-y-2">
+          {items.map((item) => (
+            <div key={item} className="rounded-lg border border-border/60 bg-surface-2/40 px-3 py-2 text-sm">
+              {item}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="text-sm text-muted-foreground">暂无内容</div>
+      )}
+    </div>
   );
 }
 

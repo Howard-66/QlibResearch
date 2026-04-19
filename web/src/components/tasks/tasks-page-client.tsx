@@ -16,13 +16,16 @@ import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   getPanels,
+  getRecipeAnalysisTaskPreset,
   getPanelTaskPreset,
+  getRunAnalysisTaskPreset,
   getRunTaskPreset,
   getTask,
   getTaskLogs,
   getTasks,
   postExportPanelTask,
   postNativeWorkflowTask,
+  postResearchAnalysisTask,
   postRemoveTask,
   postReorderTasks,
   postRunQueue,
@@ -41,7 +44,7 @@ import { formatDateTime, formatPathName } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { describeWorkflowConfigKey } from "@/lib/workflow-config-descriptions";
 
-type EditorTaskKind = "export_panel" | "run_native_workflow";
+type EditorTaskKind = "export_panel" | "run_native_workflow" | "run_research_analysis";
 type HistoryFilter = "all" | "succeeded" | "failed" | "cancelled";
 
 type ExportTaskFormState = {
@@ -115,6 +118,20 @@ type WorkflowTaskFormState = {
   advanced_overrides: string;
 };
 
+type ResearchAnalysisTaskFormState = {
+  display_name: string;
+  description: string;
+  requested_by: string;
+  source_kind: "run" | "recipe" | "compare";
+  run_id: string;
+  recipe_name: string;
+  compare_items_json: string;
+  analysis_template: "investment_report" | "experiment_review" | "ui_insight" | "anomaly_diagnosis";
+  analysis_engine: "auto" | "codex_cli" | "claude_cli";
+  skills: string;
+  output_dir: string;
+};
+
 const UNIVERSE_PROFILE_OPTIONS = ["csi300", "csi500", "merged_csi300_500", "watchlist"] as const;
 const WORKFLOW_OUTPUT_ROOT_DIR = "artifacts/native_workflow";
 const WORKFLOW_DEFAULT_PANEL_PATH = "artifacts/panels/csi300_weekly.parquet";
@@ -154,6 +171,7 @@ export function TasksPageClient() {
   const [editorSourceRef, setEditorSourceRef] = React.useState<TaskSourceRef>(MANUAL_SOURCE);
   const [exportForm, setExportForm] = React.useState<ExportTaskFormState>(defaultExportTaskForm());
   const [workflowForm, setWorkflowForm] = React.useState<WorkflowTaskFormState>(defaultWorkflowTaskForm());
+  const [analysisForm, setAnalysisForm] = React.useState<ResearchAnalysisTaskFormState>(defaultResearchAnalysisTaskForm());
   const appliedPresetKeyRef = React.useRef<string | null>(null);
 
   const board = tasksQuery.data;
@@ -202,7 +220,14 @@ export function TasksPageClient() {
         return getPanelTaskPreset(presetSourceId);
       }
       if (presetSourceType === "run" && presetSourceId) {
+        if (presetTaskKind === "run_research_analysis") {
+          return getRunAnalysisTaskPreset(presetSourceId);
+        }
         return getRunTaskPreset(presetSourceId);
+      }
+      if (presetSourceType === "recipe" && presetSourceId && presetTaskKind === "run_research_analysis") {
+        const [runId, recipeName] = presetSourceId.split(":");
+        return getRecipeAnalysisTaskPreset(runId, recipeName);
       }
       throw new Error("Unsupported preset source");
     },
@@ -214,6 +239,7 @@ export function TasksPageClient() {
     setEditorSourceRef(MANUAL_SOURCE);
     setExportForm(defaultExportTaskForm());
     setWorkflowForm(defaultWorkflowTaskForm());
+    setAnalysisForm(defaultResearchAnalysisTaskForm());
     setEditorOpen(true);
   }
 
@@ -237,6 +263,7 @@ export function TasksPageClient() {
       setEditorSourceRef,
       setExportForm,
       setWorkflowForm,
+      setAnalysisForm,
     });
     appliedPresetKeyRef.current = presetKey;
     router.replace(pathname, { scroll: false });
@@ -266,6 +293,14 @@ export function TasksPageClient() {
 
   const workflowMutation = useMutation({
     mutationFn: postNativeWorkflowTask,
+    onSuccess: async (task) => {
+      setEditorOpen(false);
+      await invalidateTaskQueries(task.task_id);
+    },
+  });
+
+  const analysisMutation = useMutation({
+    mutationFn: postResearchAnalysisTask,
     onSuccess: async (task) => {
       setEditorOpen(false);
       await invalidateTaskQueries(task.task_id);
@@ -326,10 +361,14 @@ export function TasksPageClient() {
       exportMutation.mutate(buildExportTaskPayload(exportForm, editorSourceRef));
       return;
     }
-    workflowMutation.mutate(buildWorkflowTaskPayload(workflowForm, editorSourceRef));
+    if (editorTaskKind === "run_native_workflow") {
+      workflowMutation.mutate(buildWorkflowTaskPayload(workflowForm, editorSourceRef));
+      return;
+    }
+    analysisMutation.mutate(buildResearchAnalysisTaskPayload(analysisForm, editorSourceRef));
   };
 
-  const isSubmitting = exportMutation.isPending || workflowMutation.isPending;
+  const isSubmitting = exportMutation.isPending || workflowMutation.isPending || analysisMutation.isPending;
   const taskCount = (board?.history_tasks.length ?? 0) + (board?.queued_tasks.length ?? 0) + (board?.running_task ? 1 : 0);
 
   return (
@@ -511,6 +550,12 @@ export function TasksPageClient() {
                 >
                   Run Native Workflow
                 </Button>
+                <Button
+                  variant={editorTaskKind === "run_research_analysis" ? "default" : "outline"}
+                  onClick={() => setEditorTaskKind("run_research_analysis")}
+                >
+                  Research Analysis
+                </Button>
               </div>
             ) : null}
 
@@ -524,8 +569,10 @@ export function TasksPageClient() {
                 form={exportForm}
                 onChange={setExportForm}
               />
-            ) : (
+            ) : editorTaskKind === "run_native_workflow" ? (
               <WorkflowTaskEditor form={workflowForm} onChange={setWorkflowForm} panels={panelsQuery.data ?? []} />
+            ) : (
+              <ResearchAnalysisTaskEditor form={analysisForm} onChange={setAnalysisForm} />
             )}
 
             <DialogFooter>
@@ -1095,6 +1142,86 @@ function WorkflowTaskEditor({
   );
 }
 
+function ResearchAnalysisTaskEditor({
+  form,
+  onChange,
+}: {
+  form: ResearchAnalysisTaskFormState;
+  onChange: React.Dispatch<React.SetStateAction<ResearchAnalysisTaskFormState>>;
+}) {
+  return (
+    <div className="space-y-4">
+      <FormField label="Display Name">
+        <Input value={form.display_name} onChange={(event) => onChange((current) => ({ ...current, display_name: event.target.value }))} />
+      </FormField>
+      <FormField label="Task Description">
+        <textarea
+          className="min-h-[88px] w-full rounded-lg border border-input/85 bg-surface-1/80 px-3 py-2 text-sm"
+          value={form.description}
+          onChange={(event) => onChange((current) => ({ ...current, description: event.target.value }))}
+          placeholder="说明这次分析要回答什么问题"
+        />
+      </FormField>
+      <div className="grid gap-4 md:grid-cols-2">
+        <FormField label="Source Kind">
+          <select
+            className="flex h-10 w-full rounded-lg border border-input/85 bg-surface-1/80 px-3 py-2 text-sm"
+            value={form.source_kind}
+            onChange={(event) => onChange((current) => ({ ...current, source_kind: event.target.value as ResearchAnalysisTaskFormState["source_kind"] }))}
+          >
+            <option value="run">run</option>
+            <option value="recipe">recipe</option>
+            <option value="compare">compare</option>
+          </select>
+        </FormField>
+        <FormField label="Template">
+          <select
+            className="flex h-10 w-full rounded-lg border border-input/85 bg-surface-1/80 px-3 py-2 text-sm"
+            value={form.analysis_template}
+            onChange={(event) => onChange((current) => ({ ...current, analysis_template: event.target.value as ResearchAnalysisTaskFormState["analysis_template"] }))}
+          >
+            <option value="investment_report">investment_report</option>
+            <option value="experiment_review">experiment_review</option>
+            <option value="ui_insight">ui_insight</option>
+            <option value="anomaly_diagnosis">anomaly_diagnosis</option>
+          </select>
+        </FormField>
+        <FormField label="Engine">
+          <select
+            className="flex h-10 w-full rounded-lg border border-input/85 bg-surface-1/80 px-3 py-2 text-sm"
+            value={form.analysis_engine}
+            onChange={(event) => onChange((current) => ({ ...current, analysis_engine: event.target.value as ResearchAnalysisTaskFormState["analysis_engine"] }))}
+          >
+            <option value="auto">auto</option>
+            <option value="codex_cli">codex_cli</option>
+            <option value="claude_cli">claude_cli</option>
+          </select>
+        </FormField>
+        <FormField label="Output Dir">
+          <Input value={form.output_dir} onChange={(event) => onChange((current) => ({ ...current, output_dir: event.target.value }))} />
+        </FormField>
+        <FormField label="Run ID">
+          <Input value={form.run_id} onChange={(event) => onChange((current) => ({ ...current, run_id: event.target.value }))} placeholder="demo_run" />
+        </FormField>
+        <FormField label="Recipe Name">
+          <Input value={form.recipe_name} onChange={(event) => onChange((current) => ({ ...current, recipe_name: event.target.value }))} placeholder="baseline" />
+        </FormField>
+      </div>
+      <FormField label="Skills">
+        <Input value={form.skills} onChange={(event) => onChange((current) => ({ ...current, skills: event.target.value }))} placeholder="skill_a, skill_b" />
+      </FormField>
+      <FormField label="Compare Items JSON">
+        <textarea
+          className="min-h-[120px] w-full rounded-lg border border-input/85 bg-surface-1/80 px-3 py-2 text-sm"
+          value={form.compare_items_json}
+          onChange={(event) => onChange((current) => ({ ...current, compare_items_json: event.target.value }))}
+          placeholder='[{"run_id":"demo","recipe_name":"baseline","bundle":"walk_forward"}]'
+        />
+      </FormField>
+    </div>
+  );
+}
+
 function TaskListItem({
   task,
   selected,
@@ -1278,7 +1405,7 @@ function EmptyCard({ message }: { message: string }) {
 }
 
 function normalizeTaskKind(value: string | null): EditorTaskKind | null {
-  if (value === "export_panel" || value === "run_native_workflow") {
+  if (value === "export_panel" || value === "run_native_workflow" || value === "run_research_analysis") {
     return value;
   }
   return null;
@@ -1358,6 +1485,22 @@ function defaultWorkflowTaskForm(): WorkflowTaskFormState {
     publish_model: false,
     advanced_overrides: "{}",
   });
+}
+
+function defaultResearchAnalysisTaskForm(): ResearchAnalysisTaskFormState {
+  return {
+    display_name: "Run Research Analysis",
+    description: "",
+    requested_by: "webapp",
+    source_kind: "run",
+    run_id: "",
+    recipe_name: "",
+    compare_items_json: "[]",
+    analysis_template: "investment_report",
+    analysis_engine: "codex_cli",
+    skills: "",
+    output_dir: "artifacts/analysis",
+  };
 }
 
 function parseListInput(value: string) {
@@ -1456,6 +1599,31 @@ function buildWorkflowTaskPayload(form: WorkflowTaskFormState, sourceRef: TaskSo
   };
 }
 
+
+function buildResearchAnalysisTaskPayload(form: ResearchAnalysisTaskFormState, sourceRef: TaskSourceRef) {
+  let compareItems: Record<string, unknown>[] | null = null;
+  try {
+    const parsed = JSON.parse(form.compare_items_json || "[]");
+    compareItems = Array.isArray(parsed) ? parsed : null;
+  } catch {
+    compareItems = null;
+  }
+  return {
+    display_name: form.display_name,
+    description: form.description || null,
+    requested_by: form.requested_by,
+    source_ref: sourceRef,
+    source_kind: form.source_kind,
+    run_id: form.run_id || null,
+    recipe_name: form.recipe_name || null,
+    compare_items: compareItems,
+    analysis_template: form.analysis_template,
+    analysis_engine: form.analysis_engine,
+    skills: parseListInput(form.skills),
+    output_dir: form.output_dir || null,
+  };
+}
+
 function findTaskSummary(board: TaskBoardResponse | undefined, taskId: string | null) {
   if (!board || !taskId) return undefined;
   const items = [
@@ -1474,6 +1642,7 @@ function applyPresetToEditor(
     setEditorSourceRef: React.Dispatch<React.SetStateAction<TaskSourceRef>>;
     setExportForm: React.Dispatch<React.SetStateAction<ExportTaskFormState>>;
     setWorkflowForm: React.Dispatch<React.SetStateAction<WorkflowTaskFormState>>;
+    setAnalysisForm: React.Dispatch<React.SetStateAction<ResearchAnalysisTaskFormState>>;
   },
 ) {
   setters.setEditorTaskKind(preset.task_kind);
@@ -1499,7 +1668,7 @@ function applyPresetToEditor(
       included_features: includedFeatures.join(", "),
       excluded_features: excludedFeatures.join(", "),
     });
-  } else {
+  } else if (preset.task_kind === "run_native_workflow") {
     const payload = preset.payload;
     setters.setWorkflowForm(syncWorkflowDerivedFields({
       ...workflowFormFromConfigPayload(payload.config_payload),
@@ -1508,6 +1677,27 @@ function applyPresetToEditor(
       requested_by: String(payload.requested_by ?? "webapp"),
       recipe_names: toStringArray(payload.recipe_names).join(", "),
     }));
+  } else {
+    const payload = preset.payload;
+    setters.setAnalysisForm({
+      display_name: String(payload.display_name ?? "Run Research Analysis"),
+      description: String(payload.description ?? ""),
+      requested_by: String(payload.requested_by ?? "webapp"),
+      source_kind: (payload.source_kind === "recipe" || payload.source_kind === "compare") ? payload.source_kind : "run",
+      run_id: String(payload.run_id ?? ""),
+      recipe_name: String(payload.recipe_name ?? ""),
+      compare_items_json: JSON.stringify(payload.compare_items ?? [], null, 2),
+      analysis_template:
+        payload.analysis_template === "experiment_review" || payload.analysis_template === "ui_insight" || payload.analysis_template === "anomaly_diagnosis"
+          ? payload.analysis_template
+          : "investment_report",
+      analysis_engine:
+        payload.analysis_engine === "codex_cli" || payload.analysis_engine === "claude_cli"
+          ? payload.analysis_engine
+          : "auto",
+      skills: toStringArray(payload.skills).join(", "),
+      output_dir: String(payload.output_dir ?? "artifacts/analysis"),
+    });
   }
   setters.setEditorOpen(true);
 }

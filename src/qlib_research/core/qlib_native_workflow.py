@@ -199,6 +199,11 @@ class NativeRecipeArtifacts:
     native_provider_dir: Path
     benchmark_frames: dict[str, pd.DataFrame]
     native_summary: pd.DataFrame
+    signal_realization_bridge: pd.DataFrame = field(default_factory=pd.DataFrame)
+    holding_count_drift: pd.DataFrame = field(default_factory=pd.DataFrame)
+    sector_exposure_history: pd.DataFrame = field(default_factory=pd.DataFrame)
+    regime_gate_diagnostics: pd.DataFrame = field(default_factory=pd.DataFrame)
+    experiment_scorecard: dict[str, Any] = field(default_factory=dict)
 
 
 def apply_research_seed(seed: int) -> None:
@@ -1186,6 +1191,237 @@ def build_slice_regime_summary(predictions: pd.DataFrame, recipe_name: str) -> p
     return pd.concat(summaries, ignore_index=True) if summaries else pd.DataFrame()
 
 
+def _safe_position_holdings_snapshot(position: Any) -> list[str]:
+    if position is None or not hasattr(position, "get_stock_list"):
+        return []
+    return [str(code) for code in position.get_stock_list()]
+
+
+def _report_row_for_trade_date(report_frame: pd.DataFrame, trade_date: pd.Timestamp) -> dict[str, Any]:
+    if report_frame.empty or "datetime" not in report_frame.columns:
+        return {}
+    frame = report_frame.copy()
+    frame["datetime"] = pd.to_datetime(frame["datetime"], errors="coerce")
+    matched = frame.loc[frame["datetime"] == pd.Timestamp(trade_date)]
+    if matched.empty:
+        return {}
+    return matched.iloc[0].to_dict()
+
+
+def _mean_return_for_codes(signal_slice: pd.DataFrame, codes: Iterable[str], column: str) -> float:
+    if signal_slice.empty or column not in signal_slice.columns:
+        return np.nan
+    code_list = [str(code) for code in codes if str(code) in signal_slice.index.astype(str)]
+    if not code_list:
+        return np.nan
+    frame = signal_slice.copy()
+    frame.index = frame.index.astype(str)
+    values = pd.to_numeric(frame.loc[code_list, column], errors="coerce").dropna()
+    if values.empty:
+        return np.nan
+    return float(values.mean())
+
+
+def build_signal_realization_bridge(
+    predictions: pd.DataFrame,
+    positions_normal: dict[pd.Timestamp, Any],
+    report_frame: pd.DataFrame,
+    *,
+    topk: int,
+    hold_buffer_rank: int | None = None,
+    rebalance_interval_steps: int = 1,
+    min_liquidity_filter: float = 0.0,
+    min_score_spread: float = 0.0,
+    industry_max_weight: float | None = None,
+) -> pd.DataFrame:
+    if predictions.empty or not positions_normal:
+        return pd.DataFrame()
+
+    frame = predictions.copy()
+    frame["feature_date"] = pd.to_datetime(frame["feature_date"], errors="coerce")
+    frame = frame.dropna(subset=["feature_date"]).sort_values(["feature_date", "score"], ascending=[True, False])
+    trade_dates = sorted(pd.to_datetime(list(positions_normal.keys())))
+    signal_dates = sorted(frame["feature_date"].dropna().unique())
+    if len(signal_dates) < 2 or not trade_dates:
+        return pd.DataFrame()
+
+    rows: list[dict[str, Any]] = []
+    previous_actual_holdings: list[str] = []
+    for signal_date, trade_date in zip(signal_dates[:-1], trade_dates):
+        signal_slice = frame.loc[frame["feature_date"] == signal_date].copy()
+        if signal_slice.empty:
+            continue
+        signal_slice = signal_slice.set_index(signal_slice["instrument"].astype(str))
+        target_holdings = select_topk_with_buffer(
+            signal_slice,
+            current_holdings=previous_actual_holdings,
+            topk=topk,
+            hold_buffer_rank=hold_buffer_rank,
+            min_liquidity_filter=min_liquidity_filter,
+            min_score_spread=min_score_spread,
+            industry_max_weight=industry_max_weight,
+            score_column="score",
+        )
+        actual_holdings = _safe_position_holdings_snapshot(positions_normal.get(pd.Timestamp(trade_date)))
+        current_set = set(target_holdings)
+        previous_set = set(previous_actual_holdings)
+        new_codes = sorted(current_set - previous_set)
+        carry_codes = sorted(current_set & previous_set)
+        report_row = _report_row_for_trade_date(report_frame, pd.Timestamp(trade_date))
+        target_mean_return = _mean_return_for_codes(signal_slice, target_holdings, "future_return_4w")
+        gross_return = pd.to_numeric(pd.Series([report_row.get("gross_return")]), errors="coerce").iloc[0] if report_row else np.nan
+        net_return = pd.to_numeric(pd.Series([report_row.get("net_return")]), errors="coerce").iloc[0] if report_row else np.nan
+        cost_value = pd.to_numeric(pd.Series([report_row.get("cost")]), errors="coerce").iloc[0] if report_row else np.nan
+        rows.append(
+            {
+                "feature_date": pd.Timestamp(signal_date),
+                "trade_date": pd.Timestamp(trade_date),
+                "topk_mean_return_4w": target_mean_return,
+                "topk_mean_excess_return_4w": _mean_return_for_codes(signal_slice, target_holdings, "label_excess_return_4w"),
+                "new_position_return_4w": _mean_return_for_codes(signal_slice, new_codes, "future_return_4w"),
+                "carry_position_return_4w": _mean_return_for_codes(signal_slice, carry_codes, "future_return_4w"),
+                "rebalance_drag": gross_return - target_mean_return if pd.notna(gross_return) and pd.notna(target_mean_return) else np.nan,
+                "execution_cost_drag": cost_value,
+                "realized_portfolio_return": net_return,
+                "new_position_count": int(len(new_codes)),
+                "carry_position_count": int(len(carry_codes)),
+            }
+        )
+        previous_actual_holdings = actual_holdings
+
+    return pd.DataFrame(rows)
+
+
+def build_holding_count_drift(portfolio_diagnostics: pd.DataFrame) -> pd.DataFrame:
+    if portfolio_diagnostics.empty:
+        return pd.DataFrame()
+    candidate_columns = [
+        "signal_date",
+        "trade_date",
+        "target_hold_count",
+        "actual_hold_count",
+        "residual_hold_count",
+        "blocked_sell_count",
+        "topk_overlap_prev",
+        "score_dispersion",
+        "topk_unique_score_ratio",
+    ]
+    existing_columns = [column for column in candidate_columns if column in portfolio_diagnostics.columns]
+    return portfolio_diagnostics[existing_columns].copy()
+
+
+def build_sector_exposure_history(
+    predictions: pd.DataFrame,
+    positions_normal: dict[pd.Timestamp, Any],
+) -> pd.DataFrame:
+    if predictions.empty or not positions_normal:
+        return pd.DataFrame()
+
+    frame = predictions.copy()
+    frame["feature_date"] = pd.to_datetime(frame["feature_date"], errors="coerce")
+    frame = frame.dropna(subset=["feature_date"])
+    trade_dates = sorted(pd.to_datetime(list(positions_normal.keys())))
+    signal_dates = sorted(frame["feature_date"].dropna().unique())
+    if len(signal_dates) < 2 or not trade_dates:
+        return pd.DataFrame()
+
+    all_sectors = sorted(
+        {
+            str(value)
+            for value in frame.get("l1_name", pd.Series(dtype=str)).dropna().astype(str).unique().tolist()
+            if value and value != "nan"
+        }
+    )
+    finance_sectors = {"银行", "非银金融"}
+    rows: list[dict[str, Any]] = []
+
+    for signal_date, trade_date in zip(signal_dates[:-1], trade_dates):
+        signal_slice = frame.loc[frame["feature_date"] == signal_date].copy()
+        if signal_slice.empty:
+            continue
+        sector_map = (
+            signal_slice[["instrument", "l1_name"]]
+            .dropna(subset=["instrument"])
+            .assign(instrument=lambda data: data["instrument"].astype(str), l1_name=lambda data: data["l1_name"].fillna("未知").astype(str))
+            .drop_duplicates(subset=["instrument"], keep="first")
+            .set_index("instrument")["l1_name"]
+            .to_dict()
+        )
+        actual_holdings = _safe_position_holdings_snapshot(positions_normal.get(pd.Timestamp(trade_date)))
+        sector_weights: dict[str, float] = {}
+        if actual_holdings:
+            equal_weight = 1.0 / len(actual_holdings)
+            for code in actual_holdings:
+                sector = str(sector_map.get(str(code), "未知"))
+                sector_weights[sector] = sector_weights.get(sector, 0.0) + equal_weight
+        sorted_weights = sorted(sector_weights.items(), key=lambda item: item[1], reverse=True)
+        row: dict[str, Any] = {
+            "feature_date": pd.Timestamp(signal_date),
+            "trade_date": pd.Timestamp(trade_date),
+            "actual_hold_count": int(len(actual_holdings)),
+            "finance_weight": float(sum(weight for sector, weight in sector_weights.items() if sector in finance_sectors)),
+            "top3_sector_concentration": float(sum(weight for _, weight in sorted_weights[:3])),
+            "top1_sector_name": sorted_weights[0][0] if sorted_weights else None,
+            "top1_sector_weight": float(sorted_weights[0][1]) if sorted_weights else np.nan,
+        }
+        for sector in all_sectors:
+            row[f"sector_weight__{sector}"] = float(sector_weights.get(sector, 0.0))
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def build_regime_gate_diagnostics(
+    signal_diagnostics: pd.DataFrame,
+    predictions: pd.DataFrame,
+) -> pd.DataFrame:
+    if signal_diagnostics.empty:
+        return pd.DataFrame()
+    merged = signal_diagnostics.copy()
+    merged["signal_date"] = pd.to_datetime(merged["signal_date"], errors="coerce")
+    if not predictions.empty and "macro_phase" in predictions.columns:
+        phase_lookup = (
+            predictions.assign(feature_date=pd.to_datetime(predictions["feature_date"], errors="coerce"))
+            .dropna(subset=["feature_date"])
+            .sort_values(["feature_date", "score"], ascending=[True, False])
+            .groupby("feature_date", dropna=False)["macro_phase"]
+            .agg(lambda values: values.mode().iloc[0] if not values.mode().empty else values.iloc[0])
+            .rename("macro_phase")
+            .reset_index()
+            .rename(columns={"feature_date": "signal_date"})
+        )
+        merged = merged.merge(phase_lookup, on="signal_date", how="left", suffixes=("_existing", ""))
+        if "macro_phase_existing" in merged.columns:
+            merged["macro_phase"] = merged["macro_phase"].where(merged["macro_phase"].notna(), merged["macro_phase_existing"])
+            merged = merged.drop(columns=["macro_phase_existing"])
+    else:
+        if "macro_phase" not in merged.columns:
+            merged["macro_phase"] = None
+    merged["trigger_stagflation_reduce_50"] = merged["macro_phase"].astype(str).eq("STAGFLATION")
+    merged["trigger_low_dispersion_reduce_50"] = pd.to_numeric(merged.get("score_dispersion"), errors="coerce") < 0.03
+    merged["trigger_low_dispersion_benchmark"] = pd.to_numeric(merged.get("score_dispersion"), errors="coerce") < 0.02
+    merged["trigger_low_uniqueness_filter"] = pd.to_numeric(merged.get("topk_unique_score_ratio"), errors="coerce") < 0.85
+    merged["trigger_any_reduce_50"] = merged["trigger_stagflation_reduce_50"] | merged["trigger_low_dispersion_reduce_50"]
+    return merged[
+        [
+            column
+            for column in [
+                "signal_date",
+                "macro_phase",
+                "score_dispersion",
+                "topk_unique_score_ratio",
+                "topk_overlap_prev",
+                "trigger_stagflation_reduce_50",
+                "trigger_low_dispersion_reduce_50",
+                "trigger_low_dispersion_benchmark",
+                "trigger_low_uniqueness_filter",
+                "trigger_any_reduce_50",
+            ]
+            if column in merged.columns
+        ]
+    ].copy()
+
+
 def _prefer_non_empty_frame(primary: pd.DataFrame | None, fallback: pd.DataFrame) -> pd.DataFrame:
     if primary is None:
         return fallback.copy()
@@ -1348,6 +1584,224 @@ def _build_recipe_overview_row_from_artifacts(recipe_name: str, artifacts: Nativ
     }
 
 
+def _safe_float(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if np.isfinite(numeric) else None
+
+
+def _recipe_score_inputs(
+    recipe_name: str,
+    artifacts: NativeRecipeArtifacts,
+    *,
+    topk: int,
+) -> dict[str, Any]:
+    overview = _build_recipe_overview_row_from_artifacts(recipe_name, artifacts)
+    signal_diag = artifacts.signal_diagnostics.loc[artifacts.signal_diagnostics["bundle"] == "walk_forward"].copy()
+    portfolio_diag = artifacts.portfolio_diagnostics.loc[artifacts.portfolio_diagnostics["bundle"] == "walk_forward"].copy()
+    sector_history = getattr(artifacts, "sector_exposure_history", pd.DataFrame())
+    sector_walk = sector_history.loc[sector_history["bundle"] == "walk_forward"].copy() if isinstance(sector_history, pd.DataFrame) and not sector_history.empty else pd.DataFrame()
+    bridge_history = getattr(artifacts, "signal_realization_bridge", pd.DataFrame())
+    bridge_walk = bridge_history.loc[bridge_history["bundle"] == "walk_forward"].copy() if isinstance(bridge_history, pd.DataFrame) and not bridge_history.empty else pd.DataFrame()
+    return {
+        "walk_forward_annualized_return": _safe_float(overview.get("walk_forward_annualized_return")) or 0.0,
+        "walk_forward_sharpe_ratio": _safe_float(overview.get("walk_forward_sharpe_ratio")) or 0.0,
+        "walk_forward_max_drawdown": _safe_float(overview.get("walk_forward_max_drawdown")) or 0.0,
+        "walk_forward_topk_excess": _safe_float(overview.get("walk_forward_topk_mean_excess_return_4w")),
+        "signal_unique_mean": _safe_float(signal_diag["topk_unique_score_ratio"].mean()) if not signal_diag.empty and "topk_unique_score_ratio" in signal_diag.columns else None,
+        "actual_hold_mean": _safe_float(portfolio_diag["actual_hold_count"].mean()) if not portfolio_diag.empty and "actual_hold_count" in portfolio_diag.columns else None,
+        "actual_hold_max": _safe_float(portfolio_diag["actual_hold_count"].max()) if not portfolio_diag.empty and "actual_hold_count" in portfolio_diag.columns else None,
+        "top1_sector_weight_mean": _safe_float(sector_walk["top1_sector_weight"].mean()) if not sector_walk.empty and "top1_sector_weight" in sector_walk.columns else None,
+        "bridge_complete": bool(not bridge_walk.empty),
+        "topk": float(topk),
+    }
+
+
+def _recipe_score_value(inputs: dict[str, Any]) -> float:
+    annualized_return = float(inputs.get("walk_forward_annualized_return") or 0.0)
+    sharpe_ratio = float(inputs.get("walk_forward_sharpe_ratio") or 0.0)
+    max_drawdown = abs(float(inputs.get("walk_forward_max_drawdown") or 0.0))
+    signal_unique = float(inputs.get("signal_unique_mean") or 0.0)
+    actual_hold_mean = float(inputs.get("actual_hold_mean") or inputs.get("topk") or 0.0)
+    topk = float(inputs.get("topk") or 10.0)
+    top1_sector_weight_mean = float(inputs.get("top1_sector_weight_mean") or 0.0)
+    bridge_complete = bool(inputs.get("bridge_complete"))
+    hold_penalty = max(actual_hold_mean - (topk + 2.0), 0.0) * 0.03
+    concentration_penalty = max(top1_sector_weight_mean - 0.35, 0.0) * 0.6
+    explanation_penalty = 0.08 if not bridge_complete else 0.0
+    return annualized_return + (sharpe_ratio * 0.03) - (max_drawdown * 0.25) + (signal_unique * 0.04) - hold_penalty - concentration_penalty - explanation_penalty
+
+
+def _build_recipe_experiment_scorecard(
+    *,
+    run_id: str,
+    recipe_name: str,
+    artifacts: NativeRecipeArtifacts,
+    baseline_artifacts: NativeRecipeArtifacts | None,
+    promotion_gate: dict[str, Any] | None,
+    topk: int,
+) -> dict[str, Any]:
+    overview = _build_recipe_overview_row_from_artifacts(recipe_name, artifacts)
+    inputs = _recipe_score_inputs(recipe_name, artifacts, topk=topk)
+    score_value = _recipe_score_value(inputs)
+    baseline_overview = _build_recipe_overview_row_from_artifacts("baseline", baseline_artifacts) if baseline_artifacts is not None else {}
+    baseline_inputs = _recipe_score_inputs("baseline", baseline_artifacts, topk=topk) if baseline_artifacts is not None else {}
+    baseline_score = _recipe_score_value(baseline_inputs) if baseline_artifacts is not None else None
+    unique_mean = inputs.get("signal_unique_mean")
+    hold_mean = inputs.get("actual_hold_mean")
+    hold_max = inputs.get("actual_hold_max")
+    top1_sector = inputs.get("top1_sector_weight_mean")
+    topk_excess = inputs.get("walk_forward_topk_excess")
+    passed = bool((promotion_gate or {}).get("promotion_gate_passed")) if promotion_gate is not None else None
+
+    if not inputs["bridge_complete"]:
+        verdict = "needs_explanation"
+        current_problem = "缺少 signal realization bridge，收益兑现路径不完整"
+    elif unique_mean is not None and unique_mean < 0.6:
+        verdict = "rejected"
+        current_problem = "TopK 分数唯一性不足，信号已经明显退化"
+    elif hold_mean is not None and hold_mean > topk + 2:
+        verdict = "needs_explanation"
+        current_problem = "实际持仓数持续偏离目标 topk，组合定义不够可信"
+    elif passed is True:
+        verdict = "promoted"
+        current_problem = "候选方案已通过 gate，可进入下一轮主线验证"
+    elif recipe_name == "baseline":
+        verdict = "incumbent"
+        current_problem = "当前作为基线继续持有，等待候选方案明确胜出"
+    elif topk_excess is not None and topk_excess < 0:
+        verdict = "needs_explanation"
+        current_problem = "组合收益与 topk 超额方向不一致，需要先解释兑现路径"
+    else:
+        verdict = "hold"
+        current_problem = "当前结果可保留观察，但不足以直接晋升"
+
+    risks: list[str] = []
+    if unique_mean is not None and unique_mean < 0.85:
+        risks.append("TopK 唯一分数占比偏低，存在信号离散度不足风险")
+    if hold_max is not None and hold_max > topk + 4:
+        risks.append("实际持仓上限偏高，组合定义与名义 topk 不一致")
+    if top1_sector is not None and top1_sector > 0.5:
+        risks.append("单一行业权重过高，存在集中暴露风险")
+    if topk_excess is not None and topk_excess < 0:
+        risks.append("横截面 topk 超额为负，收益解释链仍不完整")
+
+    recommendations: list[str] = []
+    if hold_mean is not None and hold_mean > topk + 2:
+        recommendations.append("优先执行实验 A，收紧持仓定义与退出规则")
+    if top1_sector is not None and top1_sector > 0.35:
+        recommendations.append("优先执行实验 B，增加行业权重上限")
+    if unique_mean is not None and unique_mean < 0.85:
+        recommendations.append("优先执行实验 C，增加最小分数差过滤")
+    if recipe_name == "baseline":
+        recommendations.append("固定池主线优先测试 baseline 与 huber_8w 共识过滤")
+    if recipe_name == "rank_blended":
+        recommendations.append("动态池主线优先测试 rank_blended 与 mae_4w 共识过滤")
+    if not recommendations:
+        recommendations.append("保持当前设定，进入下一轮持仓数与环境风控验证")
+
+    delta_metrics = {}
+    if baseline_artifacts is not None and baseline_overview:
+        for key in ("walk_forward_annualized_return", "walk_forward_max_drawdown", "walk_forward_topk_mean_excess_return_4w"):
+            current_value = _safe_float(overview.get(key))
+            baseline_value = _safe_float(baseline_overview.get(key))
+            if current_value is not None and baseline_value is not None:
+                delta_metrics[f"{key}_delta_vs_baseline"] = current_value - baseline_value
+
+    return {
+        "schema_version": 1,
+        "scope": "recipe",
+        "run_id": run_id,
+        "recipe_name": recipe_name,
+        "headline": f"{recipe_name} 当前结论：{current_problem}",
+        "verdict": verdict,
+        "current_problem": current_problem,
+        "recommended_action": recommendations[0],
+        "key_findings": [
+            f"Walk-forward 年化收益 {(_safe_float(overview.get('walk_forward_annualized_return')) or 0.0):.2%}",
+            f"Walk-forward 最大回撤 {(_safe_float(overview.get('walk_forward_max_drawdown')) or 0.0):.2%}",
+            f"TopK 唯一分数均值 {(unique_mean or 0.0):.2f}",
+            f"实际持仓均值 {(hold_mean or 0.0):.2f}",
+        ],
+        "risks": risks,
+        "recommended_next_experiments": recommendations,
+        "metrics": {
+            **overview,
+            **delta_metrics,
+            "signal_unique_mean": unique_mean,
+            "actual_hold_mean": hold_mean,
+            "actual_hold_max": hold_max,
+            "top1_sector_weight_mean": top1_sector,
+            "bridge_complete": inputs["bridge_complete"],
+            "score_value": score_value,
+            "promotion_gate": promotion_gate or {},
+        },
+    }
+
+
+def _build_run_experiment_scorecard(
+    *,
+    run_id: str,
+    scorecards_by_recipe: dict[str, dict[str, Any]],
+    baseline_recipe: str,
+) -> dict[str, Any]:
+    promoted = [payload for payload in scorecards_by_recipe.values() if payload.get("verdict") == "promoted"]
+    candidates = promoted or list(scorecards_by_recipe.values())
+    candidates = sorted(candidates, key=lambda item: float(item.get("metrics", {}).get("score_value") or -999), reverse=True)
+    selected = candidates[0] if candidates else scorecards_by_recipe.get(baseline_recipe, {})
+    selected_recipe = str(selected.get("recipe_name") or baseline_recipe)
+    if selected_recipe != baseline_recipe:
+        run_verdict = "promoted"
+    elif any(payload.get("verdict") == "needs_explanation" for payload in scorecards_by_recipe.values()):
+        run_verdict = "needs_explanation"
+    else:
+        run_verdict = "incumbent"
+
+    recipe_rankings = [
+        {
+            "recipe_name": recipe_name,
+            "verdict": payload.get("verdict"),
+            "score_value": payload.get("metrics", {}).get("score_value"),
+            "headline": payload.get("headline"),
+        }
+        for recipe_name, payload in sorted(
+            scorecards_by_recipe.items(),
+            key=lambda item: float(item[1].get("metrics", {}).get("score_value") or -999),
+            reverse=True,
+        )
+    ]
+    biggest_issue = next(
+        (
+            risk
+            for payload in scorecards_by_recipe.values()
+            for risk in payload.get("risks", [])
+        ),
+        selected.get("current_problem") or "当前没有识别到比收益更高优先级的问题",
+    )
+    recommended_action = selected.get("recommended_action") or "继续推进下一轮验证"
+    return {
+        "schema_version": 1,
+        "scope": "run",
+        "run_id": run_id,
+        "headline": f"当前主线建议：{selected_recipe}",
+        "verdict": run_verdict,
+        "incumbent_recipe": baseline_recipe,
+        "promoted_recipe": selected_recipe,
+        "current_problem": biggest_issue,
+        "recommended_action": recommended_action,
+        "key_findings": [
+            f"建议主线 recipe：{selected_recipe}",
+            f"最优 scorecard verdict：{selected.get('verdict')}",
+            f"核心问题：{biggest_issue}",
+        ],
+        "risks": [biggest_issue],
+        "recommended_next_actions": [recommended_action],
+        "recipes": recipe_rankings,
+    }
+
+
 def _build_native_workflow_summary_payload(
     *,
     config: NativeWorkflowConfig,
@@ -1355,6 +1809,7 @@ def _build_native_workflow_summary_payload(
     promotion_gate: dict[str, Any],
     output_dir: Path,
     artifacts: dict[str, NativeRecipeArtifacts],
+    experiment_scorecard: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     overview_lookup = {
         recipe_name: _build_recipe_overview_row_from_artifacts(recipe_name, recipe_artifacts)
@@ -1367,6 +1822,7 @@ def _build_native_workflow_summary_payload(
         "promotion_gate": promotion_gate,
         "promotion_gate_summary": promotion_gate,
         "overview_lookup": overview_lookup,
+        "experiment_scorecard": experiment_scorecard or {},
         "output_dir": str(output_dir),
     }
 
@@ -1515,6 +1971,10 @@ def run_native_recipe(
     execution_diff_frames: list[pd.DataFrame] = []
     signal_diag_frames: list[pd.DataFrame] = []
     portfolio_diag_frames: list[pd.DataFrame] = []
+    signal_realization_frames: list[pd.DataFrame] = []
+    holding_drift_frames: list[pd.DataFrame] = []
+    sector_exposure_frames: list[pd.DataFrame] = []
+    regime_gate_frames: list[pd.DataFrame] = []
     native_summary_rows: list[dict[str, Any]] = []
 
     for bundle_name, bundle in prediction_bundles.items():
@@ -1581,6 +2041,31 @@ def run_native_recipe(
         portfolio_diag["recipe"] = recipe.name
         portfolio_diag["bundle"] = bundle_name
         portfolio_diag_frames.append(portfolio_diag)
+        signal_realization = build_signal_realization_bridge(
+            bundle["predictions"],
+            native_result.artifacts.positions_normal,
+            native_result.artifacts.report_normal,
+            topk=config.topk,
+        )
+        if not signal_realization.empty:
+            signal_realization["recipe"] = recipe.name
+            signal_realization["bundle"] = bundle_name
+            signal_realization_frames.append(signal_realization)
+        holding_drift = build_holding_count_drift(portfolio_diag)
+        if not holding_drift.empty:
+            holding_drift["recipe"] = recipe.name
+            holding_drift["bundle"] = bundle_name
+            holding_drift_frames.append(holding_drift)
+        sector_exposure = build_sector_exposure_history(bundle["predictions"], native_result.artifacts.positions_normal)
+        if not sector_exposure.empty:
+            sector_exposure["recipe"] = recipe.name
+            sector_exposure["bundle"] = bundle_name
+            sector_exposure_frames.append(sector_exposure)
+        regime_gate = build_regime_gate_diagnostics(signal_diag, bundle["predictions"])
+        if not regime_gate.empty:
+            regime_gate["recipe"] = recipe.name
+            regime_gate["bundle"] = bundle_name
+            regime_gate_frames.append(regime_gate)
         if config.run_validation_comparison:
             validation_result = run_validation_backtest(bundle["predictions"], execution_panel, config)
             validation_results[bundle_name] = validation_result
@@ -1593,6 +2078,26 @@ def run_native_recipe(
     execution_diff_summary = pd.concat(execution_diff_frames, ignore_index=True) if execution_diff_frames else pd.DataFrame()
     slice_regime_summary = build_slice_regime_summary(combined_prediction_frame, recipe.name)
     native_summary = pd.DataFrame(native_summary_rows)
+    signal_realization_bridge = (
+        pd.concat(signal_realization_frames, ignore_index=True)
+        if signal_realization_frames
+        else pd.DataFrame()
+    )
+    holding_count_drift = (
+        pd.concat(holding_drift_frames, ignore_index=True)
+        if holding_drift_frames
+        else pd.DataFrame()
+    )
+    sector_exposure_history = (
+        pd.concat(sector_exposure_frames, ignore_index=True)
+        if sector_exposure_frames
+        else pd.DataFrame()
+    )
+    regime_gate_diagnostics = (
+        pd.concat(regime_gate_frames, ignore_index=True)
+        if regime_gate_frames
+        else pd.DataFrame()
+    )
 
     recipe_dir = output_dir / recipe.name
     recipe_dir.mkdir(parents=True, exist_ok=True)
@@ -1609,6 +2114,10 @@ def run_native_recipe(
     portfolio_diagnostics.to_csv(recipe_dir / "portfolio_diagnostics.csv", index=False)
     slice_regime_summary.to_csv(recipe_dir / "slice_regime_summary.csv", index=False)
     execution_diff_summary.to_csv(recipe_dir / "execution_diff_summary.csv", index=False)
+    signal_realization_bridge.to_csv(recipe_dir / "signal_realization_bridge.csv", index=False)
+    holding_count_drift.to_csv(recipe_dir / "holding_count_drift.csv", index=False)
+    sector_exposure_history.to_csv(recipe_dir / "sector_exposure_history.csv", index=False)
+    regime_gate_diagnostics.to_csv(recipe_dir / "regime_gate_diagnostics.csv", index=False)
     for bundle_name, bundle in prediction_bundles.items():
         bundle["predictions"].to_csv(recipe_dir / f"{bundle_name}_predictions.csv", index=False)
         bundle["details"].to_csv(recipe_dir / f"{bundle_name}_details.csv", index=False)
@@ -1668,6 +2177,10 @@ def run_native_recipe(
         native_provider_dir=native_provider_dir,
         benchmark_frames=benchmark_frames,
         native_summary=native_summary,
+        signal_realization_bridge=signal_realization_bridge,
+        holding_count_drift=holding_count_drift,
+        sector_exposure_history=sector_exposure_history,
+        regime_gate_diagnostics=regime_gate_diagnostics,
     )
 
 
@@ -1846,12 +2359,41 @@ def run_native_research_workflow(
             if name == "baseline":
                 continue
             promotion_gate[name] = passes_native_promotion_gate(artifacts["baseline"], candidate)
+    scorecards_by_recipe: dict[str, dict[str, Any]] = {}
+    baseline_artifacts = artifacts.get("baseline")
+    for recipe_name, recipe_artifacts in artifacts.items():
+        recipe_promotion_gate = promotion_gate.get(recipe_name) if recipe_name != "baseline" else None
+        scorecard = _build_recipe_experiment_scorecard(
+            run_id=output_dir.name,
+            recipe_name=recipe_name,
+            artifacts=recipe_artifacts,
+            baseline_artifacts=baseline_artifacts,
+            promotion_gate=recipe_promotion_gate,
+            topk=effective_config.topk,
+        )
+        recipe_artifacts.experiment_scorecard = scorecard
+        scorecards_by_recipe[recipe_name] = scorecard
+        recipe_dir = output_dir / recipe_name
+        (recipe_dir / "experiment_scorecard.json").write_text(
+            json.dumps(scorecard, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+    run_experiment_scorecard = _build_run_experiment_scorecard(
+        run_id=output_dir.name,
+        scorecards_by_recipe=scorecards_by_recipe,
+        baseline_recipe="baseline" if "baseline" in selected_names else selected_names[0],
+    )
+    (output_dir / "experiment_scorecard.json").write_text(
+        json.dumps(run_experiment_scorecard, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
     summary_payload = _build_native_workflow_summary_payload(
         config=effective_config,
         registry_payload=registry_payload,
         promotion_gate=promotion_gate,
         output_dir=output_dir,
         artifacts=artifacts,
+        experiment_scorecard=run_experiment_scorecard,
     )
     (output_dir / "native_workflow_summary.json").write_text(
         json.dumps(summary_payload, ensure_ascii=False, indent=2, default=str),

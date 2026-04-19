@@ -1,4 +1,5 @@
 from concurrent.futures import Future
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -10,12 +11,15 @@ from qlib_research.core.qlib_native_workflow import (
     NativeResearchRecipe,
     NativeWorkflowConfig,
     _build_native_workflow_summary_payload,
+    _build_recipe_experiment_scorecard,
     _build_parallel_recipe_heartbeat,
     _prime_parallel_workflow_inputs,
     build_native_performance_metrics_frame,
     build_annual_return_heatmap_frame,
+    build_holding_count_drift,
     build_monthly_return_heatmap_frame,
     build_native_recipe_registry,
+    build_regime_gate_diagnostics,
     select_evaluation_dates_for_label,
 )
 
@@ -207,6 +211,115 @@ def test_build_native_performance_metrics_frame_computes_weekly_metrics():
     assert metrics["win_rate"] == pytest.approx(2 / 3)
     assert metrics["max_drawdown"] == pytest.approx(-0.02)
     assert metrics["calmar_ratio"] > 0
+
+
+def test_build_holding_count_drift_keeps_portfolio_columns():
+    frame = pd.DataFrame(
+        [
+            {
+                "signal_date": "2026-01-02",
+                "target_hold_count": 10,
+                "actual_hold_count": 12,
+                "residual_hold_count": 2,
+                "blocked_sell_count": 1,
+                "topk_overlap_prev": 0.7,
+            }
+        ]
+    )
+
+    result = build_holding_count_drift(frame)
+
+    assert list(result.columns) == [
+        "signal_date",
+        "target_hold_count",
+        "actual_hold_count",
+        "residual_hold_count",
+        "blocked_sell_count",
+        "topk_overlap_prev",
+    ]
+    assert result.iloc[0]["actual_hold_count"] == 12
+
+
+def test_build_regime_gate_diagnostics_marks_low_dispersion_and_stagflation():
+    signal_diagnostics = pd.DataFrame(
+            [
+                {
+                    "signal_date": "2026-01-02",
+                    "macro_phase": "STAGFLATION",
+                    "score_dispersion": 0.01,
+                    "topk_unique_score_ratio": 0.5,
+                }
+            ]
+    )
+    predictions = pd.DataFrame(
+        [
+            {"feature_date": "2026-01-02", "score": 1.0, "macro_phase": "STAGFLATION"},
+            {"feature_date": "2026-01-02", "score": 1.0, "macro_phase": "STAGFLATION"},
+            {"feature_date": "2026-01-02", "score": 0.8, "macro_phase": "GOLDILOCKS"},
+        ]
+    )
+
+    result = build_regime_gate_diagnostics(signal_diagnostics, predictions).iloc[0]
+
+    assert bool(result["trigger_stagflation_reduce_50"]) is True
+    assert bool(result["trigger_low_dispersion_reduce_50"]) is True
+    assert bool(result["trigger_low_uniqueness_filter"]) is True
+
+
+def test_recipe_experiment_scorecard_rejects_low_uniqueness():
+    provider_dir = Path("/tmp")
+    artifacts = NativeRecipeArtifacts(
+        recipe=NativeResearchRecipe(name="binary_4w"),
+        latest_score_frame=pd.DataFrame(),
+        prediction_bundles={
+            "rolling": {"summary": pd.DataFrame([{"rank_ic_ir": 0.1, "topk_mean_excess_return_4w": 0.01}])},
+            "walk_forward": {"summary": pd.DataFrame([{"rank_ic_ir": 0.05, "topk_mean_excess_return_4w": -0.01}])},
+        },
+        native_results={},
+        validation_results={},
+        executor_comparison_summary=pd.DataFrame(),
+        signal_diagnostics=pd.DataFrame(
+            [
+                {"bundle": "walk_forward", "topk_unique_score_ratio": 0.4},
+            ]
+        ),
+        portfolio_diagnostics=pd.DataFrame(
+            [
+                {"bundle": "walk_forward", "actual_hold_count": 10},
+            ]
+        ),
+        slice_regime_summary=pd.DataFrame(),
+        feature_prefilter_stats=pd.DataFrame(),
+        feature_corr_candidates=pd.DataFrame(),
+        feature_redundancy=pd.DataFrame(),
+        feature_outlier_audit=pd.DataFrame(),
+        used_feature_columns=["ma20"],
+        native_provider_dir=provider_dir,
+        benchmark_frames={},
+        native_summary=pd.DataFrame(
+            [
+                {
+                    "bundle": "walk_forward",
+                    "annualized_return": 0.12,
+                    "sharpe_ratio": 0.8,
+                    "strategy_max_drawdown": -0.1,
+                }
+            ]
+        ),
+        signal_realization_bridge=pd.DataFrame([{"bundle": "walk_forward"}]),
+        sector_exposure_history=pd.DataFrame([{"bundle": "walk_forward", "top1_sector_weight": 0.2}]),
+    )
+
+    scorecard = _build_recipe_experiment_scorecard(
+        run_id="demo_run",
+        recipe_name="binary_4w",
+        artifacts=artifacts,
+        baseline_artifacts=None,
+        promotion_gate=None,
+        topk=10,
+    )
+
+    assert scorecard["verdict"] == "rejected"
 
 
 def test_run_native_notebook_workflow_accepts_cli_style_overrides(tmp_path):

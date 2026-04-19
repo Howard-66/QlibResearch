@@ -10,6 +10,7 @@ from qlib_research.app.contracts import (
     DataTablePayload,
     RunListItem,
     RunQuickSummary,
+    RunResearchAnalysisTaskRequest,
     TaskReorderRequest,
 )
 from qlib_research.app import services
@@ -106,6 +107,20 @@ def test_get_run_detail_does_not_depend_on_listing_all_runs(monkeypatch, tmp_pat
     pd.DataFrame([{"mean_excess_return_4w": 0.02}]).to_csv(recipe_dir / "slice_regime_summary.csv", index=False)
     pd.DataFrame([{"feature_date": "2026-01-03", "score": 0.5}]).to_csv(recipe_dir / "latest_score_frame.csv", index=False)
     pd.DataFrame([{"keep": 1}]).to_csv(recipe_dir / "feature_prefilter.csv", index=False)
+    (run_dir / "experiment_scorecard.json").write_text(
+        json.dumps(
+            {
+                "headline": "当前主线建议：baseline",
+                "verdict": "incumbent",
+                "current_problem": "等待候选胜出",
+                "recommended_action": "继续推进实验 B",
+                "key_findings": ["baseline 仍是主线"],
+                "risks": ["行业集中仍需控制"],
+                "recommended_next_actions": ["继续推进实验 B"],
+            }
+        ),
+        encoding="utf-8",
+    )
     (recipe_dir / "native_workflow_manifest.json").write_text(
         json.dumps({"used_feature_columns": ["ma20"]}),
         encoding="utf-8",
@@ -119,6 +134,8 @@ def test_get_run_detail_does_not_depend_on_listing_all_runs(monkeypatch, tmp_pat
     assert detail.quick_summary.universe_profile == "csi300"
     assert detail.quick_summary.baseline_metrics["walk_forward_rank_ic_ir"] == 0.22
     assert detail.quick_summary.baseline_metrics["walk_forward_net_total_return"] == pytest.approx(0.18)
+    assert detail.research_summary.verdict == "incumbent"
+    assert detail.research_summary.current_problem == "等待候选胜出"
     assert detail.artifact_inventory == []
 
 
@@ -220,6 +237,154 @@ def test_get_recipe_detail_reads_new_performance_metric_files(monkeypatch):
     assert detail.overview["rolling_sharpe_ratio"] == pytest.approx(0.62)
     assert detail.overview["walk_forward_win_rate"] == pytest.approx(0.58)
     assert detail.overview["walk_forward_calmar_ratio"] == pytest.approx(2.67)
+
+
+def test_get_recipe_detail_reads_analysis_reports(monkeypatch, tmp_path):
+    run_dir = tmp_path / "demo_run"
+    recipe_dir = run_dir / "baseline"
+    analysis_dir = recipe_dir / "analysis"
+    analysis_dir.mkdir(parents=True)
+    (analysis_dir / "latest_summary.json").write_text(
+        json.dumps({"engine": "codex_cli", "template": "experiment_review", "verdict": "hold"}),
+        encoding="utf-8",
+    )
+    (analysis_dir / "latest_summary.md").write_text("# report", encoding="utf-8")
+    (recipe_dir / "experiment_scorecard.json").write_text(
+        json.dumps({"headline": "baseline", "key_findings": ["a"], "risks": [], "recommended_next_experiments": ["b"]}),
+        encoding="utf-8",
+    )
+    index_payload = {
+        "run_id": "demo_run",
+        "quick_summary": RunQuickSummary(
+            run_id="demo_run",
+            output_dir=str(run_dir),
+            recipe_names=["baseline"],
+            baseline_recipe="baseline",
+            artifact_status="ready",
+        ).model_dump(mode="json"),
+        "overview_lookup": {"baseline": {}},
+    }
+    summary_payload = {"recipe_registry": {"executed_recipes": ["baseline"]}, "promotion_gate": {}}
+    frames = {
+        "manifest": {"used_feature_columns": ["ma20"]},
+        "rolling_summary": pd.DataFrame(),
+        "walk_forward_summary": pd.DataFrame(),
+        "rolling_native_report": pd.DataFrame(),
+        "walk_forward_native_report": pd.DataFrame(),
+        "rolling_performance_metrics": pd.DataFrame(),
+        "walk_forward_performance_metrics": pd.DataFrame(),
+        "feature_prefilter": pd.DataFrame(),
+        "signal_diagnostics": pd.DataFrame(),
+        "portfolio_diagnostics": pd.DataFrame(),
+        "execution_diff_summary": pd.DataFrame(),
+        "slice_regime_summary": pd.DataFrame(),
+        "latest_score_frame": pd.DataFrame(),
+        "signal_realization_bridge": pd.DataFrame(),
+        "holding_count_drift": pd.DataFrame(),
+        "sector_exposure_history": pd.DataFrame(),
+        "regime_gate_diagnostics": pd.DataFrame(),
+    }
+    monkeypatch.setattr(services, "_collect_run_context", lambda run_id: (run_dir, summary_payload, index_payload))
+    monkeypatch.setattr(services, "_load_recipe_frames", lambda run_dir, recipe_name, table_names: frames)
+    monkeypatch.setattr(services, "_get_recipe_config", lambda summary_payload, recipe_name: {})
+    monkeypatch.setattr(services, "_panel_summary_for_path", lambda panel_path: None)
+    monkeypatch.setattr(services, "_resolve_artifact_path", lambda value: None)
+
+    detail = services.get_recipe_detail("demo_run", "baseline")
+
+    assert detail.analysis_reports[0].engine == "codex_cli"
+    assert any(item.content_type == "json" for item in detail.analysis_reports)
+    assert any("experiment_review" in (item.content_preview or "") for item in detail.analysis_reports)
+    assert detail.research_summary.headline == "report"
+
+
+def test_read_research_summary_prefers_latest_summary_markdown_sections(tmp_path):
+    base_dir = tmp_path / "demo_run"
+    analysis_dir = base_dir / "analysis"
+    analysis_dir.mkdir(parents=True)
+    (base_dir / "experiment_scorecard.json").write_text(
+        json.dumps(
+            {
+                "headline": "scorecard headline",
+                "verdict": "hold",
+                "key_findings": ["scorecard finding"],
+                "risks": ["scorecard risk"],
+                "recommended_next_actions": ["scorecard action"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (analysis_dir / "latest_summary.md").write_text(
+        "\n".join(
+            [
+                "# md headline",
+                "",
+                "- verdict: promoted",
+                "",
+                "## Key Findings",
+                "- md finding 1",
+                "- md finding 2",
+                "",
+                "## Risks",
+                "- md risk",
+                "",
+                "## Recommended Next Actions",
+                "- md action",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    summary = services._read_research_summary(base_dir)
+
+    assert summary.headline == "md headline"
+    assert summary.verdict == "promoted"
+    assert summary.key_findings == ["md finding 1", "md finding 2"]
+    assert summary.risks == ["md risk"]
+    assert summary.recommended_next_actions == ["md action"]
+
+
+def test_read_research_summary_accepts_numbered_chinese_headings(tmp_path):
+    base_dir = tmp_path / "demo_run"
+    analysis_dir = base_dir / "analysis"
+    analysis_dir.mkdir(parents=True)
+    (analysis_dir / "latest_summary.md").write_text(
+        "\n".join(
+            [
+                "# 深度研究摘要",
+                "",
+                "- verdict: investigate",
+                "",
+                "## 1. 主线建议",
+                "1. 继续保留 baseline 为主线，但先验证执行定义是否收敛。",
+                "",
+                "## 2. 当前问题",
+                "- 名义 topk 与实际持仓数仍有偏差。",
+                "",
+                "## 3. 结论摘要",
+                "- baseline 的收益与回撤更均衡。",
+                "- binary_4w 收益高但信号退化。",
+                "",
+                "## 4. 风险与约束",
+                "- 行业集中度仍偏高。",
+                "",
+                "## 5. 优化方案",
+                "- 先做行业上限实验。",
+                "- 再做 score dispersion 门限实验。",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    summary = services._read_research_summary(base_dir)
+
+    assert summary.headline == "深度研究摘要"
+    assert summary.verdict == "investigate"
+    assert summary.recommended_action == "继续保留 baseline 为主线，但先验证执行定义是否收敛。"
+    assert summary.current_problem == "名义 topk 与实际持仓数仍有偏差。"
+    assert summary.key_findings == ["baseline 的收益与回撤更均衡。", "binary_4w 收益高但信号退化。"]
+    assert summary.risks == ["行业集中度仍偏高。"]
+    assert summary.recommended_next_actions == ["先做行业上限实验。", "再做 score dispersion 门限实验。"]
 
 
 def test_build_run_index_payload_backfills_recipe_overview_from_summary_and_existing_index(tmp_path):
@@ -778,3 +943,26 @@ def test_create_native_workflow_task_falls_back_to_source_run_execution_panel(mo
     assert task.config_payload["config_payload"]["execution_panel_path"] == str(execution_panel)
     assert "--execution-panel" in task.command
     assert str(execution_panel) in task.command
+
+
+def test_create_research_analysis_task_uses_analysis_script(monkeypatch, tmp_path):
+    monkeypatch.setattr(services, "TASKS_ROOT", tmp_path / "tasks")
+    monkeypatch.setattr(services, "_resolve_artifact_path", lambda value, base_dir=services.PROJECT_ROOT: Path(value) if value else None)
+
+    task = services.create_research_analysis_task(
+        RunResearchAnalysisTaskRequest(
+            display_name="Analyze demo",
+            source_ref=services.TaskSourceRef(kind="run", source_id="demo_run", label="demo_run"),
+            source_kind="run",
+            run_id="demo_run",
+            analysis_template="investment_report",
+            analysis_engine="codex_cli",
+            skills=["skill_a"],
+            output_dir=str(tmp_path / "analysis"),
+        )
+    )
+
+    assert task.task_kind == "run_research_analysis"
+    assert "scripts/run_research_analysis.py" in " ".join(task.command)
+    assert "--analysis-engine" in task.command
+    assert task.config_payload["source_kind"] == "run"

@@ -5,7 +5,6 @@ import { useQuery } from "@tanstack/react-query";
 import type { EChartsOption } from "echarts";
 
 import { EChartsChart } from "@/components/charts/echarts-chart";
-import { PageHeader } from "@/components/common/page-header";
 import { DataTable } from "@/components/data/data-table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -103,6 +102,26 @@ export function ComparePageClient({
 
       {submittedItems && compareQuery.data ? (
         <div className="space-y-6">
+          <SectionCard title="Verdict">
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-2">
+                {compareQuery.data.analysis_summary.verdict ? <Badge variant="info">{compareQuery.data.analysis_summary.verdict}</Badge> : null}
+                {compareQuery.data.analysis_summary.promoted_recipe ? (
+                  <Badge variant="success">winner: {compareQuery.data.analysis_summary.promoted_recipe}</Badge>
+                ) : null}
+              </div>
+              {compareQuery.data.analysis_summary.headline ? (
+                <div className="text-sm text-muted-foreground">{compareQuery.data.analysis_summary.headline}</div>
+              ) : null}
+              <DataTable
+                table={{
+                  columns: ["finding"],
+                  rows: compareQuery.data.analysis_summary.key_findings.map((item) => ({ finding: item })),
+                }}
+                maxRows={8}
+              />
+            </div>
+          </SectionCard>
           <SectionCard title="Summary Metrics">
             <DataTable table={compareQuery.data.summary_metrics} maxRows={12} />
           </SectionCard>
@@ -117,6 +136,27 @@ export function ComparePageClient({
           <SectionCard title="Slice Stability">
             <DataTable table={compareQuery.data.slice_stability} maxRows={18} />
           </SectionCard>
+          <div className="grid gap-6 xl:grid-cols-2">
+            {Object.entries(compareQuery.data.signal_realization).map(([label, table]) => (
+              <SectionCard key={label} title={`${label} Signal Realization`}>
+                <DataTable table={table} maxRows={12} />
+              </SectionCard>
+            ))}
+          </div>
+          <div className="grid gap-6 xl:grid-cols-2">
+            {Object.entries(compareQuery.data.sector_exposure).map(([label, table]) => (
+              <SectionCard key={label} title={`${label} Sector Exposure`}>
+                <DataTable table={table} maxRows={12} />
+              </SectionCard>
+            ))}
+          </div>
+          <div className="grid gap-6 xl:grid-cols-2">
+            {Object.entries(compareQuery.data.holding_count_drift).map(([label, table]) => (
+              <SectionCard key={label} title={`${label} Holding Drift`}>
+                <DataTable table={table} maxRows={12} />
+              </SectionCard>
+            ))}
+          </div>
           <div className="grid gap-6 xl:grid-cols-2">
             {Object.entries(compareQuery.data.feature_importance).map(([label, table]) => (
               <SectionCard key={label} title={label}>

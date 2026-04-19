@@ -4,9 +4,7 @@ import Link from "next/link";
 import * as React from "react";
 import { ReceiptText } from "lucide-react";
 import { GitCompare } from "lucide-react";
-import { CalendarCheck } from "lucide-react";
-import { PageHeader } from "@/components/common/page-header";
-import { StatCard } from "@/components/common/stat-card";
+import { CalendarCheck, Bot } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -18,6 +16,14 @@ const artifactVariantMap = {
   ready: "success",
   partial: "warning",
   missing: "destructive",
+} as const;
+
+const researchVariantMap = {
+  incumbent: "info",
+  promoted: "success",
+  rejected: "destructive",
+  needs_explanation: "warning",
+  hold: "neutral",
 } as const;
 
 export function RunsPageClient({ runs }: { runs: RunListItem[] }) {
@@ -44,23 +50,24 @@ export function RunsPageClient({ runs }: { runs: RunListItem[] }) {
               )}
             >
               <CardContent className="space-y-3 p-3 sm:p-4">
-                <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
-                  <div className="min-w-0 flex-1 space-y-2">
-                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                      <div className="text-sm font-semibold tracking-tight sm:text-base">{run.run_id}</div>
-                      <div className="text-[11px] text-muted-foreground sm:text-xs">{formatCompactDate(summary.updated_at)}</div>
-                      <Badge variant={artifactVariantMap[summary.artifact_status]}>{summary.artifact_status}</Badge>
-                    </div>
-                    {summary.task_description ? (
-                      <div className="text-sm text-muted-foreground">{summary.task_description}</div>
-                    ) : null}
-                    <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-                      <InfoPill label="Universe" value={summary.universe_profile ?? "—"} />
-                      <InfoPill label="Recipes" value={`${summary.recipe_names.length}`} />
-                      <InfoPill label="WF IC" value={formatNumber(summary.baseline_metrics.walk_forward_rank_ic_ir, 3)} />
-                      <InfoPill label="WF Excess" value={formatPercent(summary.baseline_metrics.walk_forward_topk_mean_excess_return_4w, 2)} />
-                    </div>
-                  </div>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <div className="text-sm font-semibold tracking-tight sm:text-base">{run.run_id}</div>
+                  <div className="text-[11px] text-muted-foreground sm:text-xs">{formatCompactDate(summary.updated_at)}</div>
+                  <Badge variant={artifactVariantMap[summary.artifact_status]}>{summary.artifact_status}</Badge>
+                  {summary.research_status ? (
+                    <Badge variant={researchVariantMap[summary.research_status as keyof typeof researchVariantMap] ?? "neutral"}>
+                      {summary.research_status}
+                    </Badge>
+                  ) : null}
+                </div>
+
+                <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+                  <InfoPill label="Panel" value={summary.panel_path?.split("/").pop() ?? "—"} />
+                  <InfoPill label="Lead" value={summary.incumbent_recipe ?? summary.baseline_recipe ?? "—"} />
+                  <InfoPill label="Rolling IC" value={formatNumber(summary.baseline_metrics.rolling_rank_ic_ir, 3)} />
+                  <InfoPill label="Rolling Excess" value={formatPercent(summary.baseline_metrics.rolling_topk_mean_excess_return_4w, 2)} />
+                  <InfoPill label="WF IC" value={formatNumber(summary.baseline_metrics.walk_forward_rank_ic_ir, 3)} />
+                  <InfoPill label="WF Excess" value={formatPercent(summary.baseline_metrics.walk_forward_topk_mean_excess_return_4w, 2)} />
                 </div>
 
                 {isSelected ? (
@@ -91,62 +98,58 @@ function renderQuickJudgeContent(selected: RunListItem) {
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap gap-2">
-          <Button
-            asChild
-            size="sm"
-            onClick={(event) => {
-              event.stopPropagation();
-            }}
-          >
-            <Link href={`/runs/${selected.run_id}`}>
-              Details
-              <ReceiptText className="h-4 w-4" />
-            </Link>
-          </Button>
-          <Button
-            asChild
-            size="sm"
-            variant="outline"
-            onClick={(event) => {
-              event.stopPropagation();
-            }}
-          >
-            <Link href={`/compare?runId=${encodeURIComponent(selected.run_id)}`}>
-              Add to Compare
-              <GitCompare className="h-4 w-4" />
-            </Link>
-          </Button>
-          <Button
-            asChild
-            size="sm"
-            variant="outline"
-            onClick={(event) => {
-              event.stopPropagation();
-            }}
-          >
-            <Link href={`/tasks?create=run_native_workflow&sourceType=run&sourceId=${encodeURIComponent(selected.run_id)}`}>
-              Create Workflow Task
-              <CalendarCheck className="h-4 w-4" />
-            </Link>
-          </Button>
-        </div>
-      </div>
-
-      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
-        <StatCard compact title="Panel" value={summary.panel_path?.split("/").pop() ?? "—"} detail={summary.end_date ?? "开放区间"} />
-        <StatCard compact title="Recipes" value={`${summary.recipe_names.length}`} detail={summary.recipe_names.join(", ")} />
-        <StatCard
-          compact
-          title="Artifacts"
-          value={`${summary.artifact_ready_count}/${summary.artifact_total_count}`}
-          detail={summary.has_missing_artifacts ? "存在缺失产物" : "产物齐全"}
-        />
-        <StatCard compact title="Rolling rank_ic_ir" value={formatNumber(summary.baseline_metrics.rolling_rank_ic_ir, 3)} />
-        <StatCard compact title="Rolling topk excess" value={formatPercent(summary.baseline_metrics.rolling_topk_mean_excess_return_4w, 2)} />
-        <StatCard compact title="WF rank_ic_ir" value={formatNumber(summary.baseline_metrics.walk_forward_rank_ic_ir, 3)} />
-        <StatCard compact title="WF topk excess" value={formatPercent(summary.baseline_metrics.walk_forward_topk_mean_excess_return_4w, 2)} />
+      <div className="flex flex-wrap gap-2">
+        <Button
+          asChild
+          size="sm"
+          onClick={(event) => {
+            event.stopPropagation();
+          }}
+        >
+          <Link href={`/runs/${selected.run_id}`}>
+            Details
+            <ReceiptText className="h-4 w-4" />
+          </Link>
+        </Button>
+        <Button
+          asChild
+          size="sm"
+          variant="outline"
+          onClick={(event) => {
+            event.stopPropagation();
+          }}
+        >
+          <Link href={`/compare?runId=${encodeURIComponent(selected.run_id)}`}>
+            Add to Compare
+            <GitCompare className="h-4 w-4" />
+          </Link>
+        </Button>
+        <Button
+          asChild
+          size="sm"
+          variant="outline"
+          onClick={(event) => {
+            event.stopPropagation();
+          }}
+        >
+          <Link href={`/tasks?create=run_research_analysis&sourceType=run&sourceId=${encodeURIComponent(selected.run_id)}`}>
+            Analyze Run
+            <Bot className="h-4 w-4" />
+          </Link>
+        </Button>
+        <Button
+          asChild
+          size="sm"
+          variant="outline"
+          onClick={(event) => {
+            event.stopPropagation();
+          }}
+        >
+          <Link href={`/tasks?create=run_native_workflow&sourceType=run&sourceId=${encodeURIComponent(selected.run_id)}`}>
+            Create Workflow Task
+            <CalendarCheck className="h-4 w-4" />
+          </Link>
+        </Button>
       </div>
 
       <div className="flex flex-wrap gap-2">
