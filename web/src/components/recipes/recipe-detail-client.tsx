@@ -272,17 +272,19 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
         </TabsContent>
 
         <TabsContent value="interpretation" className="space-y-6">
-          <SectionCard title="Interpretation Summary">
+          <SectionCard
+            title="Interpretation Summary"
+            action={
+              latestSummaryMarkdown ? (
+                <MarkdownPreviewDialog
+                  title={`${detail.run_id}/${detail.recipe_name} · Research Summary`}
+                  content={latestSummaryMarkdown}
+                  triggerLabel="查看详情"
+                />
+              ) : null
+            }
+          >
             <div className="space-y-4">
-              {latestSummaryMarkdown ? (
-                <div className="flex justify-end">
-                  <MarkdownPreviewDialog
-                    title={`${detail.run_id}/${detail.recipe_name} · Research Summary`}
-                    content={latestSummaryMarkdown}
-                    triggerLabel="查看详情"
-                  />
-                </div>
-              ) : null}
               {latestSummaryMarkdown ? (
                 <LatestSummaryLayout content={latestSummaryMarkdown} mode="compact" />
               ) : (
@@ -330,11 +332,12 @@ function filterTableByBundle(table: DataTablePayload, bundle: string): DataTable
   };
 }
 
-function SectionCard({ title, children }: { title: string; children: React.ReactNode }) {
+function SectionCard({ title, action, children }: { title: string; action?: React.ReactNode; children: React.ReactNode }) {
   return (
     <Card className="glass-card">
-      <CardHeader>
+      <CardHeader className="flex-row items-center justify-between space-y-0">
         <CardTitle className="text-base">{title}</CardTitle>
+        {action}
       </CardHeader>
       <CardContent>{children}</CardContent>
     </Card>

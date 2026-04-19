@@ -2232,6 +2232,8 @@ def _build_research_analysis_command(request: RunResearchAnalysisTaskRequest, ou
         "--output-dir",
         output_dir,
     ]
+    if request.include_all_recipes:
+        command.append("--include-all-recipes")
     if request.run_id:
         command += ["--run-id", request.run_id]
     if request.recipe_name:
@@ -2404,14 +2406,15 @@ def get_run_analysis_task_preset(run_id: str) -> TaskPresetResponse:
     detail = get_run_detail(run_id)
     return TaskPresetResponse(
         task_kind="run_research_analysis",
-        display_name=f"Analyze {detail.run_id}",
+        display_name=f"Analyze {detail.run_id} + recipes",
         source_ref=TaskSourceRef(kind="run", source_id=detail.run_id, label=detail.run_id, path=detail.output_dir),
         payload={
-            "display_name": f"Analyze {detail.run_id}",
+            "display_name": f"Analyze {detail.run_id} + recipes",
             "description": detail.research_summary.headline,
             "requested_by": "webapp",
             "source_ref": {"kind": "run", "source_id": detail.run_id, "label": detail.run_id, "path": detail.output_dir},
             "source_kind": "run",
+            "include_all_recipes": True,
             "run_id": detail.run_id,
             "analysis_template": "investment_report",
             "analysis_engine": "codex_cli",

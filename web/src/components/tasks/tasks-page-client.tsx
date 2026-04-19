@@ -3,7 +3,8 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { ArrowDown, ArrowUp, CircleHelp, Loader2, PlayCircle, Square, Trash2 } from "lucide-react";
+import Link from "next/link";
+import { ArrowDown, ArrowUp, CircleHelp, ExternalLink, FileText, LayoutGrid, Loader2, PlayCircle, Square, Trash2 } from "lucide-react";
 
 import { PageHeader } from "@/components/common/page-header";
 import { Badge } from "@/components/ui/badge";
@@ -123,6 +124,7 @@ type ResearchAnalysisTaskFormState = {
   description: string;
   requested_by: string;
   source_kind: "run" | "recipe" | "compare";
+  include_all_recipes: boolean;
   run_id: string;
   recipe_name: string;
   compare_items_json: string;
@@ -1167,7 +1169,16 @@ function ResearchAnalysisTaskEditor({
           <select
             className="flex h-10 w-full rounded-lg border border-input/85 bg-surface-1/80 px-3 py-2 text-sm"
             value={form.source_kind}
-            onChange={(event) => onChange((current) => ({ ...current, source_kind: event.target.value as ResearchAnalysisTaskFormState["source_kind"] }))}
+            onChange={(event) =>
+              onChange((current) => ({
+                ...current,
+                source_kind: event.target.value as ResearchAnalysisTaskFormState["source_kind"],
+                include_all_recipes:
+                  event.target.value === "run"
+                    ? current.include_all_recipes
+                    : false,
+              }))
+            }
           >
             <option value="run">run</option>
             <option value="recipe">recipe</option>
@@ -1200,6 +1211,17 @@ function ResearchAnalysisTaskEditor({
         <FormField label="Output Dir">
           <Input value={form.output_dir} onChange={(event) => onChange((current) => ({ ...current, output_dir: event.target.value }))} />
         </FormField>
+        {form.source_kind === "run" ? (
+          <FormField label="Batch Mode">
+            <label className="flex h-10 items-center justify-between rounded-lg border border-input/85 bg-surface-1/80 px-3 py-2 text-sm">
+              <span>Analyze run + all recipes</span>
+              <Switch
+                checked={form.include_all_recipes}
+                onCheckedChange={(checked) => onChange((current) => ({ ...current, include_all_recipes: checked }))}
+              />
+            </label>
+          </FormField>
+        ) : null}
         <FormField label="Run ID">
           <Input value={form.run_id} onChange={(event) => onChange((current) => ({ ...current, run_id: event.target.value }))} placeholder="demo_run" />
         </FormField>
@@ -1255,6 +1277,9 @@ function TaskListItem({
             <span className="font-medium">{task.display_name || task.task_id}</span>
             <StatusBadge status={task.status} />
             {task.queue_position ? <Badge variant="outline">#{task.queue_position}</Badge> : null}
+            {task.source_ref && task.source_ref.kind !== "manual" ? (
+              <SourceRefLinks sourceRef={task.source_ref} />
+            ) : null}
           </div>
           {task.description ? <div className="text-sm text-muted-foreground">{task.description}</div> : null}
           <div className="text-sm text-muted-foreground">{task.task_id}</div>
@@ -1268,6 +1293,52 @@ function TaskListItem({
         {actions ? <div onClick={(event) => event.stopPropagation()}>{actions}</div> : null}
       </div>
     </div>
+  );
+}
+
+function SourceRefLinks({ sourceRef }: { sourceRef: TaskSourceRef }) {
+  const links: Array<{ href: string; icon: React.ReactNode; label: string }> = [];
+
+  if (sourceRef.kind === "run") {
+    links.push({ href: `/runs/${sourceRef.source_id}`, icon: <FileText className="h-3.5 w-3.5" />, label: "Go to Run" });
+  }
+
+  if (sourceRef.kind === "panel") {
+    links.push({ href: `/panels/${encodeURIComponent(sourceRef.source_id)}`, icon: <LayoutGrid className="h-3.5 w-3.5" />, label: "Go to Panel" });
+  }
+
+  if (sourceRef.kind === "recipe") {
+    const recipeName = sourceRef.source_id;
+    const runId = sourceRef.label ?? "";
+    if (runId) {
+      links.push({ href: `/runs/${runId}/recipes/${encodeURIComponent(recipeName)}`, icon: <ExternalLink className="h-3.5 w-3.5" />, label: "Go to Recipe" });
+    }
+  }
+
+  if (sourceRef.kind === "compare") {
+    links.push({ href: `/compare?runId=${encodeURIComponent(sourceRef.source_id)}`, icon: <ExternalLink className="h-3.5 w-3.5" />, label: "Go to Compare" });
+  }
+
+  if (links.length === 0) return null;
+
+  return (
+    <TooltipProvider>
+      <div className="flex items-center gap-1" onClick={(event) => event.stopPropagation()}>
+        {links.map((link) => (
+          <Tooltip key={link.href}>
+            <TooltipTrigger asChild>
+              <Link
+                href={link.href}
+                className="inline-flex items-center justify-center rounded-md border border-border/60 bg-background/70 p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
+                {link.icon}
+              </Link>
+            </TooltipTrigger>
+            <TooltipContent>{link.label}</TooltipContent>
+          </Tooltip>
+        ))}
+      </div>
+    </TooltipProvider>
   );
 }
 
@@ -1493,6 +1564,7 @@ function defaultResearchAnalysisTaskForm(): ResearchAnalysisTaskFormState {
     description: "",
     requested_by: "webapp",
     source_kind: "run",
+    include_all_recipes: false,
     run_id: "",
     recipe_name: "",
     compare_items_json: "[]",
@@ -1614,6 +1686,7 @@ function buildResearchAnalysisTaskPayload(form: ResearchAnalysisTaskFormState, s
     requested_by: form.requested_by,
     source_ref: sourceRef,
     source_kind: form.source_kind,
+    include_all_recipes: form.source_kind === "run" ? form.include_all_recipes : false,
     run_id: form.run_id || null,
     recipe_name: form.recipe_name || null,
     compare_items: compareItems,
@@ -1684,6 +1757,7 @@ function applyPresetToEditor(
       description: String(payload.description ?? ""),
       requested_by: String(payload.requested_by ?? "webapp"),
       source_kind: (payload.source_kind === "recipe" || payload.source_kind === "compare") ? payload.source_kind : "run",
+      include_all_recipes: payload.include_all_recipes === true,
       run_id: String(payload.run_id ?? ""),
       recipe_name: String(payload.recipe_name ?? ""),
       compare_items_json: JSON.stringify(payload.compare_items ?? [], null, 2),

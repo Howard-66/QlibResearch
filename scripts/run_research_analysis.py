@@ -15,6 +15,7 @@ from qlib_research.core.notebook_workflow import sanitize_for_json
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate structured research analysis artifacts.")
     parser.add_argument("--source-kind", choices=["run", "recipe", "compare"], required=True)
+    parser.add_argument("--include-all-recipes", action="store_true")
     parser.add_argument("--run-id")
     parser.add_argument("--recipe-name")
     parser.add_argument("--compare-items-json")
@@ -258,9 +259,160 @@ def _analysis_context(args: argparse.Namespace) -> tuple[dict[str, Any], Path]:
     return _compare_payload(args.compare_items_json), Path(".")
 
 
+def _generate_analysis_content(
+    payload: dict[str, Any],
+    *,
+    analysis_template: str,
+    analysis_engine: str,
+    skills: list[str],
+    cwd: Path,
+) -> tuple[str, dict[str, Any]]:
+    if analysis_engine == "auto":
+        return _build_local_markdown(
+            payload,
+            template=analysis_template,
+            engine="auto",
+            skills=skills,
+        ), {"engine_used": "auto", "cli_invoked": False}
+    if analysis_engine == "codex_cli":
+        cli_result = _invoke_codex_cli(payload, template=analysis_template, skills=skills, cwd=cwd.resolve())
+        return str(cli_result["content"]), {
+            "engine_used": "codex_cli",
+            "cli_invoked": True,
+            "cli_command": cli_result["command"],
+        }
+    if analysis_engine == "claude_cli":
+        cli_result = _invoke_claude_cli(payload, template=analysis_template, skills=skills, cwd=cwd.resolve())
+        return str(cli_result["content"]), {
+            "engine_used": "claude_cli",
+            "cli_invoked": True,
+            "cli_command": cli_result["command"],
+        }
+    raise SystemExit(f"Unsupported analysis engine: {analysis_engine}")
+
+
+def _write_analysis_artifacts(
+    *,
+    output_dir: Path,
+    payload: dict[str, Any],
+    content: str,
+    cli_metadata: dict[str, Any],
+    analysis_template: str,
+    extra_manifest: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary_json = {
+        **payload,
+        **cli_metadata,
+    }
+    summary_json_path = output_dir / "latest_summary.json"
+    summary_md_path = output_dir / "latest_summary.md"
+    generated_files = [str(summary_json_path), str(summary_md_path)]
+    _write_json(summary_json_path, summary_json)
+    _write_markdown(summary_md_path, content)
+    manifest_payload = {
+        "generated_files": generated_files,
+        **cli_metadata,
+        "template": analysis_template,
+    }
+    if extra_manifest:
+        manifest_payload.update(sanitize_for_json(extra_manifest))
+    _write_json(output_dir / "manifest.json", manifest_payload)
+    return {
+        "output_dir": str(output_dir),
+        "generated_files": generated_files,
+        "engine_used": cli_metadata.get("engine_used"),
+        "cli_invoked": cli_metadata.get("cli_invoked", False),
+    }
+
+
+def _run_single_analysis(
+    *,
+    payload: dict[str, Any],
+    output_dir: Path,
+    analysis_template: str,
+    analysis_engine: str,
+    skills: list[str],
+    cwd: Path,
+    extra_manifest: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    content, cli_metadata = _generate_analysis_content(
+        payload,
+        analysis_template=analysis_template,
+        analysis_engine=analysis_engine,
+        skills=skills,
+        cwd=cwd,
+    )
+    return _write_analysis_artifacts(
+        output_dir=output_dir,
+        payload=payload,
+        content=content,
+        cli_metadata=cli_metadata,
+        analysis_template=analysis_template,
+        extra_manifest=extra_manifest,
+    )
+
+
+def _run_batch_analysis(args: argparse.Namespace, run_output_dir: Path) -> int:
+    if args.source_kind != "run" or not args.run_id:
+        raise SystemExit("--include-all-recipes is only supported with source-kind=run and --run-id")
+
+    run_payload = _run_payload(args.run_id)
+    run_payload.update({"template": args.analysis_template, "engine": args.analysis_engine, "skills": args.skill})
+    run_result = _run_single_analysis(
+        payload=run_payload,
+        output_dir=run_output_dir,
+        analysis_template=args.analysis_template,
+        analysis_engine=args.analysis_engine,
+        skills=args.skill,
+        cwd=(Path("artifacts/native_workflow") / args.run_id),
+        extra_manifest={"batch_scope": "run_and_all_recipes"},
+    )
+
+    run_detail = get_run_detail(args.run_id)
+    recipe_results: list[dict[str, Any]] = []
+    for recipe in run_detail.recipes:
+        recipe_payload = _recipe_payload(args.run_id, recipe.recipe_name)
+        recipe_payload.update({"template": args.analysis_template, "engine": args.analysis_engine, "skills": args.skill})
+        recipe_output_dir = (Path("artifacts/native_workflow") / args.run_id / recipe.recipe_name / "analysis").resolve()
+        recipe_result = _run_single_analysis(
+            payload=recipe_payload,
+            output_dir=recipe_output_dir,
+            analysis_template=args.analysis_template,
+            analysis_engine=args.analysis_engine,
+            skills=args.skill,
+            cwd=(Path("artifacts/native_workflow") / args.run_id / recipe.recipe_name),
+            extra_manifest={
+                "batch_scope": "recipe_from_run_batch",
+                "batch_parent_run_id": args.run_id,
+            },
+        )
+        recipe_results.append(
+            {
+                "recipe_name": recipe.recipe_name,
+                **recipe_result,
+            }
+        )
+
+    batch_manifest_path = run_output_dir / "manifest.json"
+    existing_manifest = json.loads(batch_manifest_path.read_text(encoding="utf-8"))
+    existing_manifest.update(
+        {
+            "batch_scope": "run_and_all_recipes",
+            "run_result": run_result,
+            "recipe_results": recipe_results,
+        }
+    )
+    _write_json(batch_manifest_path, existing_manifest)
+    return 0
+
+
 def main() -> int:
     args = parse_args()
     output_dir = Path(args.output_dir).expanduser().resolve()
+    if args.include_all_recipes:
+        return _run_batch_analysis(args, output_dir)
+
     output_dir.mkdir(parents=True, exist_ok=True)
     payload, cwd = _analysis_context(args)
     payload.update(
@@ -270,51 +422,13 @@ def main() -> int:
             "skills": args.skill,
         }
     )
-
-    generated_files: list[str] = []
-    if args.analysis_engine == "auto":
-        content = _build_local_markdown(
-            payload,
-            template=args.analysis_template,
-            engine="auto",
-            skills=args.skill,
-        )
-        cli_metadata = {"engine_used": "auto", "cli_invoked": False}
-    elif args.analysis_engine == "codex_cli":
-        cli_result = _invoke_codex_cli(payload, template=args.analysis_template, skills=args.skill, cwd=cwd.resolve())
-        content = str(cli_result["content"])
-        cli_metadata = {
-            "engine_used": "codex_cli",
-            "cli_invoked": True,
-            "cli_command": cli_result["command"],
-        }
-    elif args.analysis_engine == "claude_cli":
-        cli_result = _invoke_claude_cli(payload, template=args.analysis_template, skills=args.skill, cwd=cwd.resolve())
-        content = str(cli_result["content"])
-        cli_metadata = {
-            "engine_used": "claude_cli",
-            "cli_invoked": True,
-            "cli_command": cli_result["command"],
-        }
-    else:
-        raise SystemExit(f"Unsupported analysis engine: {args.analysis_engine}")
-
-    summary_json = {
-        **payload,
-        **cli_metadata,
-    }
-    summary_json_path = output_dir / "latest_summary.json"
-    summary_md_path = output_dir / "latest_summary.md"
-    _write_json(summary_json_path, summary_json)
-    _write_markdown(summary_md_path, content)
-    generated_files.extend([str(summary_json_path), str(summary_md_path)])
-    _write_json(
-        output_dir / "manifest.json",
-        {
-            "generated_files": generated_files,
-            **cli_metadata,
-            "template": args.analysis_template,
-        },
+    _run_single_analysis(
+        payload=payload,
+        output_dir=output_dir,
+        analysis_template=args.analysis_template,
+        analysis_engine=args.analysis_engine,
+        skills=args.skill,
+        cwd=cwd,
     )
     return 0
 

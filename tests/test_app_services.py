@@ -966,3 +966,55 @@ def test_create_research_analysis_task_uses_analysis_script(monkeypatch, tmp_pat
     assert "scripts/run_research_analysis.py" in " ".join(task.command)
     assert "--analysis-engine" in task.command
     assert task.config_payload["source_kind"] == "run"
+
+
+def test_create_research_analysis_task_supports_run_and_all_recipes_batch(monkeypatch, tmp_path):
+    monkeypatch.setattr(services, "TASKS_ROOT", tmp_path / "tasks")
+    monkeypatch.setattr(services, "_resolve_artifact_path", lambda value, base_dir=services.PROJECT_ROOT: Path(value) if value else None)
+
+    task = services.create_research_analysis_task(
+        RunResearchAnalysisTaskRequest(
+            display_name="Analyze demo batch",
+            source_ref=services.TaskSourceRef(kind="run", source_id="demo_run", label="demo_run"),
+            source_kind="run",
+            include_all_recipes=True,
+            run_id="demo_run",
+            analysis_template="investment_report",
+            analysis_engine="codex_cli",
+            output_dir=str(tmp_path / "analysis"),
+        )
+    )
+
+    assert "--include-all-recipes" in task.command
+    assert task.config_payload["include_all_recipes"] is True
+
+
+def test_get_run_analysis_task_preset_defaults_to_batch_mode(monkeypatch):
+    monkeypatch.setattr(
+        services,
+        "get_run_detail",
+        lambda run_id: services.RunDetail(
+            run_id=run_id,
+            output_dir=f"/tmp/{run_id}",
+            quick_summary=services.RunQuickSummary(
+                run_id=run_id,
+                output_dir=f"/tmp/{run_id}",
+                recipe_names=["baseline", "rank_blended"],
+                baseline_recipe="baseline",
+                artifact_status="ready",
+            ),
+            config={},
+            recipe_registry={},
+            promotion_gate={},
+            research_summary=services.ResearchSummary(headline="run headline"),
+            nodes=[],
+            recipes=[],
+            analysis_reports=[],
+            artifact_inventory=[],
+        ),
+    )
+
+    preset = services.get_run_analysis_task_preset("demo_run")
+
+    assert preset.payload["source_kind"] == "run"
+    assert preset.payload["include_all_recipes"] is True
