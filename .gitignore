@@ -208,4 +208,5 @@ __marimo__/
 
 # output
 artifacts/
+.next/
 .DS_Store

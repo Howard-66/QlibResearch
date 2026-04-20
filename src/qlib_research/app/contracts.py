@@ -281,6 +281,7 @@ class RunResearchAnalysisTaskRequest(BaseModel):
     requested_by: str | None = None
     source_ref: TaskSourceRef | None = None
     source_kind: Literal["run", "recipe", "compare"] = "run"
+    batch_mode: Literal["run_only", "run_plus_lead_recipe", "run_plus_all_recipes"] = "run_only"
     include_all_recipes: bool = False
     run_id: str | None = None
     recipe_name: str | None = None

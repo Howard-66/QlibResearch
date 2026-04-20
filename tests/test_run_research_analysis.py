@@ -131,6 +131,7 @@ def test_run_batch_analysis_runs_run_and_all_recipes(monkeypatch, tmp_path):
 
     args = types.SimpleNamespace(
         source_kind="run",
+        batch_mode="run_plus_all_recipes",
         include_all_recipes=True,
         run_id="demo_run",
         analysis_template="investment_report",
@@ -144,3 +145,50 @@ def test_run_batch_analysis_runs_run_and_all_recipes(monkeypatch, tmp_path):
     assert calls == [("run", "demo_run"), ("recipe", "baseline"), ("recipe", "rank_blended")]
     manifest = (tmp_path / "analysis" / "manifest.json").read_text(encoding="utf-8")
     assert "recipe_results" in manifest
+
+
+def test_run_batch_analysis_runs_run_and_lead_recipe(monkeypatch, tmp_path):
+    calls: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(run_research_analysis, "_run_payload", lambda run_id: {"source_kind": "run", "run_id": run_id})
+    monkeypatch.setattr(
+        run_research_analysis,
+        "_recipe_payload",
+        lambda run_id, recipe_name: {"source_kind": "recipe", "run_id": run_id, "recipe_name": recipe_name},
+    )
+    monkeypatch.setattr(
+        run_research_analysis,
+        "get_run_detail",
+        lambda run_id: types.SimpleNamespace(
+            quick_summary=types.SimpleNamespace(incumbent_recipe="rank_blended", baseline_recipe="baseline"),
+            recipes=[
+                types.SimpleNamespace(recipe_name="baseline"),
+                types.SimpleNamespace(recipe_name="rank_blended"),
+            ],
+        ),
+    )
+
+    def fake_run_single_analysis(**kwargs):
+        payload = kwargs["payload"]
+        calls.append((str(payload.get("source_kind")), str(payload.get("recipe_name") or payload.get("run_id"))))
+        output_dir = kwargs["output_dir"]
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        return {"output_dir": str(output_dir), "generated_files": [], "engine_used": "auto", "cli_invoked": False}
+
+    monkeypatch.setattr(run_research_analysis, "_run_single_analysis", fake_run_single_analysis)
+
+    args = types.SimpleNamespace(
+        source_kind="run",
+        batch_mode="run_plus_lead_recipe",
+        include_all_recipes=False,
+        run_id="demo_run",
+        analysis_template="investment_report",
+        analysis_engine="auto",
+        skill=[],
+    )
+
+    exit_code = run_research_analysis._run_batch_analysis(args, tmp_path / "analysis")
+
+    assert exit_code == 0
+    assert calls == [("run", "demo_run"), ("recipe", "rank_blended")]

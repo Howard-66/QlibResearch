@@ -379,6 +379,36 @@ def test_prime_parallel_workflow_inputs_preloads_shared_panels(monkeypatch, tmp_
     assert str(primed.execution_panel_path).endswith("csi300_execution_panel.parquet")
 
 
+def test_prime_parallel_workflow_inputs_auto_materializes_default_execution_panel_when_run_export_never(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_materialize(path, **kwargs):
+        calls.append((path, kwargs["filter_to_universe_membership"], kwargs["run_export"]))
+        return path
+
+    monkeypatch.setattr(
+        "qlib_research.core.qlib_native_workflow._materialize_panel_artifact",
+        fake_materialize,
+    )
+
+    config = NativeWorkflowConfig(
+        panel_path=tmp_path / "panels" / "csi300_weekly.parquet",
+        output_dir=tmp_path / "native_workflow" / "csi300",
+        execution_panel_path=None,
+        universe_exit_policy="retain_quotes_for_existing_positions",
+        run_export="never",
+    )
+
+    primed = _prime_parallel_workflow_inputs(config)
+
+    assert len(calls) == 2
+    assert calls[0][1] is True
+    assert calls[0][2] == "never"
+    assert calls[1][1] is False
+    assert calls[1][2] == "auto_if_missing"
+    assert str(primed.execution_panel_path).endswith("csi300_execution_panel.parquet")
+
+
 def test_build_parallel_recipe_heartbeat_summarizes_long_running_recipes():
     future_a = Future()
     future_b = Future()

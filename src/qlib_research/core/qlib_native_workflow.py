@@ -498,6 +498,14 @@ def _materialize_panel_artifact(
     return path
 
 
+def _execution_panel_export_mode(config: NativeWorkflowConfig, execution_path: Path | None) -> RunExportMode:
+    if config.universe_exit_policy != "retain_quotes_for_existing_positions":
+        return config.run_export
+    if execution_path is None and config.run_export == "never":
+        return "auto_if_missing"
+    return config.run_export
+
+
 def _prepare_execution_panel(config: NativeWorkflowConfig, execution_path: Path | None) -> tuple[pd.DataFrame, Path | None]:
     if config.universe_exit_policy != "retain_quotes_for_existing_positions":
         return pd.DataFrame(), execution_path
@@ -509,7 +517,7 @@ def _prepare_execution_panel(config: NativeWorkflowConfig, execution_path: Path 
         start_date=config.start_date,
         end_date=config.end_date,
         batch_size=config.batch_size,
-        run_export=config.run_export,
+        run_export=_execution_panel_export_mode(config, None if config.execution_panel_path is None else execution_path),
         filter_to_universe_membership=False,
         enrichment_scope="none",
         task_description=config.task_description,
@@ -546,7 +554,7 @@ def _prime_parallel_workflow_inputs(config: NativeWorkflowConfig) -> NativeWorkf
             start_date=config.start_date,
             end_date=config.end_date,
             batch_size=config.batch_size,
-            run_export=config.run_export,
+            run_export=_execution_panel_export_mode(config, None if config.execution_panel_path is None else execution_path),
             filter_to_universe_membership=False,
             enrichment_scope="none",
             task_description=config.task_description,

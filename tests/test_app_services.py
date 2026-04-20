@@ -977,7 +977,7 @@ def test_create_research_analysis_task_supports_run_and_all_recipes_batch(monkey
             display_name="Analyze demo batch",
             source_ref=services.TaskSourceRef(kind="run", source_id="demo_run", label="demo_run"),
             source_kind="run",
-            include_all_recipes=True,
+            batch_mode="run_plus_all_recipes",
             run_id="demo_run",
             analysis_template="investment_report",
             analysis_engine="codex_cli",
@@ -985,7 +985,9 @@ def test_create_research_analysis_task_supports_run_and_all_recipes_batch(monkey
         )
     )
 
-    assert "--include-all-recipes" in task.command
+    assert "--batch-mode" in task.command
+    assert "run_plus_all_recipes" in task.command
+    assert task.config_payload["batch_mode"] == "run_plus_all_recipes"
     assert task.config_payload["include_all_recipes"] is True
 
 
@@ -1017,4 +1019,5 @@ def test_get_run_analysis_task_preset_defaults_to_batch_mode(monkeypatch):
     preset = services.get_run_analysis_task_preset("demo_run")
 
     assert preset.payload["source_kind"] == "run"
+    assert preset.payload["batch_mode"] == "run_plus_all_recipes"
     assert preset.payload["include_all_recipes"] is True

@@ -15,6 +15,7 @@ from qlib_research.core.notebook_workflow import sanitize_for_json
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate structured research analysis artifacts.")
     parser.add_argument("--source-kind", choices=["run", "recipe", "compare"], required=True)
+    parser.add_argument("--batch-mode", choices=["run_only", "run_plus_lead_recipe", "run_plus_all_recipes"], default="run_only")
     parser.add_argument("--include-all-recipes", action="store_true")
     parser.add_argument("--run-id")
     parser.add_argument("--recipe-name")
@@ -38,6 +39,13 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def _write_markdown(path: Path, content: str) -> None:
     path.write_text(content.strip() + "\n", encoding="utf-8")
+
+
+def _normalized_batch_mode(args: argparse.Namespace) -> str:
+    batch_mode = str(getattr(args, "batch_mode", "run_only") or "run_only")
+    if batch_mode in {"run_plus_lead_recipe", "run_plus_all_recipes"}:
+        return batch_mode
+    return "run_plus_all_recipes" if getattr(args, "include_all_recipes", False) else "run_only"
 
 
 def _run_payload(run_id: str) -> dict[str, Any]:
@@ -353,9 +361,26 @@ def _run_single_analysis(
     )
 
 
+def _resolve_lead_recipe_name(run_detail: Any) -> str | None:
+    quick_summary = getattr(run_detail, "quick_summary", None)
+    lead_recipe = (
+        getattr(quick_summary, "incumbent_recipe", None)
+        or getattr(quick_summary, "baseline_recipe", None)
+    )
+    if lead_recipe:
+        return str(lead_recipe)
+    recipes = getattr(run_detail, "recipes", None) or []
+    if recipes:
+        first_recipe_name = getattr(recipes[0], "recipe_name", None)
+        if first_recipe_name:
+            return str(first_recipe_name)
+    return None
+
+
 def _run_batch_analysis(args: argparse.Namespace, run_output_dir: Path) -> int:
-    if args.source_kind != "run" or not args.run_id:
-        raise SystemExit("--include-all-recipes is only supported with source-kind=run and --run-id")
+    batch_mode = _normalized_batch_mode(args)
+    if args.source_kind != "run" or not args.run_id or batch_mode == "run_only":
+        raise SystemExit("--batch-mode is only supported with source-kind=run and --run-id")
 
     run_payload = _run_payload(args.run_id)
     run_payload.update({"template": args.analysis_template, "engine": args.analysis_engine, "skills": args.skill})
@@ -366,30 +391,38 @@ def _run_batch_analysis(args: argparse.Namespace, run_output_dir: Path) -> int:
         analysis_engine=args.analysis_engine,
         skills=args.skill,
         cwd=(Path("artifacts/native_workflow") / args.run_id),
-        extra_manifest={"batch_scope": "run_and_all_recipes"},
+        extra_manifest={"batch_scope": batch_mode},
     )
 
     run_detail = get_run_detail(args.run_id)
+    selected_recipe_names: list[str]
+    if batch_mode == "run_plus_lead_recipe":
+        lead_recipe = _resolve_lead_recipe_name(run_detail)
+        selected_recipe_names = [lead_recipe] if lead_recipe else []
+    else:
+        selected_recipe_names = [str(recipe.recipe_name) for recipe in run_detail.recipes]
+
     recipe_results: list[dict[str, Any]] = []
-    for recipe in run_detail.recipes:
-        recipe_payload = _recipe_payload(args.run_id, recipe.recipe_name)
+    for recipe_name in selected_recipe_names:
+        recipe_payload = _recipe_payload(args.run_id, recipe_name)
         recipe_payload.update({"template": args.analysis_template, "engine": args.analysis_engine, "skills": args.skill})
-        recipe_output_dir = (Path("artifacts/native_workflow") / args.run_id / recipe.recipe_name / "analysis").resolve()
+        recipe_output_dir = (Path("artifacts/native_workflow") / args.run_id / recipe_name / "analysis").resolve()
         recipe_result = _run_single_analysis(
             payload=recipe_payload,
             output_dir=recipe_output_dir,
             analysis_template=args.analysis_template,
             analysis_engine=args.analysis_engine,
             skills=args.skill,
-            cwd=(Path("artifacts/native_workflow") / args.run_id / recipe.recipe_name),
+            cwd=(Path("artifacts/native_workflow") / args.run_id / recipe_name),
             extra_manifest={
                 "batch_scope": "recipe_from_run_batch",
                 "batch_parent_run_id": args.run_id,
+                "batch_parent_mode": batch_mode,
             },
         )
         recipe_results.append(
             {
-                "recipe_name": recipe.recipe_name,
+                "recipe_name": recipe_name,
                 **recipe_result,
             }
         )
@@ -398,7 +431,7 @@ def _run_batch_analysis(args: argparse.Namespace, run_output_dir: Path) -> int:
     existing_manifest = json.loads(batch_manifest_path.read_text(encoding="utf-8"))
     existing_manifest.update(
         {
-            "batch_scope": "run_and_all_recipes",
+            "batch_scope": batch_mode,
             "run_result": run_result,
             "recipe_results": recipe_results,
         }
@@ -410,7 +443,7 @@ def _run_batch_analysis(args: argparse.Namespace, run_output_dir: Path) -> int:
 def main() -> int:
     args = parse_args()
     output_dir = Path(args.output_dir).expanduser().resolve()
-    if args.include_all_recipes:
+    if _normalized_batch_mode(args) != "run_only":
         return _run_batch_analysis(args, output_dir)
 
     output_dir.mkdir(parents=True, exist_ok=True)

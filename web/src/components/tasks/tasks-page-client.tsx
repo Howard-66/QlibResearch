@@ -6,7 +6,6 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { ArrowDown, ArrowUp, CircleHelp, ExternalLink, FileText, LayoutGrid, Loader2, PlayCircle, Square, Trash2 } from "lucide-react";
 
-import { PageHeader } from "@/components/common/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -124,7 +123,7 @@ type ResearchAnalysisTaskFormState = {
   description: string;
   requested_by: string;
   source_kind: "run" | "recipe" | "compare";
-  include_all_recipes: boolean;
+  batch_mode: "run_only" | "run_plus_lead_recipe" | "run_plus_all_recipes";
   run_id: string;
   recipe_name: string;
   compare_items_json: string;
@@ -136,6 +135,7 @@ type ResearchAnalysisTaskFormState = {
 
 const UNIVERSE_PROFILE_OPTIONS = ["csi300", "csi500", "merged_csi300_500", "watchlist"] as const;
 const WORKFLOW_OUTPUT_ROOT_DIR = "artifacts/native_workflow";
+const WORKFLOW_PANELS_ROOT_DIR = "artifacts/panels";
 const WORKFLOW_DEFAULT_PANEL_PATH = "artifacts/panels/csi300_weekly.parquet";
 const WORKFLOW_RECIPE_OPTIONS = ["baseline", "mae_4w", "binary_4w", "rank_blended", "huber_8w"] as const;
 const BUILTIN_BENCHMARK_MODE_OPTIONS = ["auto", "flat_zero"] as const;
@@ -371,8 +371,6 @@ export function TasksPageClient() {
   };
 
   const isSubmitting = exportMutation.isPending || workflowMutation.isPending || analysisMutation.isPending;
-  const taskCount = (board?.history_tasks.length ?? 0) + (board?.queued_tasks.length ?? 0) + (board?.running_task ? 1 : 0);
-
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center gap-3">
@@ -748,9 +746,12 @@ function ExportTaskEditor({
         <FormField label="Output">
           <Input value={form.output} onChange={(event) => onChange((current) => ({ ...current, output: event.target.value }))} />
         </FormField>
-        <FormField label="Universe Profile">
-          <Input value={form.universe_profile} onChange={(event) => onChange((current) => ({ ...current, universe_profile: event.target.value }))} />
-        </FormField>
+        <FormSelect
+          label="Universe Profile"
+          value={form.universe_profile}
+          options={UNIVERSE_PROFILE_OPTIONS}
+          onChange={(value) => onChange((current) => ({ ...current, universe_profile: value }))}
+        />
         <div className="space-y-2 md:col-span-2">
           <div className="text-sm font-medium">Universe Mode</div>
           <div className="flex flex-wrap gap-2">
@@ -863,18 +864,26 @@ function WorkflowTaskEditor({
   onChange: React.Dispatch<React.SetStateAction<WorkflowTaskFormState>>;
   panels: PanelSummary[];
 }) {
-  const panelOptions = React.useMemo(() => buildWorkflowPanelOptions(panels, form.panel_path), [form.panel_path, panels]);
+  const panelFileOptionsId = React.useId();
+  const panelFileOptions = React.useMemo(() => buildWorkflowPanelFileOptions(panels, form.panel_path), [form.panel_path, panels]);
+  const panelsByFilename = React.useMemo(
+    () => new Map(panels.map((panel) => [workflowPanelFilename(panel.path), panel])),
+    [panels],
+  );
   const recipeOptions = React.useMemo(() => buildWorkflowRecipeOptions(form.recipe_names), [form.recipe_names]);
   const selectedRecipeNames = React.useMemo(() => parseListInput(form.recipe_names), [form.recipe_names]);
   const benchmarkModeSelectValue = getBenchmarkModeSelectValue(form.benchmark_mode);
+  const allowCustomPanelPath = allowsWorkflowMissingPanelPath(form.run_export);
+  const panelFilenameValue = workflowPanelFilename(form.panel_path);
   const describe = describeWorkflowConfigKey;
 
   const updateDisplayName = (displayName: string) => {
     onChange((current) => syncWorkflowDerivedFields({ ...current, display_name: displayName }));
   };
 
-  const updatePanelPath = (panelPath: string) => {
-    onChange((current) => syncWorkflowDerivedFields({ ...current, panel_path: panelPath }));
+  const updatePanelFile = (panelFile: string) => {
+    const normalizedPanelPath = workflowPanelPathFromFilename(panelFile);
+    onChange((current) => syncWorkflowPanelSelection(current, normalizedPanelPath, panelsByFilename.get(workflowPanelFilename(normalizedPanelPath))));
   };
 
   const updateUniverseProfile = (universeProfile: string) => {
@@ -928,18 +937,41 @@ function WorkflowTaskEditor({
           hint="Execution Panel Dir 与 Output Dir 保持一致，路径自动生成。"
         />
         <div className="grid gap-4 md:grid-cols-2">
-          <FormField label="Panel Path" description={describe("panel_path")}>
-            <select
-              className="flex h-10 w-full rounded-lg border border-input/85 bg-surface-1/80 px-3 py-2 text-sm"
-              value={form.panel_path}
-              onChange={(event) => updatePanelPath(event.target.value)}
-            >
-              {panelOptions.map((panel) => (
-                <option key={panel.path} value={panel.path}>
-                  {panel.label}
-                </option>
-              ))}
-            </select>
+          <FormField label="Panel File" description={`${describe("panel_path")} 固定存放在 ${WORKFLOW_PANELS_ROOT_DIR} 下，只需选择或填写文件名。`}>
+            <div className="space-y-2">
+              {allowCustomPanelPath ? (
+                <>
+                  <Input
+                    list={panelFileOptionsId}
+                    value={panelFilenameValue}
+                    onChange={(event) => updatePanelFile(event.target.value)}
+                    placeholder="csi500_weekly_20260410.parquet"
+                  />
+                  <datalist id={panelFileOptionsId}>
+                    {panelFileOptions.map((panel) => (
+                      <option key={panel.filename} value={panel.filename}>
+                        {panel.label}
+                      </option>
+                    ))}
+                  </datalist>
+                  <div className="text-xs text-muted-foreground">
+                    当前 `Run Export` 允许先导出再执行，所以这里可以填写尚不存在的 panel 文件名；实际路径会自动固定到 <code>{WORKFLOW_PANELS_ROOT_DIR}</code> 下。
+                  </div>
+                </>
+              ) : (
+                <select
+                  className="flex h-10 w-full rounded-lg border border-input/85 bg-surface-1/80 px-3 py-2 text-sm"
+                  value={panelFilenameValue}
+                  onChange={(event) => updatePanelFile(event.target.value)}
+                >
+                  {panelFileOptions.map((panel) => (
+                    <option key={panel.filename} value={panel.filename}>
+                      {panel.label}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
           </FormField>
           <div className="md:col-span-2">
             <FormField label="Recipe Names" description={describe("recipe_names")}>
@@ -1165,21 +1197,18 @@ function ResearchAnalysisTaskEditor({
         />
       </FormField>
       <div className="grid gap-4 md:grid-cols-2">
-        <FormField label="Source Kind">
-          <select
+          <FormField label="Source Kind">
+            <select
             className="flex h-10 w-full rounded-lg border border-input/85 bg-surface-1/80 px-3 py-2 text-sm"
             value={form.source_kind}
-            onChange={(event) =>
-              onChange((current) => ({
-                ...current,
-                source_kind: event.target.value as ResearchAnalysisTaskFormState["source_kind"],
-                include_all_recipes:
-                  event.target.value === "run"
-                    ? current.include_all_recipes
-                    : false,
-              }))
-            }
-          >
+              onChange={(event) =>
+                onChange((current) => ({
+                  ...current,
+                  source_kind: event.target.value as ResearchAnalysisTaskFormState["source_kind"],
+                  batch_mode: event.target.value === "run" ? current.batch_mode : "run_only",
+                }))
+              }
+            >
             <option value="run">run</option>
             <option value="recipe">recipe</option>
             <option value="compare">compare</option>
@@ -1213,13 +1242,15 @@ function ResearchAnalysisTaskEditor({
         </FormField>
         {form.source_kind === "run" ? (
           <FormField label="Batch Mode">
-            <label className="flex h-10 items-center justify-between rounded-lg border border-input/85 bg-surface-1/80 px-3 py-2 text-sm">
-              <span>Analyze run + all recipes</span>
-              <Switch
-                checked={form.include_all_recipes}
-                onCheckedChange={(checked) => onChange((current) => ({ ...current, include_all_recipes: checked }))}
-              />
-            </label>
+            <select
+              className="flex h-10 w-full rounded-lg border border-input/85 bg-surface-1/80 px-3 py-2 text-sm"
+              value={form.batch_mode}
+              onChange={(event) => onChange((current) => ({ ...current, batch_mode: event.target.value as ResearchAnalysisTaskFormState["batch_mode"] }))}
+            >
+              <option value="run_only">run only</option>
+              <option value="run_plus_lead_recipe">run + lead recipe</option>
+              <option value="run_plus_all_recipes">run + all recipes</option>
+            </select>
           </FormField>
         ) : null}
         <FormField label="Run ID">
@@ -1277,9 +1308,7 @@ function TaskListItem({
             <span className="font-medium">{task.display_name || task.task_id}</span>
             <StatusBadge status={task.status} />
             {task.queue_position ? <Badge variant="outline">#{task.queue_position}</Badge> : null}
-            {task.source_ref && task.source_ref.kind !== "manual" ? (
-              <SourceRefLinks sourceRef={task.source_ref} />
-            ) : null}
+            <SourceRefLinks task={task} />
           </div>
           {task.description ? <div className="text-sm text-muted-foreground">{task.description}</div> : null}
           <div className="text-sm text-muted-foreground">{task.task_id}</div>
@@ -1296,27 +1325,39 @@ function TaskListItem({
   );
 }
 
-function SourceRefLinks({ sourceRef }: { sourceRef: TaskSourceRef }) {
+function SourceRefLinks({ task }: { task: ResearchTaskSummary }) {
   const links: Array<{ href: string; icon: React.ReactNode; label: string }> = [];
+  const sourceRef = task.source_ref;
+  const targetPanelId = getTaskTargetPanelId(task);
+  const targetRunId = getTaskTargetRunId(task);
 
-  if (sourceRef.kind === "run") {
-    links.push({ href: `/runs/${sourceRef.source_id}`, icon: <FileText className="h-3.5 w-3.5" />, label: "Go to Run" });
+  if (task.task_kind === "export_panel" && targetPanelId) {
+    links.push({ href: `/panels/${encodeURIComponent(targetPanelId)}`, icon: <LayoutGrid className="h-3.5 w-3.5" />, label: "Go to Panel" });
+  } else if (task.task_kind === "run_native_workflow" && targetRunId) {
+    links.push({ href: `/runs/${encodeURIComponent(targetRunId)}`, icon: <FileText className="h-3.5 w-3.5" />, label: "Go to Run" });
   }
 
-  if (sourceRef.kind === "panel") {
-    links.push({ href: `/panels/${encodeURIComponent(sourceRef.source_id)}`, icon: <LayoutGrid className="h-3.5 w-3.5" />, label: "Go to Panel" });
-  }
-
-  if (sourceRef.kind === "recipe") {
-    const recipeName = sourceRef.source_id;
-    const runId = sourceRef.label ?? "";
-    if (runId) {
-      links.push({ href: `/runs/${runId}/recipes/${encodeURIComponent(recipeName)}`, icon: <ExternalLink className="h-3.5 w-3.5" />, label: "Go to Recipe" });
+  if (!links.length && sourceRef && sourceRef.kind !== "manual") {
+    if (sourceRef.kind === "run") {
+      links.push({ href: `/runs/${encodeURIComponent(sourceRef.source_id)}`, icon: <FileText className="h-3.5 w-3.5" />, label: "Go to Run" });
     }
-  }
 
-  if (sourceRef.kind === "compare") {
-    links.push({ href: `/compare?runId=${encodeURIComponent(sourceRef.source_id)}`, icon: <ExternalLink className="h-3.5 w-3.5" />, label: "Go to Compare" });
+    if (sourceRef.kind === "panel") {
+      links.push({ href: `/panels/${encodeURIComponent(sourceRef.source_id)}`, icon: <LayoutGrid className="h-3.5 w-3.5" />, label: "Go to Panel" });
+    }
+
+    if (sourceRef.kind === "recipe") {
+      const parts = sourceRef.source_id.split(":");
+      const runId = parts[0];
+      const recipeName = parts.length > 1 ? parts[1] : sourceRef.label ?? parts[0];
+      if (runId && recipeName) {
+        links.push({ href: `/runs/${encodeURIComponent(runId)}/recipes/${encodeURIComponent(recipeName)}`, icon: <ExternalLink className="h-3.5 w-3.5" />, label: "Go to Recipe" });
+      }
+    }
+
+    if (sourceRef.kind === "compare") {
+      links.push({ href: `/compare?runId=${encodeURIComponent(sourceRef.source_id)}`, icon: <ExternalLink className="h-3.5 w-3.5" />, label: "Go to Compare" });
+    }
   }
 
   if (links.length === 0) return null;
@@ -1490,7 +1531,7 @@ function defaultExportTaskForm(): ExportTaskFormState {
     output: "artifacts/panels/weekly_features.parquet",
     start_date: "",
     end_date: "",
-    universe_profile: "",
+    universe_profile: "csi300",
     universe_mode: "historical_membership",
     batch_size: "300",
     enrichment_scope: "research_full",
@@ -1564,7 +1605,7 @@ function defaultResearchAnalysisTaskForm(): ResearchAnalysisTaskFormState {
     description: "",
     requested_by: "webapp",
     source_kind: "run",
-    include_all_recipes: false,
+    batch_mode: "run_only",
     run_id: "",
     recipe_name: "",
     compare_items_json: "[]",
@@ -1686,7 +1727,8 @@ function buildResearchAnalysisTaskPayload(form: ResearchAnalysisTaskFormState, s
     requested_by: form.requested_by,
     source_ref: sourceRef,
     source_kind: form.source_kind,
-    include_all_recipes: form.source_kind === "run" ? form.include_all_recipes : false,
+    batch_mode: form.source_kind === "run" ? form.batch_mode : "run_only",
+    include_all_recipes: form.source_kind === "run" ? form.batch_mode === "run_plus_all_recipes" : false,
     run_id: form.run_id || null,
     recipe_name: form.recipe_name || null,
     compare_items: compareItems,
@@ -1757,7 +1799,7 @@ function applyPresetToEditor(
       description: String(payload.description ?? ""),
       requested_by: String(payload.requested_by ?? "webapp"),
       source_kind: (payload.source_kind === "recipe" || payload.source_kind === "compare") ? payload.source_kind : "run",
-      include_all_recipes: payload.include_all_recipes === true,
+      batch_mode: normalizeAnalysisBatchMode(payload.batch_mode, payload.include_all_recipes),
       run_id: String(payload.run_id ?? ""),
       recipe_name: String(payload.recipe_name ?? ""),
       compare_items_json: JSON.stringify(payload.compare_items ?? [], null, 2),
@@ -1804,6 +1846,10 @@ function normalizeDirectory(value: string, fallback: string) {
   return trimmed || fallback;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function joinPath(root: string, leaf: string) {
   return `${normalizeDirectory(root, ".")}/${leaf.replace(/^\/+/g, "")}`;
 }
@@ -1827,6 +1873,30 @@ function buildOutputDir(root: string, displayName: string) {
   return joinPath(root, slugifyPathSegment(displayName, "workflow_run"));
 }
 
+function workflowPanelFilename(panelPath: string) {
+  return basename(panelPath || "");
+}
+
+function workflowPanelPathFromFilename(value: string) {
+  const filename = basename(value.trim());
+  if (!filename) return "";
+  return joinPath(WORKFLOW_PANELS_ROOT_DIR, filename);
+}
+
+function inferUniverseProfileFromPanelPath(panelPath: string, panel?: Pick<PanelSummary, "universe_profile"> | null) {
+  const panelUniverseProfile = panel?.universe_profile;
+  if (panelUniverseProfile && UNIVERSE_PROFILE_OPTIONS.includes(panelUniverseProfile as (typeof UNIVERSE_PROFILE_OPTIONS)[number])) {
+    return panelUniverseProfile;
+  }
+  const normalizedPath = panelPath.trim().toLowerCase();
+  if (!normalizedPath) return null;
+  if (normalizedPath.includes("merged_csi300_500")) return "merged_csi300_500";
+  if (normalizedPath.includes("watchlist")) return "watchlist";
+  if (normalizedPath.includes("csi500")) return "csi500";
+  if (normalizedPath.includes("csi300")) return "csi300";
+  return null;
+}
+
 function buildWorkflowDerivedPaths({
   display_name,
   panel_path,
@@ -1844,6 +1914,19 @@ function syncWorkflowDerivedFields(form: WorkflowTaskFormState): WorkflowTaskFor
     ...form,
     ...buildWorkflowDerivedPaths(form),
   };
+}
+
+function syncWorkflowPanelSelection(
+  form: WorkflowTaskFormState,
+  panelPath: string,
+  panel?: Pick<PanelSummary, "universe_profile"> | null,
+): WorkflowTaskFormState {
+  const inferredUniverseProfile = inferUniverseProfileFromPanelPath(panelPath, panel);
+  return syncWorkflowDerivedFields({
+    ...form,
+    panel_path: panelPath,
+    universe_profile: inferredUniverseProfile ?? form.universe_profile,
+  });
 }
 
 function panelExtension(path: string) {
@@ -1875,26 +1958,62 @@ function getBenchmarkModeSelectValue(value: string) {
   return isBuiltinBenchmarkMode(value) ? value : "custom_index";
 }
 
-function buildWorkflowPanelOptions(panels: PanelSummary[], currentPath: string) {
+function allowsWorkflowMissingPanelPath(runExport: string) {
+  return runExport === "always" || runExport === "auto_if_missing";
+}
+
+function buildWorkflowPanelFileOptions(panels: PanelSummary[], currentPath: string) {
   const items = panels
     .map((panel) => ({
-      path: panel.path,
-      label: `${panel.name} · ${panel.format.toUpperCase()}`,
+      filename: workflowPanelFilename(panel.path),
+      label: workflowPanelFilename(panel.path),
     }))
+    .filter((panel) => panel.filename)
     .sort((left, right) => left.label.localeCompare(right.label));
-  if (currentPath && !items.some((item) => item.path === currentPath)) {
+  if (currentPath && !items.some((item) => item.filename === workflowPanelFilename(currentPath))) {
     items.unshift({
-      path: currentPath,
-      label: `${basename(currentPath)} · Current path`,
+      filename: workflowPanelFilename(currentPath),
+      label: workflowPanelFilename(currentPath),
     });
   }
   if (!items.length) {
     items.push({
-      path: currentPath || "",
-      label: currentPath ? basename(currentPath) : "No panels available",
+      filename: workflowPanelFilename(currentPath),
+      label: currentPath ? workflowPanelFilename(currentPath) : "No panels available",
     });
   }
-  return items;
+  return Array.from(new Map(items.map((item) => [item.filename, item])).values());
+}
+
+function normalizeAnalysisBatchMode(
+  batchMode: unknown,
+  includeAllRecipes: unknown,
+): ResearchAnalysisTaskFormState["batch_mode"] {
+  return batchMode === "run_plus_lead_recipe" || batchMode === "run_plus_all_recipes"
+    ? batchMode
+    : includeAllRecipes === true
+      ? "run_plus_all_recipes"
+      : "run_only";
+}
+
+function getWorkflowTaskConfig(task: Pick<ResearchTaskSummary, "config_payload">) {
+  const configPayload = task.config_payload?.config_payload;
+  return isRecord(configPayload) ? configPayload : null;
+}
+
+function getTaskTargetPanelId(task: Pick<ResearchTaskSummary, "task_kind" | "output_dir" | "config_payload">) {
+  if (task.task_kind !== "export_panel") return null;
+  const outputValue = task.config_payload?.output ?? task.output_dir;
+  if (typeof outputValue !== "string" || !outputValue.trim()) return null;
+  return basename(outputValue);
+}
+
+function getTaskTargetRunId(task: Pick<ResearchTaskSummary, "task_kind" | "output_dir" | "config_payload">) {
+  if (task.task_kind !== "run_native_workflow") return null;
+  const workflowConfig = getWorkflowTaskConfig(task);
+  const outputDirValue = workflowConfig?.output_dir ?? task.output_dir;
+  if (typeof outputDirValue !== "string" || !outputDirValue.trim()) return null;
+  return basename(outputDirValue);
 }
 
 function workflowFormFromConfigPayload(value: unknown): WorkflowTaskFormState {

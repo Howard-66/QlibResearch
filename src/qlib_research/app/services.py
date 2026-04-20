@@ -2217,7 +2217,14 @@ def _default_analysis_output_dir(request: RunResearchAnalysisTaskRequest) -> str
     return str(ARTIFACTS_ROOT / "analysis")
 
 
+def _normalized_analysis_batch_mode(request: RunResearchAnalysisTaskRequest) -> str:
+    if request.batch_mode in {"run_only", "run_plus_lead_recipe", "run_plus_all_recipes"}:
+        return request.batch_mode
+    return "run_plus_all_recipes" if request.include_all_recipes else "run_only"
+
+
 def _build_research_analysis_command(request: RunResearchAnalysisTaskRequest, output_dir: str) -> list[str]:
+    batch_mode = _normalized_analysis_batch_mode(request)
     command = [
         "uv",
         "run",
@@ -2232,8 +2239,8 @@ def _build_research_analysis_command(request: RunResearchAnalysisTaskRequest, ou
         "--output-dir",
         output_dir,
     ]
-    if request.include_all_recipes:
-        command.append("--include-all-recipes")
+    if request.source_kind == "run" and batch_mode != "run_only":
+        command += ["--batch-mode", batch_mode]
     if request.run_id:
         command += ["--run-id", request.run_id]
     if request.recipe_name:
@@ -2250,6 +2257,10 @@ def create_research_analysis_task(request: RunResearchAnalysisTaskRequest) -> Re
     task_id = f"task-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
     output_dir = _default_analysis_output_dir(request)
     task_paths = _task_paths(task_id)
+    batch_mode = _normalized_analysis_batch_mode(request)
+    config_payload = request.model_dump(mode="json")
+    config_payload["batch_mode"] = batch_mode
+    config_payload["include_all_recipes"] = batch_mode == "run_plus_all_recipes"
     summary = ResearchTaskSummary(
         task_id=task_id,
         task_kind="run_research_analysis",
@@ -2261,7 +2272,7 @@ def create_research_analysis_task(request: RunResearchAnalysisTaskRequest) -> Re
         output_dir=str(_resolve_artifact_path(output_dir) or output_dir),
         message="Task queued",
         command=_build_research_analysis_command(request, output_dir),
-        config_payload=request.model_dump(mode="json"),
+        config_payload=config_payload,
         logs={"stdout": str(task_paths[2]), "stderr": str(task_paths[3])},
         metadata={"cwd": str(PROJECT_ROOT)},
         source_ref=_default_task_source(request.source_ref),
@@ -2414,6 +2425,7 @@ def get_run_analysis_task_preset(run_id: str) -> TaskPresetResponse:
             "requested_by": "webapp",
             "source_ref": {"kind": "run", "source_id": detail.run_id, "label": detail.run_id, "path": detail.output_dir},
             "source_kind": "run",
+            "batch_mode": "run_plus_all_recipes",
             "include_all_recipes": True,
             "run_id": detail.run_id,
             "analysis_template": "investment_report",
