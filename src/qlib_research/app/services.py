@@ -24,18 +24,25 @@ from qlib_research.app.contracts import (
     AnalysisReportRef,
     ArtifactRef,
     ArtifactInventoryResponse,
+    ChartAnnotationPayload,
+    ChartPayload,
+    ChartSeriesPayload,
+    ChartThresholdPayload,
     CompareItemRef,
     CompareItemResult,
     CompareResponse,
     CompareTimeseriesPoint,
     CompareTimeseriesSeries,
+    CompareWinnerSummary,
     DataTablePayload,
     DiagnosticNode,
     EvidenceItem,
+    ExecutionAnomalySummary,
     ExportPanelTaskRequest,
     OverviewResponse,
     PanelDetail,
     PanelSummary,
+    RecommendationAction,
     RecipeDetail,
     RecipeTablesResponse,
     RecipeSummary,
@@ -73,6 +80,15 @@ NATIVE_WORKFLOW_ROOT = ARTIFACTS_ROOT / "native_workflow"
 PANELS_ROOT = ARTIFACTS_ROOT / "panels"
 TASKS_ROOT = ARTIFACTS_ROOT / "app_tasks"
 TASK_QUEUE_FILENAME = "queue.json"
+RESEARCH_VERDICT_VALUES = {
+    "incumbent",
+    "promoted",
+    "rejected",
+    "needs_explanation",
+    "hold",
+    "reject",
+    "investigate",
+}
 
 REQUIRED_RECIPE_ARTIFACTS = {
     "native_workflow_manifest.json",
@@ -100,6 +116,7 @@ REQUIRED_RECIPE_ARTIFACTS = {
 OPTIONAL_RECIPE_CSVS = {
     "feature_corr_candidates.csv",
     "holding_count_drift.csv",
+    "rebalance_audit.csv",
     "regime_gate_diagnostics.csv",
     "rolling_predictions.csv",
     "rolling_performance_metrics.csv",
@@ -112,7 +129,7 @@ OPTIONAL_RECIPE_CSVS = {
 }
 
 RUN_INDEX_FILENAME = "workbench_run_index.json"
-RUN_INDEX_SCHEMA_VERSION = 3
+RUN_INDEX_SCHEMA_VERSION = 4
 PANEL_SUMMARY_CACHE_DIRNAME = ".workbench_cache"
 
 RUN_INDEX_RECIPE_FILES = {
@@ -125,6 +142,8 @@ RUN_INDEX_RECIPE_FILES = {
     "walk_forward_native_report.csv",
     "rolling_performance_metrics.csv",
     "walk_forward_performance_metrics.csv",
+    "holding_count_drift.csv",
+    "sector_exposure_history.csv",
 }
 
 RECIPE_TABLE_FILES = {
@@ -141,6 +160,7 @@ RECIPE_TABLE_FILES = {
     "slice_regime_summary": "slice_regime_summary.csv",
     "signal_realization_bridge": "signal_realization_bridge.csv",
     "holding_count_drift": "holding_count_drift.csv",
+    "rebalance_audit": "rebalance_audit.csv",
     "sector_exposure_history": "sector_exposure_history.csv",
     "regime_gate_diagnostics": "regime_gate_diagnostics.csv",
     "rolling_feature_importance": "rolling_feature_importance.csv",
@@ -356,6 +376,30 @@ def _parse_markdown_list_item(line: str) -> str | None:
     return None
 
 
+def _normalize_research_verdict(value: Any | None) -> str | None:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    normalized = raw.strip("`*_ \t\r\n\"'“”‘’").rstrip("。.,，；;:：").lower()
+    normalized = normalized.replace("-", "_").replace(" ", "_")
+    if normalized in RESEARCH_VERDICT_VALUES:
+        return normalized
+    searchable = re.sub(r"[`*_\"'“”‘’。.,，；;:：]+", " ", raw.lower().replace("-", "_"))
+    searchable = re.sub(r"\s+", "_", searchable)
+    for verdict in sorted(RESEARCH_VERDICT_VALUES, key=len, reverse=True):
+        if re.search(rf"(?<![a-z_]){re.escape(verdict)}(?![a-z_])", searchable):
+            return verdict
+    return None
+
+
+def _normalize_run_quick_summary_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    normalized["research_status"] = _normalize_research_verdict(normalized.get("research_status"))
+    return normalized
+
+
 def _parse_latest_summary_markdown(base_dir: Path) -> dict[str, Any]:
     path = _latest_summary_markdown_path(base_dir)
     if not path.exists():
@@ -406,7 +450,7 @@ def _parse_latest_summary_markdown(base_dir: Path) -> dict[str, Any]:
 
     return {
         "headline": title,
-        "verdict": metadata.get("verdict"),
+        "verdict": _normalize_research_verdict(metadata.get("verdict")),
         "current_problem": (
             (sections.get("current_problem") or [None])[0]
             or metadata.get("current problem")
@@ -429,7 +473,7 @@ def _merge_research_summaries(primary: ResearchSummary, markdown_payload: dict[s
     return primary.model_copy(
         update={
             "headline": markdown_payload.get("headline") or primary.headline,
-            "verdict": markdown_payload.get("verdict") or primary.verdict,
+            "verdict": _normalize_research_verdict(markdown_payload.get("verdict")) or primary.verdict,
             "key_findings": markdown_payload.get("key_findings") or primary.key_findings,
             "risks": markdown_payload.get("risks") or primary.risks,
             "recommended_next_actions": markdown_payload.get("recommended_next_actions") or primary.recommended_next_actions,
@@ -445,7 +489,7 @@ def _read_research_summary(base_dir: Path) -> ResearchSummary:
     if isinstance(payload, dict) and payload:
         summary = ResearchSummary(
             headline=payload.get("headline"),
-            verdict=payload.get("verdict"),
+            verdict=_normalize_research_verdict(payload.get("verdict")),
             key_findings=[str(item) for item in payload.get("key_findings", []) if item is not None],
             risks=[str(item) for item in payload.get("risks", []) if item is not None],
             recommended_next_actions=[
@@ -472,7 +516,7 @@ def _fallback_run_research_summary(index_payload: dict[str, Any]) -> ResearchSum
     artifact_status = quick_summary.get("artifact_status") if isinstance(quick_summary, dict) else None
     return ResearchSummary(
         headline=f"当前基线：{quick_summary.get('baseline_recipe') or 'baseline'}",
-        verdict=quick_summary.get("research_status"),
+        verdict=_normalize_research_verdict(quick_summary.get("research_status")),
         key_findings=[
             f"Walk-forward rank_ic_ir {baseline_metrics.get('walk_forward_rank_ic_ir')}",
             f"Walk-forward net return {baseline_metrics.get('walk_forward_net_total_return')}",
@@ -734,6 +778,9 @@ def _build_recipe_overview_row(
         "walk_forward_sharpe_ratio": walk_forward_performance_row.get("sharpe_ratio"),
         "walk_forward_win_rate": walk_forward_performance_row.get("win_rate"),
         "walk_forward_calmar_ratio": walk_forward_performance_row.get("calmar_ratio"),
+        "avg_actual_hold_count": _mean_or_none(recipe_frames.get("holding_count_drift", pd.DataFrame()), "actual_hold_count"),
+        "max_actual_hold_count": _max_or_none(recipe_frames.get("holding_count_drift", pd.DataFrame()), "actual_hold_count"),
+        "top1_sector_weight": _max_or_none(recipe_frames.get("sector_exposure_history", pd.DataFrame()), "top1_sector_weight"),
     }
     return _merge_overview_rows(
         computed_row,
@@ -852,6 +899,385 @@ def _safe_last_numeric_value(frame: pd.DataFrame, column: str) -> float | None:
     return float(series.iloc[-1])
 
 
+def _bundle_frame(frame: pd.DataFrame, bundle: str = "walk_forward") -> pd.DataFrame:
+    if frame.empty or "bundle" not in frame.columns:
+        return frame.copy()
+    filtered = frame.loc[frame["bundle"].astype(str) == bundle].copy()
+    if not filtered.empty:
+        return filtered
+    return frame.copy()
+
+
+def _numeric_series(frame: pd.DataFrame, column: str) -> pd.Series:
+    if frame.empty or column not in frame.columns:
+        return pd.Series(dtype=float)
+    return pd.to_numeric(frame[column], errors="coerce").dropna()
+
+
+def _mean_or_none(frame: pd.DataFrame, column: str) -> float | None:
+    series = _numeric_series(frame, column)
+    if series.empty:
+        return None
+    return float(series.mean())
+
+
+def _max_or_none(frame: pd.DataFrame, column: str) -> float | None:
+    series = _numeric_series(frame, column)
+    if series.empty:
+        return None
+    return float(series.max())
+
+
+def _ratio_or_none(frame: pd.DataFrame, predicate: pd.Series) -> float | None:
+    if frame.empty or predicate.empty:
+        return None
+    return float(predicate.fillna(False).mean())
+
+
+def _first_present_numeric(row: dict[str, Any], keys: Iterable[str]) -> float | None:
+    for key in keys:
+        value = row.get(key)
+        if value is None or pd.isna(value):
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _execution_drift_columns(frame: pd.DataFrame) -> tuple[str | None, str | None]:
+    actual_column = "post_trade_hold_count" if "post_trade_hold_count" in frame.columns else ("actual_hold_count" if "actual_hold_count" in frame.columns else None)
+    target_column = "target_hold_count" if "target_hold_count" in frame.columns else None
+    return actual_column, target_column
+
+
+def _dominant_execution_cause(frame: pd.DataFrame) -> str | None:
+    if frame.empty:
+        return None
+    limit_mean = _mean_or_none(frame, "sell_blocked_by_limit_count") or 0.0
+    suspend_mean = _mean_or_none(frame, "sell_blocked_by_suspend_count") or 0.0
+    volume_mean = _mean_or_none(frame, "sell_blocked_by_volume_count") or 0.0
+    residual_mean = _mean_or_none(frame, "residual_hold_count") or 0.0
+    leading = max(
+        (
+            ("limit sell blocked", limit_mean),
+            ("suspend sell blocked", suspend_mean),
+            ("volume sell blocked", volume_mean),
+        ),
+        key=lambda item: item[1],
+    )
+    if leading[1] >= 0.15:
+        return leading[0]
+    if residual_mean > 0:
+        return "membership drift"
+    return "stable"
+
+
+def _execution_severity_from_frame(frame: pd.DataFrame) -> str | None:
+    if frame.empty:
+        return None
+    actual_column, target_column = _execution_drift_columns(frame)
+    if actual_column is None or target_column is None:
+        return None
+    actual = _numeric_series(frame, actual_column)
+    target = _numeric_series(frame, target_column)
+    if actual.empty or target.empty:
+        return None
+    drift = actual.reset_index(drop=True) - target.reset_index(drop=True)
+    if drift.empty:
+        return None
+    max_drift = float(drift.max())
+    affected_ratio = float((drift > 0).mean())
+    if max_drift >= 4 or affected_ratio >= 0.6:
+        return "critical"
+    if max_drift >= 3 or affected_ratio >= 0.35:
+        return "high"
+    if max_drift >= 2 or affected_ratio >= 0.15:
+        return "medium"
+    return "low"
+
+
+def _recommended_experiment_codes(frame: pd.DataFrame) -> list[str]:
+    cause = _dominant_execution_cause(frame)
+    severity = _execution_severity_from_frame(frame)
+    if cause == "membership drift":
+        return ["A1 strict_membership_only"]
+    if cause and "sell blocked" in cause:
+        if severity in {"high", "critical"}:
+            return ["A2 actual_hold_cap=12", "A3 actual_hold_cap=14"]
+        return ["A2 actual_hold_cap=12"]
+    return []
+
+
+def _build_execution_anomaly_summary(frame: pd.DataFrame) -> ExecutionAnomalySummary:
+    bundle_frame = _bundle_frame(frame)
+    if bundle_frame.empty:
+        return ExecutionAnomalySummary()
+    actual_column, target_column = _execution_drift_columns(bundle_frame)
+    drift_ratio = None
+    if actual_column and target_column:
+        actual = _numeric_series(bundle_frame, actual_column)
+        target = _numeric_series(bundle_frame, target_column)
+        if not actual.empty and not target.empty:
+            drift_ratio = float((actual.reset_index(drop=True) > target.reset_index(drop=True)).mean())
+    return ExecutionAnomalySummary(
+        dominant_cause=_dominant_execution_cause(bundle_frame),
+        severity=_execution_severity_from_frame(bundle_frame),
+        affected_period_ratio=drift_ratio,
+        avg_actual_hold_count=_mean_or_none(bundle_frame, actual_column or ""),
+        max_actual_hold_count=_max_or_none(bundle_frame, actual_column or ""),
+        avg_locked_residual_count=_mean_or_none(bundle_frame, "locked_residual_count"),
+        recommended_experiments=_recommended_experiment_codes(bundle_frame),
+        summary_label=(
+            f"{_dominant_execution_cause(bundle_frame) or 'unknown'} / "
+            f"avg holds {_mean_or_none(bundle_frame, actual_column or ''):.2f}"
+            if _mean_or_none(bundle_frame, actual_column or "") is not None
+            else None
+        ),
+    )
+
+
+def _build_exposure_summary(frame: pd.DataFrame) -> dict[str, Any]:
+    bundle_frame = _bundle_frame(frame)
+    if bundle_frame.empty:
+        return {}
+    return sanitize_for_json(
+        {
+            "top1_sector_weight": _max_or_none(bundle_frame, "top1_sector_weight"),
+            "top3_sector_concentration": _max_or_none(bundle_frame, "top3_sector_concentration"),
+            "finance_weight": _max_or_none(bundle_frame, "finance_weight"),
+            "latest_sector_name": (
+                str(bundle_frame.iloc[-1].get("top1_sector_name"))
+                if not bundle_frame.empty and "top1_sector_name" in bundle_frame.columns
+                else None
+            ),
+        }
+    )
+
+
+def _build_recommendation_actions(
+    *,
+    source_type: str,
+    source_id: str,
+    anomaly_summary: ExecutionAnomalySummary,
+    include_analysis: bool = False,
+) -> list[RecommendationAction]:
+    actions: list[RecommendationAction] = []
+    source_label = source_id
+    if source_type == "recipe" and ":" in source_id:
+        run_id, recipe_name = source_id.split(":", 1)
+        source_label = f"{run_id}/{recipe_name}"
+    elif source_type == "compare":
+        source_label = "Compare Selection"
+    if include_analysis:
+        actions.append(
+            RecommendationAction(
+                label="Run Diagnosis Task",
+                task_kind="run_research_analysis",
+                source_type=source_type,
+                source_id=source_id,
+                prefill_config={
+                    "display_name": f"Diagnose {source_label}",
+                    "description": "Diagnose execution drift and exposure anomalies",
+                    "analysis_template": "anomaly_diagnosis",
+                },
+                reason="先补一份异常诊断，能更快确认需要如何调整 Universe Exit Policy 或持仓上限。",
+            )
+        )
+    return actions
+
+
+def _chart_payload(
+    key: str,
+    title: str,
+    x_values: list[str],
+    series: list[ChartSeriesPayload],
+    *,
+    kind: str = "line",
+    thresholds: list[ChartThresholdPayload] | None = None,
+    annotations: list[ChartAnnotationPayload] | None = None,
+) -> ChartPayload:
+    return ChartPayload(
+        key=key,
+        title=title,
+        kind=kind,
+        x=x_values,
+        series=series,
+        thresholds=thresholds or [],
+        annotations=annotations or [],
+    )
+
+
+def _build_holding_trend_chart(frame: pd.DataFrame, *, key: str, title: str) -> ChartPayload | None:
+    bundle_frame = _bundle_frame(frame)
+    if bundle_frame.empty:
+        return None
+    x_column = "trade_date" if "trade_date" in bundle_frame.columns else ("signal_date" if "signal_date" in bundle_frame.columns else None)
+    actual_column, target_column = _execution_drift_columns(bundle_frame)
+    if x_column is None or actual_column is None or target_column is None:
+        return None
+    x_values = [str(value) for value in bundle_frame[x_column].fillna("").tolist()]
+    return _chart_payload(
+        key,
+        title,
+        x_values,
+        [
+            ChartSeriesPayload(key="target", label="Target Holds", values=[_normalize_value(value) for value in bundle_frame[target_column].tolist()], color="#2563eb"),
+            ChartSeriesPayload(key="actual", label="Actual Holds", values=[_normalize_value(value) for value in bundle_frame[actual_column].tolist()], color="#dc2626"),
+            ChartSeriesPayload(key="locked", label="Locked Residual", values=[_normalize_value(value) for value in bundle_frame.get("locked_residual_count", pd.Series([None] * len(bundle_frame))).tolist()], color="#f59e0b"),
+        ],
+        thresholds=[ChartThresholdPayload(label="TopK", value=10.0, tone="info")] if target_column == "target_hold_count" else [],
+        annotations=_chart_annotations_from_frame(bundle_frame, x_column),
+    )
+
+
+def _chart_annotations_from_frame(frame: pd.DataFrame, x_column: str) -> list[ChartAnnotationPayload]:
+    if frame.empty or x_column not in frame.columns:
+        return []
+    frame = frame.reset_index(drop=True)
+    residual = _numeric_series(frame, "residual_hold_count")
+    if residual.empty:
+        return []
+    annotated: list[ChartAnnotationPayload] = []
+    numeric = (
+        pd.to_numeric(frame["residual_hold_count"], errors="coerce")
+        if "residual_hold_count" in frame.columns
+        else pd.Series(dtype=float)
+    )
+    for idx in numeric[numeric >= 2].nlargest(6).index.tolist():
+        annotated.append(
+            ChartAnnotationPayload(
+                x=str(frame.iloc[idx].get(x_column)),
+                label=f"Residual {int(numeric.iloc[idx])}",
+                tone="warning" if numeric.iloc[idx] < 4 else "danger",
+            )
+        )
+    return annotated
+
+
+def _build_blocked_sell_chart(frame: pd.DataFrame, *, key: str, title: str) -> ChartPayload | None:
+    bundle_frame = _bundle_frame(frame)
+    if bundle_frame.empty:
+        return None
+    x_column = "trade_date" if "trade_date" in bundle_frame.columns else ("signal_date" if "signal_date" in bundle_frame.columns else None)
+    if x_column is None:
+        return None
+    return _chart_payload(
+        key,
+        title,
+        [str(value) for value in bundle_frame[x_column].fillna("").tolist()],
+        [
+            ChartSeriesPayload(key="limit", label="Limit", values=[_normalize_value(value) for value in bundle_frame.get("sell_blocked_by_limit_count", pd.Series([None] * len(bundle_frame))).tolist()], role="bar", stack="blocked", color="#dc2626"),
+            ChartSeriesPayload(key="suspend", label="Suspend", values=[_normalize_value(value) for value in bundle_frame.get("sell_blocked_by_suspend_count", pd.Series([None] * len(bundle_frame))).tolist()], role="bar", stack="blocked", color="#7c3aed"),
+            ChartSeriesPayload(key="volume", label="Volume", values=[_normalize_value(value) for value in bundle_frame.get("sell_blocked_by_volume_count", pd.Series([None] * len(bundle_frame))).tolist()], role="bar", stack="blocked", color="#f59e0b"),
+        ],
+        kind="stacked_bar",
+        annotations=_chart_annotations_from_frame(bundle_frame, x_column),
+    )
+
+
+def _build_realization_bridge_chart(frame: pd.DataFrame, *, key: str, title: str) -> ChartPayload | None:
+    bundle_frame = _bundle_frame(frame)
+    if bundle_frame.empty:
+        return None
+    x_column = "trade_date" if "trade_date" in bundle_frame.columns else ("signal_date" if "signal_date" in bundle_frame.columns else None)
+    if x_column is None:
+        return None
+    series: list[ChartSeriesPayload] = []
+    for series_key, label, color in (
+        ("topk_mean_return_4w", "TopK Mean Return 4W", "#2563eb"),
+        ("realized_portfolio_return", "Realized Portfolio Return", "#059669"),
+        ("execution_cost_drag", "Execution Cost Drag", "#dc2626"),
+    ):
+        if series_key in bundle_frame.columns:
+            series.append(
+                ChartSeriesPayload(
+                    key=series_key,
+                    label=label,
+                    values=[_normalize_value(value) for value in bundle_frame[series_key].tolist()],
+                    color=color,
+                )
+            )
+    if not series:
+        return None
+    return _chart_payload(key, title, [str(value) for value in bundle_frame[x_column].fillna("").tolist()], series, annotations=_chart_annotations_from_frame(bundle_frame, x_column))
+
+
+def _build_exposure_chart(frame: pd.DataFrame, *, key: str, title: str) -> ChartPayload | None:
+    bundle_frame = _bundle_frame(frame)
+    if bundle_frame.empty:
+        return None
+    x_column = "trade_date" if "trade_date" in bundle_frame.columns else ("signal_date" if "signal_date" in bundle_frame.columns else None)
+    if x_column is None:
+        return None
+    series: list[ChartSeriesPayload] = []
+    for series_key, label, color in (
+        ("top1_sector_weight", "Top1 Sector Weight", "#2563eb"),
+        ("top3_sector_concentration", "Top3 Sector Concentration", "#ea580c"),
+        ("finance_weight", "Finance Weight", "#059669"),
+    ):
+        if series_key in bundle_frame.columns:
+            role = "area" if series_key == "top1_sector_weight" else "line"
+            series.append(
+                ChartSeriesPayload(
+                    key=series_key,
+                    label=label,
+                    values=[_normalize_value(value) for value in bundle_frame[series_key].tolist()],
+                    role=role,
+                    color=color,
+                )
+            )
+    if not series:
+        return None
+    return _chart_payload(key, title, [str(value) for value in bundle_frame[x_column].fillna("").tolist()], series, kind="area", annotations=_chart_annotations_from_frame(bundle_frame, x_column))
+
+
+def _top_anomaly_periods(frame: pd.DataFrame, limit: int = 10) -> list[dict[str, Any]]:
+    bundle_frame = _bundle_frame(frame)
+    if bundle_frame.empty:
+        return []
+    actual_column, target_column = _execution_drift_columns(bundle_frame)
+    x_column = "trade_date" if "trade_date" in bundle_frame.columns else ("signal_date" if "signal_date" in bundle_frame.columns else None)
+    if actual_column is None or target_column is None or x_column is None:
+        return []
+    scored = bundle_frame.copy()
+    scored["_drift_score"] = pd.to_numeric(scored[actual_column], errors="coerce").fillna(0) - pd.to_numeric(scored[target_column], errors="coerce").fillna(0)
+    scored["_blocked_score"] = (
+        pd.to_numeric(scored["sell_blocked_total_count"], errors="coerce").fillna(0)
+        if "sell_blocked_total_count" in scored.columns
+        else 0
+    )
+    scored["_rank"] = scored["_drift_score"] * 10 + scored["_blocked_score"]
+    scored = scored.sort_values(["_rank", "_drift_score"], ascending=False).head(limit)
+    result: list[dict[str, Any]] = []
+    for row in scored.to_dict(orient="records"):
+        result.append(
+            sanitize_for_json(
+                {
+                    "trade_date": row.get(x_column),
+                    "actual_hold_count": row.get(actual_column),
+                    "target_hold_count": row.get(target_column),
+                    "locked_residual_count": row.get("locked_residual_count"),
+                    "sell_blocked_total_count": row.get("sell_blocked_total_count"),
+                    "dominant_cause": _dominant_execution_cause(pd.DataFrame([row])),
+                }
+            )
+        )
+    return result
+
+
+def _group_artifact_name(ref: ArtifactRef) -> str:
+    name = ref.name
+    if name.startswith("analysis/") or "/analysis/" in name:
+        return "Research"
+    if any(token in name for token in ("signal_realization", "holding_count_drift", "sector_exposure", "rebalance_audit", "regime_gate", "execution_diff", "portfolio_diagnostics", "signal_diagnostics")):
+        return "Diagnostics"
+    if any(token in name for token in ("native_report", "summary", "benchmark", "heatmap", "performance_metrics")):
+        return "Backtest"
+    return "Exports"
+
+
 def _load_recipe_summary_inputs(recipe_dir: Path) -> dict[str, Any]:
     return {
         "manifest": _safe_read_json(recipe_dir / "native_workflow_manifest.json", {}),
@@ -862,6 +1288,8 @@ def _load_recipe_summary_inputs(recipe_dir: Path) -> dict[str, Any]:
         "walk_forward_native_report": _safe_read_csv(recipe_dir / "walk_forward_native_report.csv"),
         "rolling_performance_metrics": _safe_read_csv(recipe_dir / "rolling_performance_metrics.csv"),
         "walk_forward_performance_metrics": _safe_read_csv(recipe_dir / "walk_forward_performance_metrics.csv"),
+        "holding_count_drift": _safe_read_csv(recipe_dir / "holding_count_drift.csv"),
+        "sector_exposure_history": _safe_read_csv(recipe_dir / "sector_exposure_history.csv"),
     }
 
 
@@ -922,10 +1350,12 @@ def _build_run_index_payload(run_dir: Path, *, existing_payload: dict[str, Any] 
 
     baseline_row = overview_lookup.get(baseline_recipe or "", {})
     baseline_exec = _safe_read_csv(run_dir / (baseline_recipe or "") / "execution_diff_summary.csv") if baseline_recipe else pd.DataFrame()
+    baseline_holding_drift = _safe_read_csv(run_dir / (baseline_recipe or "") / "holding_count_drift.csv") if baseline_recipe else pd.DataFrame()
     has_execution_gap_issue = False
     if not baseline_exec.empty and "native_minus_validation_return" in baseline_exec.columns:
         deltas = pd.to_numeric(baseline_exec["native_minus_validation_return"], errors="coerce").dropna()
         has_execution_gap_issue = bool(not deltas.empty and deltas.abs().max() >= 0.05)
+    anomaly_summary = _build_execution_anomaly_summary(baseline_holding_drift)
 
     quick_summary = RunQuickSummary(
         run_id=run_id,
@@ -954,10 +1384,15 @@ def _build_run_index_payload(run_dir: Path, *, existing_payload: dict[str, Any] 
         },
         has_execution_gap_issue=has_execution_gap_issue,
         has_missing_artifacts=artifact_status != "ready",
-        research_status=run_research_summary.verdict,
+        research_status=_normalize_research_verdict(run_research_summary.verdict),
         incumbent_recipe=run_research_summary.promoted_recipe or run_research_summary.incumbent_recipe or baseline_recipe,
         current_problem=run_research_summary.current_problem,
         recommended_action=run_research_summary.recommended_action,
+        dominant_execution_cause=anomaly_summary.dominant_cause,
+        portfolio_definition_status="healthy" if anomaly_summary.severity in {None, "low"} else ("warning" if anomaly_summary.severity == "medium" else "danger"),
+        avg_actual_hold_count=_normalize_value(baseline_row.get("avg_actual_hold_count")),
+        max_actual_hold_count=_normalize_value(baseline_row.get("max_actual_hold_count")),
+        top1_sector_weight=_normalize_value(baseline_row.get("top1_sector_weight")),
         updated_at=_path_updated_at(run_dir),
     )
     return {
@@ -996,7 +1431,7 @@ def _load_run_index_payload(run_dir: Path) -> dict[str, Any]:
 
 
 def _run_list_item_from_index_payload(payload: dict[str, Any]) -> RunListItem:
-    quick_summary = RunQuickSummary(**payload.get("quick_summary", {}))
+    quick_summary = RunQuickSummary(**_normalize_run_quick_summary_payload(payload.get("quick_summary", {})))
     return RunListItem(
         run_id=str(payload.get("run_id") or quick_summary.run_id),
         updated_at=payload.get("updated_at") or quick_summary.updated_at,
@@ -1434,6 +1869,52 @@ def _build_recipe_summary(
     )
 
 
+def _build_run_level_charts(recipe_frames: dict[str, Any]) -> dict[str, ChartPayload]:
+    charts: dict[str, ChartPayload] = {}
+    for bundle in ("walk_forward", "rolling"):
+        holding = _build_holding_trend_chart(filter_table_by_bundle(recipe_frames.get("holding_count_drift", pd.DataFrame()), bundle), key=f"{bundle}_holding_trend", title=f"{bundle} Actual vs Target Holds")
+        blocked = _build_blocked_sell_chart(filter_table_by_bundle(recipe_frames.get("holding_count_drift", pd.DataFrame()), bundle), key=f"{bundle}_blocked_sell", title=f"{bundle} Blocked Sell Breakdown")
+        bridge = _build_realization_bridge_chart(filter_table_by_bundle(recipe_frames.get("signal_realization_bridge", pd.DataFrame()), bundle), key=f"{bundle}_realization_bridge", title=f"{bundle} Signal Realization Bridge")
+        exposure = _build_exposure_chart(filter_table_by_bundle(recipe_frames.get("sector_exposure_history", pd.DataFrame()), bundle), key=f"{bundle}_exposure", title=f"{bundle} Sector Exposure")
+        for chart in (holding, blocked, bridge, exposure):
+            if chart is not None:
+                charts[chart.key] = chart
+    return charts
+
+
+def _build_recipe_chart_payloads(recipe_frames: dict[str, Any]) -> dict[str, ChartPayload]:
+    return _build_run_level_charts(recipe_frames)
+
+
+def _build_compare_winner_summary(
+    items: list[CompareItemResult],
+    execution_rows: list[dict[str, Any]],
+    analysis_summary: ResearchSummary,
+) -> CompareWinnerSummary:
+    if not items:
+        return CompareWinnerSummary()
+    ranked = sorted(
+        items,
+        key=lambda item: (
+            float(item.metrics.get("annualized_return") or item.metrics.get("net_total_return") or -999),
+            float(item.metrics.get("sharpe_ratio") or -999),
+        ),
+        reverse=True,
+    )
+    winner = ranked[0]
+    rejection_reasons: list[str] = []
+    for row in execution_rows:
+        drift = _first_present_numeric(row, ("native_minus_validation_return",))
+        if drift is not None and abs(drift) >= 0.05:
+            rejection_reasons.append(f"{row.get('item')} 执行偏差仍偏大")
+    return CompareWinnerSummary(
+        recommended_winner=winner.label,
+        recommended_next_experiment=(analysis_summary.recommended_next_actions[0] if analysis_summary.recommended_next_actions else None),
+        rejection_reasons=rejection_reasons,
+        summary_label=f"winner: {winner.label}",
+    )
+
+
 def _collect_run_context(run_id: str) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     run_dir = NATIVE_WORKFLOW_ROOT / run_id
     if not run_dir.exists():
@@ -1461,10 +1942,18 @@ def get_overview(limit: int = 8) -> OverviewResponse:
 
 def get_run_detail(run_id: str) -> RunDetail:
     run_dir, summary_payload, index_payload = _collect_run_context(run_id)
-    quick_summary = RunQuickSummary(**index_payload.get("quick_summary", {}))
+    quick_summary = RunQuickSummary(**_normalize_run_quick_summary_payload(index_payload.get("quick_summary", {})))
     recipe_summaries = _recipe_summaries_from_index_payload(index_payload)
     baseline_recipe = quick_summary.baseline_recipe or _select_baseline_recipe(quick_summary.recipe_names)
-    baseline_frames = _load_recipe_frames(run_dir, baseline_recipe, RUN_DETAIL_NODE_TABLES) if baseline_recipe else {}
+    baseline_frames = (
+        _load_recipe_frames(
+            run_dir,
+            baseline_recipe,
+            RUN_DETAIL_NODE_TABLES.union({"rebalance_audit"}),
+        )
+        if baseline_recipe
+        else {}
+    )
     recipe_configs = _resolve_recipe_registry(summary_payload)
     panel_path = _resolve_artifact_path(summary_payload.get("config", {}).get("panel_path"))
     panel_summary = _panel_summary_for_path(panel_path)
@@ -1477,6 +1966,10 @@ def get_run_detail(run_id: str) -> RunDetail:
     research_summary = _read_research_summary(run_dir)
     if not research_summary.headline:
         research_summary = _fallback_run_research_summary(index_payload)
+    anomaly_summary = _build_execution_anomaly_summary(baseline_frames.get("holding_count_drift", pd.DataFrame()))
+    experiment_scorecard = sanitize_for_json(_safe_read_json(_scorecard_path(run_dir), {}))
+    if anomaly_periods := _top_anomaly_periods(baseline_frames.get("holding_count_drift", pd.DataFrame())):
+        experiment_scorecard = {**experiment_scorecard, "anomaly_periods": anomaly_periods}
     return RunDetail(
         run_id=run_id,
         output_dir=str(run_dir),
@@ -1488,7 +1981,16 @@ def get_run_detail(run_id: str) -> RunDetail:
         nodes=nodes,
         recipes=recipe_summaries,
         analysis_reports=_scan_analysis_reports(run_dir),
-        artifact_inventory=[],
+        artifact_inventory=_run_inventory(run_dir, quick_summary.recipe_names),
+        experiment_scorecard=experiment_scorecard,
+        execution_anomaly_summary=anomaly_summary,
+        recommendation_actions=_build_recommendation_actions(
+            source_type="run",
+            source_id=run_id,
+            anomaly_summary=anomaly_summary,
+            include_analysis=True,
+        ),
+        run_level_charts=_build_run_level_charts(baseline_frames),
     )
 
 
@@ -1504,7 +2006,7 @@ def get_run_artifact_inventory(run_id: str) -> ArtifactInventoryResponse:
     if not run_dir.exists():
         raise FileNotFoundError(f"Unknown run: {run_id}")
     index_payload = _load_run_index_payload(run_dir)
-    quick_summary = RunQuickSummary(**index_payload.get("quick_summary", {}))
+    quick_summary = RunQuickSummary(**_normalize_run_quick_summary_payload(index_payload.get("quick_summary", {})))
     inventory = _run_inventory(run_dir, quick_summary.recipe_names)
     file_tree = sorted(
         [
@@ -1519,7 +2021,7 @@ def get_run_artifact_inventory(run_id: str) -> ArtifactInventoryResponse:
 
 def get_recipe_detail(run_id: str, recipe_name: str) -> RecipeDetail:
     run_dir, summary_payload, index_payload = _collect_run_context(run_id)
-    quick_summary = RunQuickSummary(**index_payload.get("quick_summary", {}))
+    quick_summary = RunQuickSummary(**_normalize_run_quick_summary_payload(index_payload.get("quick_summary", {})))
     if recipe_name not in quick_summary.recipe_names:
         raise FileNotFoundError(f"Unknown recipe '{recipe_name}' for run '{run_id}'")
     recipe_config = _get_recipe_config(summary_payload, recipe_name)
@@ -1531,6 +2033,7 @@ def get_recipe_detail(run_id: str, recipe_name: str) -> RecipeDetail:
         recipe_name,
         RUN_DETAIL_NODE_TABLES.union(RECIPE_DETAIL_INITIAL_TABLES).union(
             {
+                "rebalance_audit",
                 "rolling_native_report",
                 "walk_forward_native_report",
                 "rolling_performance_metrics",
@@ -1551,6 +2054,7 @@ def get_recipe_detail(run_id: str, recipe_name: str) -> RecipeDetail:
     research_summary = _read_research_summary(recipe_dir)
     if not research_summary.headline:
         research_summary = _fallback_recipe_research_summary(recipe_name, overview)
+    anomaly_summary = _build_execution_anomaly_summary(recipe_frames.get("holding_count_drift", pd.DataFrame()))
     return RecipeDetail(
         run_id=run_id,
         recipe_name=recipe_name,
@@ -1562,6 +2066,15 @@ def get_recipe_detail(run_id: str, recipe_name: str) -> RecipeDetail:
         tables=tables,
         analysis_reports=_scan_analysis_reports(recipe_dir),
         artifact_inventory=_recipe_inventory(recipe_dir, prefix=recipe_name),
+        portfolio_realization_summary=anomaly_summary,
+        exposure_summary=_build_exposure_summary(recipe_frames.get("sector_exposure_history", pd.DataFrame())),
+        recommendation_actions=_build_recommendation_actions(
+            source_type="recipe",
+            source_id=f"{run_id}:{recipe_name}",
+            anomaly_summary=anomaly_summary,
+            include_analysis=True,
+        ),
+        chart_payloads=_build_recipe_chart_payloads(recipe_frames),
     )
 
 
@@ -1570,7 +2083,7 @@ def get_recipe_tables(run_id: str, recipe_name: str, table_names: Iterable[str])
     if not run_dir.exists():
         raise FileNotFoundError(f"Unknown run: {run_id}")
     index_payload = _load_run_index_payload(run_dir)
-    quick_summary = RunQuickSummary(**index_payload.get("quick_summary", {}))
+    quick_summary = RunQuickSummary(**_normalize_run_quick_summary_payload(index_payload.get("quick_summary", {})))
     if recipe_name not in quick_summary.recipe_names:
         raise FileNotFoundError(f"Unknown recipe '{recipe_name}' for run '{run_id}'")
     selected_names = [name for name in dict.fromkeys(table_names) if name in RECIPE_TABLE_FILES]
@@ -1620,6 +2133,10 @@ def compare_recipe_items(items: list[CompareItemRef]) -> CompareResponse:
     holding_count_drift: dict[str, DataTablePayload] = {}
     net_value_curves: list[CompareTimeseriesSeries] = []
     benchmark_candidates: list[list[CompareTimeseriesPoint]] = []
+    holding_chart_rows: list[dict[str, Any]] = []
+    exposure_chart_rows: list[dict[str, Any]] = []
+    realization_chart_rows: list[dict[str, Any]] = []
+    anomaly_summaries: dict[str, ExecutionAnomalySummary] = {}
 
     run_contexts: dict[str, tuple[Path, dict[str, Any], dict[str, Any]]] = {}
     recipe_frame_cache: dict[tuple[str, str], dict[str, Any]] = {}
@@ -1629,7 +2146,7 @@ def compare_recipe_items(items: list[CompareItemRef]) -> CompareResponse:
         if item.run_id not in run_contexts:
             run_contexts[item.run_id] = _collect_run_context(item.run_id)
         run_dir, summary_payload, index_payload = run_contexts[item.run_id]
-        quick_summary = RunQuickSummary(**index_payload.get("quick_summary", {}))
+        quick_summary = RunQuickSummary(**_normalize_run_quick_summary_payload(index_payload.get("quick_summary", {})))
         if item.recipe_name not in quick_summary.recipe_names:
             raise FileNotFoundError(f"Unknown recipe '{item.recipe_name}' for run '{item.run_id}'")
         cache_key = (item.run_id, item.recipe_name)
@@ -1711,6 +2228,32 @@ def compare_recipe_items(items: list[CompareItemRef]) -> CompareResponse:
         signal_realization[label] = _frame_to_payload(signal_realization_frame)
         sector_exposure[label] = _frame_to_payload(sector_exposure_frame)
         holding_count_drift[label] = _frame_to_payload(holding_drift_frame)
+        anomaly_summaries[label] = _build_execution_anomaly_summary(holding_drift_frame)
+        holding_chart_rows.append(
+            {
+                "item": label,
+                "target_hold_count": 10,
+                "avg_actual_hold_count": anomaly_summaries[label].avg_actual_hold_count,
+                "max_actual_hold_count": anomaly_summaries[label].max_actual_hold_count,
+                "avg_locked_residual_count": anomaly_summaries[label].avg_locked_residual_count,
+                "avg_excess_holds": max(float(anomaly_summaries[label].avg_actual_hold_count or 0.0) - 10.0, 0.0),
+                "max_excess_holds": max(float(anomaly_summaries[label].max_actual_hold_count or 0.0) - 10.0, 0.0),
+            }
+        )
+        exposure_chart_rows.append(
+            {
+                "item": label,
+                **_build_exposure_summary(sector_exposure_frame),
+            }
+        )
+        realization_chart_rows.append(
+            {
+                "item": label,
+                "mean_topk_mean_return_4w": _mean_or_none(signal_realization_frame, "topk_mean_return_4w"),
+                "mean_realized_portfolio_return": _mean_or_none(signal_realization_frame, "realized_portfolio_return"),
+                "mean_execution_cost_drag": _mean_or_none(signal_realization_frame, "execution_cost_drag"),
+            }
+        )
 
     if benchmark_candidates and len(benchmark_candidates) == len(items):
         first_signature = _compare_curve_signature(benchmark_candidates[0])
@@ -1724,6 +2267,54 @@ def compare_recipe_items(items: list[CompareItemRef]) -> CompareResponse:
                 )
             )
 
+    analysis_summary = _build_compare_analysis_summary(compare_items, execution_rows)
+    winner_summary = _build_compare_winner_summary(compare_items, execution_rows, analysis_summary)
+    dominant_winner = next((item for item in compare_items if item.label == winner_summary.recommended_winner), compare_items[0] if compare_items else None)
+    comparison_actions = (
+        _build_recommendation_actions(
+            source_type="compare",
+            source_id=json.dumps([item.model_dump(mode="json") for item in items], ensure_ascii=False),
+            anomaly_summary=anomaly_summaries.get(dominant_winner.label, ExecutionAnomalySummary()) if dominant_winner else ExecutionAnomalySummary(),
+            include_analysis=True,
+        )
+        if dominant_winner
+        else []
+    )
+    chart_payloads: dict[str, ChartPayload] = {}
+    if holding_chart_rows:
+        chart_payloads["holding_summary"] = _chart_payload(
+            "holding_summary",
+            "Holding Drift Above TopK",
+            [str(row["item"]) for row in holding_chart_rows],
+            [
+                ChartSeriesPayload(key="avg_excess_holds", label="Avg Excess Holds", values=[_normalize_value(row.get("avg_excess_holds")) for row in holding_chart_rows], role="bar", color="#dc2626"),
+                ChartSeriesPayload(key="max_excess_holds", label="Max Excess Holds", values=[_normalize_value(row.get("max_excess_holds")) for row in holding_chart_rows], role="bar", color="#7c3aed"),
+                ChartSeriesPayload(key="avg_locked_residual_count", label="Avg Locked Residual", values=[_normalize_value(row.get("avg_locked_residual_count")) for row in holding_chart_rows], role="bar", color="#f59e0b"),
+            ],
+            thresholds=[ChartThresholdPayload(label="TopK drift target", value=0.0, tone="info")],
+        )
+    if exposure_chart_rows:
+        chart_payloads["exposure_summary"] = _chart_payload(
+            "exposure_summary",
+            "Sector Concentration Risk",
+            [str(row["item"]) for row in exposure_chart_rows],
+            [
+                ChartSeriesPayload(key="top1_sector_weight", label="Top1 Sector Weight", values=[_normalize_value(row.get("top1_sector_weight")) for row in exposure_chart_rows], role="bar", color="#2563eb"),
+                ChartSeriesPayload(key="top3_sector_concentration", label="Top3 Sector Concentration", values=[_normalize_value(row.get("top3_sector_concentration")) for row in exposure_chart_rows], role="bar", color="#ea580c"),
+            ],
+        )
+    if realization_chart_rows:
+        chart_payloads["realization_summary"] = _chart_payload(
+            "realization_summary",
+            "Signal Realization Gap",
+            [str(row["item"]) for row in realization_chart_rows],
+            [
+                ChartSeriesPayload(key="mean_topk_mean_return_4w", label="Paper TopK Return", values=[_normalize_value(row.get("mean_topk_mean_return_4w")) for row in realization_chart_rows], role="bar", color="#2563eb"),
+                ChartSeriesPayload(key="mean_realized_portfolio_return", label="Realized Return", values=[_normalize_value(row.get("mean_realized_portfolio_return")) for row in realization_chart_rows], role="bar", color="#059669"),
+                ChartSeriesPayload(key="mean_execution_cost_drag", label="Execution Drag", values=[_normalize_value(row.get("mean_execution_cost_drag")) for row in realization_chart_rows], role="bar", color="#dc2626"),
+            ],
+        )
+
     return CompareResponse(
         items=compare_items,
         summary_metrics=_frame_to_payload(pd.DataFrame(metric_rows)),
@@ -1735,7 +2326,10 @@ def compare_recipe_items(items: list[CompareItemRef]) -> CompareResponse:
         signal_realization=signal_realization,
         sector_exposure=sector_exposure,
         holding_count_drift=holding_count_drift,
-        analysis_summary=_build_compare_analysis_summary(compare_items, execution_rows),
+        analysis_summary=analysis_summary,
+        winner_summary=winner_summary,
+        comparison_recommendation_actions=comparison_actions,
+        chart_payloads=chart_payloads,
     )
 
 

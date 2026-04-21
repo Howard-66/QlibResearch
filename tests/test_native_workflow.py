@@ -234,7 +234,6 @@ def test_build_holding_count_drift_keeps_portfolio_columns():
         "target_hold_count",
         "actual_hold_count",
         "residual_hold_count",
-        "blocked_sell_count",
         "topk_overlap_prev",
     ]
     assert result.iloc[0]["actual_hold_count"] == 12

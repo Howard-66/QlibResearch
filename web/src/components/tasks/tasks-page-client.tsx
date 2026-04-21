@@ -69,6 +69,7 @@ type WorkflowTaskFormState = {
   description: string;
   requested_by: string;
   recipe_names: string;
+  customize_baseline_recipe: boolean;
   panel_path: string;
   execution_panel_path: string;
   execution_panel_dir: string;
@@ -139,6 +140,8 @@ const WORKFLOW_PANELS_ROOT_DIR = "artifacts/panels";
 const WORKFLOW_DEFAULT_PANEL_PATH = "artifacts/panels/csi300_weekly.parquet";
 const WORKFLOW_RECIPE_OPTIONS = ["baseline", "mae_4w", "binary_4w", "rank_blended", "huber_8w"] as const;
 const BUILTIN_BENCHMARK_MODE_OPTIONS = ["auto", "flat_zero"] as const;
+const DEFAULT_BASELINE_SIGNAL_OBJECTIVE = "huber_regression";
+const DEFAULT_BASELINE_LABEL_RECIPE = "blended_excess_4w_8w";
 const SIGNAL_OBJECTIVE_OPTIONS = ["huber_regression", "mae_regression", "binary_top_quintile", "grouped_rank"] as const;
 const LABEL_RECIPE_OPTIONS = ["blended_excess_4w_8w", "excess_4w", "excess_8w"] as const;
 const RUN_EXPORT_OPTIONS = ["always", "auto_if_missing", "never"] as const;
@@ -171,6 +174,7 @@ export function TasksPageClient() {
   const [editorOpen, setEditorOpen] = React.useState(false);
   const [editorTaskKind, setEditorTaskKind] = React.useState<EditorTaskKind>("export_panel");
   const [editorSourceRef, setEditorSourceRef] = React.useState<TaskSourceRef>(MANUAL_SOURCE);
+  const [editorRecommendationReason, setEditorRecommendationReason] = React.useState<string>("");
   const [exportForm, setExportForm] = React.useState<ExportTaskFormState>(defaultExportTaskForm());
   const [workflowForm, setWorkflowForm] = React.useState<WorkflowTaskFormState>(defaultWorkflowTaskForm());
   const [analysisForm, setAnalysisForm] = React.useState<ResearchAnalysisTaskFormState>(defaultResearchAnalysisTaskForm());
@@ -213,7 +217,10 @@ export function TasksPageClient() {
   const presetTaskKind = normalizeTaskKind(searchParams.get("create"));
   const presetSourceType = searchParams.get("sourceType");
   const presetSourceId = searchParams.get("sourceId");
+  const prefillConfig = parsePrefillConfig(searchParams.get("prefillConfig"));
+  const prefillReason = searchParams.get("reason") ?? "";
   const presetKey = presetTaskKind ? `${presetTaskKind}:${presetSourceType ?? "manual"}:${presetSourceId ?? "manual"}` : null;
+  const hasPresetEndpoint = supportsPresetSource(presetTaskKind, presetSourceType, presetSourceId);
 
   const presetQuery = useQuery<TaskPresetResponse>({
     queryKey: ["task-preset", presetTaskKind, presetSourceType, presetSourceId],
@@ -233,24 +240,51 @@ export function TasksPageClient() {
       }
       throw new Error("Unsupported preset source");
     },
-    enabled: Boolean(presetTaskKind && presetSourceType && presetSourceId),
+    enabled: hasPresetEndpoint,
   });
 
-  function openManualEditor(taskKind: EditorTaskKind) {
+  const openManualEditor = React.useCallback((taskKind: EditorTaskKind) => {
     setEditorTaskKind(taskKind);
     setEditorSourceRef(MANUAL_SOURCE);
+    setEditorRecommendationReason(prefillReason);
     setExportForm(defaultExportTaskForm());
     setWorkflowForm(defaultWorkflowTaskForm());
     setAnalysisForm(defaultResearchAnalysisTaskForm());
     setEditorOpen(true);
-  }
+  }, [prefillReason]);
+
+  const handleEditorOpenChange = React.useCallback(
+    (nextOpen: boolean) => {
+      setEditorOpen(nextOpen);
+      if (nextOpen) {
+        return;
+      }
+      if (presetKey) {
+        appliedPresetKeyRef.current = presetKey;
+      }
+      if (searchParams.toString()) {
+        router.replace(pathname, { scroll: false });
+      }
+    },
+    [pathname, presetKey, router, searchParams],
+  );
 
   React.useEffect(() => {
     if (!presetTaskKind || !presetKey || appliedPresetKeyRef.current === presetKey) {
       return;
     }
-    if (!presetSourceType || !presetSourceId) {
+    if (!presetSourceType || !presetSourceId || !hasPresetEndpoint) {
       openManualEditor(presetTaskKind);
+      setEditorSourceRef({
+        kind: normalizeSourceKind(presetSourceType),
+        source_id: presetSourceId ?? "manual",
+        label: presetSourceId ?? "Manual Task",
+      });
+      applyPrefillToEditor(prefillConfig, presetTaskKind, {
+        setExportForm,
+        setWorkflowForm,
+        setAnalysisForm,
+      });
       appliedPresetKeyRef.current = presetKey;
       router.replace(pathname, { scroll: false });
       return;
@@ -263,13 +297,14 @@ export function TasksPageClient() {
       setEditorOpen,
       setEditorTaskKind,
       setEditorSourceRef,
+      setEditorRecommendationReason,
       setExportForm,
       setWorkflowForm,
       setAnalysisForm,
-    });
+    }, prefillConfig, prefillReason);
     appliedPresetKeyRef.current = presetKey;
     router.replace(pathname, { scroll: false });
-  }, [pathname, presetKey, presetQuery.data, presetSourceId, presetSourceType, presetTaskKind, router]);
+  }, [hasPresetEndpoint, openManualEditor, pathname, presetKey, presetQuery.data, presetSourceId, presetSourceType, presetTaskKind, prefillConfig, prefillReason, router]);
 
   const invalidateTaskQueries = React.useCallback(
     async (taskId?: string) => {
@@ -521,7 +556,7 @@ export function TasksPageClient() {
         />
       </div>
 
-      <Dialog open={editorOpen} onOpenChange={setEditorOpen}>
+      <Dialog open={editorOpen} onOpenChange={handleEditorOpenChange}>
         <DialogContent className="overflow-y-auto">
           <div className="space-y-6">
             <DialogHeader className="space-y-3">
@@ -534,6 +569,11 @@ export function TasksPageClient() {
               <DialogDescription>
                 手动创建任务时可以切换类型；从 run 或 panel 入口带过来的预填任务会锁定到对应类型。
               </DialogDescription>
+              {editorRecommendationReason ? (
+                <div className="rounded-lg border border-border/60 bg-surface-2/50 px-3 py-2 text-sm text-muted-foreground">
+                  推荐原因：{editorRecommendationReason}
+                </div>
+              ) : null}
             </DialogHeader>
 
             {editorSourceRef.kind === "manual" ? (
@@ -870,11 +910,15 @@ function WorkflowTaskEditor({
     () => new Map(panels.map((panel) => [workflowPanelFilename(panel.path), panel])),
     [panels],
   );
+  const panelsByPath = React.useMemo(
+    () => new Map(panels.map((panel) => [panel.path, panel])),
+    [panels],
+  );
   const recipeOptions = React.useMemo(() => buildWorkflowRecipeOptions(form.recipe_names), [form.recipe_names]);
   const selectedRecipeNames = React.useMemo(() => parseListInput(form.recipe_names), [form.recipe_names]);
+  const hasBaselineRecipe = selectedRecipeNames.includes("baseline");
   const benchmarkModeSelectValue = getBenchmarkModeSelectValue(form.benchmark_mode);
   const allowCustomPanelPath = allowsWorkflowMissingPanelPath(form.run_export);
-  const panelFilenameValue = workflowPanelFilename(form.panel_path);
   const describe = describeWorkflowConfigKey;
 
   const updateDisplayName = (displayName: string) => {
@@ -882,8 +926,9 @@ function WorkflowTaskEditor({
   };
 
   const updatePanelFile = (panelFile: string) => {
-    const normalizedPanelPath = workflowPanelPathFromFilename(panelFile);
-    onChange((current) => syncWorkflowPanelSelection(current, normalizedPanelPath, panelsByFilename.get(workflowPanelFilename(normalizedPanelPath))));
+    const normalizedPanelPath = normalizeWorkflowPanelPathInput(panelFile);
+    const panel = panelsByPath.get(normalizedPanelPath) ?? panelsByFilename.get(workflowPanelFilename(normalizedPanelPath));
+    onChange((current) => syncWorkflowPanelSelection(current, normalizedPanelPath, panel));
   };
 
   const updateUniverseProfile = (universeProfile: string) => {
@@ -937,35 +982,35 @@ function WorkflowTaskEditor({
           hint="Execution Panel Dir 与 Output Dir 保持一致，路径自动生成。"
         />
         <div className="grid gap-4 md:grid-cols-2">
-          <FormField label="Panel File" description={`${describe("panel_path")} 固定存放在 ${WORKFLOW_PANELS_ROOT_DIR} 下，只需选择或填写文件名。`}>
+          <FormField label="Panel File" description={`${describe("panel_path")} 选择已有 panel 时会保留完整路径；也可以只填写文件名并自动放到 ${WORKFLOW_PANELS_ROOT_DIR} 下。`}>
             <div className="space-y-2">
               {allowCustomPanelPath ? (
                 <>
                   <Input
                     list={panelFileOptionsId}
-                    value={panelFilenameValue}
+                    value={form.panel_path}
                     onChange={(event) => updatePanelFile(event.target.value)}
-                    placeholder="csi500_weekly_20260410.parquet"
+                    placeholder={`${WORKFLOW_PANELS_ROOT_DIR}/csi500_weekly_20260410.parquet`}
                   />
                   <datalist id={panelFileOptionsId}>
                     {panelFileOptions.map((panel) => (
-                      <option key={panel.filename} value={panel.filename}>
+                      <option key={panel.path} value={panel.path}>
                         {panel.label}
                       </option>
                     ))}
                   </datalist>
                   <div className="text-xs text-muted-foreground">
-                    当前 `Run Export` 允许先导出再执行，所以这里可以填写尚不存在的 panel 文件名；实际路径会自动固定到 <code>{WORKFLOW_PANELS_ROOT_DIR}</code> 下。
+                    当前 `Run Export` 允许先导出再执行；如果只填文件名，实际路径会自动固定到 <code>{WORKFLOW_PANELS_ROOT_DIR}</code> 下。
                   </div>
                 </>
               ) : (
                 <select
                   className="flex h-10 w-full rounded-lg border border-input/85 bg-surface-1/80 px-3 py-2 text-sm"
-                  value={panelFilenameValue}
+                  value={form.panel_path}
                   onChange={(event) => updatePanelFile(event.target.value)}
                 >
                   {panelFileOptions.map((panel) => (
-                    <option key={panel.filename} value={panel.filename}>
+                    <option key={panel.path} value={panel.path}>
                       {panel.label}
                     </option>
                   ))}
@@ -1001,6 +1046,33 @@ function WorkflowTaskEditor({
               </div>
             </FormField>
           </div>
+          {hasBaselineRecipe ? (
+            <div className="md:col-span-2">
+              <BooleanSwitchField
+                label="Customize Baseline Recipe"
+                value={form.customize_baseline_recipe}
+                onChange={(value) => onChange((current) => ({ ...current, customize_baseline_recipe: value }))}
+              />
+            </div>
+          ) : null}
+          {hasBaselineRecipe && form.customize_baseline_recipe ? (
+            <>
+              <FormSelect
+                label="Baseline Signal Objective"
+                value={form.signal_objective}
+                description={describe("signal_objective")}
+                options={SIGNAL_OBJECTIVE_OPTIONS}
+                onChange={(value) => onChange((current) => ({ ...current, signal_objective: value }))}
+              />
+              <FormSelect
+                label="Baseline Label Recipe"
+                value={form.label_recipe}
+                description={describe("label_recipe")}
+                options={LABEL_RECIPE_OPTIONS}
+                onChange={(value) => onChange((current) => ({ ...current, label_recipe: value }))}
+              />
+            </>
+          ) : null}
           <FormField label="Feature Spec Path" description={describe("feature_spec_path")}>
             <Input value={form.feature_spec_path} onChange={(event) => onChange((current) => ({ ...current, feature_spec_path: event.target.value }))} placeholder="可选" />
           </FormField>
@@ -1040,20 +1112,6 @@ function WorkflowTaskEditor({
             description={describe("run_export")}
             options={RUN_EXPORT_OPTIONS}
             onChange={(value) => onChange((current) => ({ ...current, run_export: value }))}
-          />
-          <FormSelect
-            label="Signal Objective"
-            value={form.signal_objective}
-            description={describe("signal_objective")}
-            options={SIGNAL_OBJECTIVE_OPTIONS}
-            onChange={(value) => onChange((current) => ({ ...current, signal_objective: value }))}
-          />
-          <FormSelect
-            label="Label Recipe"
-            value={form.label_recipe}
-            description={describe("label_recipe")}
-            options={LABEL_RECIPE_OPTIONS}
-            onChange={(value) => onChange((current) => ({ ...current, label_recipe: value }))}
           />
           <FormSelect
             label="Reproducibility"
@@ -1549,6 +1607,7 @@ function defaultWorkflowTaskForm(): WorkflowTaskFormState {
     description: "",
     requested_by: "webapp",
     recipe_names: "baseline",
+    customize_baseline_recipe: false,
     panel_path: WORKFLOW_DEFAULT_PANEL_PATH,
     execution_panel_path: "",
     execution_panel_dir: "",
@@ -1557,8 +1616,8 @@ function defaultWorkflowTaskForm(): WorkflowTaskFormState {
     feature_spec_path: "",
     universe_profile: defaultUniverseProfile,
     benchmark_mode: "auto",
-    signal_objective: "huber_regression",
-    label_recipe: "blended_excess_4w_8w",
+    signal_objective: DEFAULT_BASELINE_SIGNAL_OBJECTIVE,
+    label_recipe: DEFAULT_BASELINE_LABEL_RECIPE,
     run_export: "auto_if_missing",
     reproducibility_mode: "balanced",
     universe_exit_policy: "retain_quotes_for_existing_positions",
@@ -1646,6 +1705,8 @@ function buildExportTaskPayload(form: ExportTaskFormState, sourceRef: TaskSource
 }
 
 function buildWorkflowTaskPayload(form: WorkflowTaskFormState, sourceRef: TaskSourceRef) {
+  const recipeNames = parseListInput(form.recipe_names);
+  const shouldCustomizeBaselineRecipe = form.customize_baseline_recipe && recipeNames.includes("baseline");
   let advancedOverrides: Record<string, unknown> = {};
   try {
     advancedOverrides = JSON.parse(form.advanced_overrides || "{}");
@@ -1657,8 +1718,6 @@ function buildWorkflowTaskPayload(form: WorkflowTaskFormState, sourceRef: TaskSo
     output_dir: form.output_dir,
     universe_profile: form.universe_profile,
     benchmark_mode: form.benchmark_mode,
-    signal_objective: form.signal_objective,
-    label_recipe: form.label_recipe,
     run_export: form.run_export,
     reproducibility_mode: form.reproducibility_mode,
     universe_exit_policy: form.universe_exit_policy,
@@ -1696,19 +1755,28 @@ function buildWorkflowTaskPayload(form: WorkflowTaskFormState, sourceRef: TaskSo
     native_only_tradable: form.native_only_tradable,
     publish_model: form.publish_model,
   };
+  if (shouldCustomizeBaselineRecipe) {
+    configPayload.signal_objective = form.signal_objective;
+    configPayload.label_recipe = form.label_recipe;
+  }
   if (form.execution_panel_path) {
     configPayload.execution_panel_path = form.execution_panel_path;
   }
   if (form.feature_spec_path) {
     configPayload.feature_spec_path = form.feature_spec_path;
   }
+  const mergedConfigPayload = { ...advancedOverrides, ...configPayload };
+  if (!shouldCustomizeBaselineRecipe) {
+    delete mergedConfigPayload.signal_objective;
+    delete mergedConfigPayload.label_recipe;
+  }
   return {
     display_name: form.display_name,
     description: form.description || null,
     requested_by: form.requested_by,
     source_ref: sourceRef,
-    config_payload: { ...advancedOverrides, ...configPayload },
-    recipe_names: parseListInput(form.recipe_names),
+    config_payload: mergedConfigPayload,
+    recipe_names: recipeNames,
   };
 }
 
@@ -1755,13 +1823,17 @@ function applyPresetToEditor(
     setEditorOpen: React.Dispatch<React.SetStateAction<boolean>>;
     setEditorTaskKind: React.Dispatch<React.SetStateAction<EditorTaskKind>>;
     setEditorSourceRef: React.Dispatch<React.SetStateAction<TaskSourceRef>>;
+    setEditorRecommendationReason: React.Dispatch<React.SetStateAction<string>>;
     setExportForm: React.Dispatch<React.SetStateAction<ExportTaskFormState>>;
     setWorkflowForm: React.Dispatch<React.SetStateAction<WorkflowTaskFormState>>;
     setAnalysisForm: React.Dispatch<React.SetStateAction<ResearchAnalysisTaskFormState>>;
   },
+  prefillConfig: Record<string, unknown>,
+  prefillReason: string,
 ) {
   setters.setEditorTaskKind(preset.task_kind);
   setters.setEditorSourceRef(preset.source_ref);
+  setters.setEditorRecommendationReason(prefillReason);
   if (preset.task_kind === "export_panel") {
     const payload = preset.payload;
     const featureGroups = toStringArray(payload.feature_groups);
@@ -1785,13 +1857,13 @@ function applyPresetToEditor(
     });
   } else if (preset.task_kind === "run_native_workflow") {
     const payload = preset.payload;
-    setters.setWorkflowForm(syncWorkflowDerivedFields({
+    setters.setWorkflowForm({
       ...workflowFormFromConfigPayload(payload.config_payload),
       display_name: String(payload.display_name ?? "Run Native Workflow"),
       description: String(payload.description ?? (payload.config_payload as Record<string, unknown> | undefined)?.task_description ?? ""),
       requested_by: String(payload.requested_by ?? "webapp"),
       recipe_names: toStringArray(payload.recipe_names).join(", "),
-    }));
+    });
   } else {
     const payload = preset.payload;
     setters.setAnalysisForm({
@@ -1815,7 +1887,66 @@ function applyPresetToEditor(
       output_dir: String(payload.output_dir ?? "artifacts/analysis"),
     });
   }
+  applyPrefillToEditor(prefillConfig, preset.task_kind, setters);
   setters.setEditorOpen(true);
+}
+
+function parsePrefillConfig(value: string | null) {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function applyPrefillToEditor(
+  prefillConfig: Record<string, unknown>,
+  taskKind: EditorTaskKind,
+  setters: Pick<
+    {
+      setExportForm: React.Dispatch<React.SetStateAction<ExportTaskFormState>>;
+      setWorkflowForm: React.Dispatch<React.SetStateAction<WorkflowTaskFormState>>;
+      setAnalysisForm: React.Dispatch<React.SetStateAction<ResearchAnalysisTaskFormState>>;
+    },
+    "setExportForm" | "setWorkflowForm" | "setAnalysisForm"
+  >,
+) {
+  if (!Object.keys(prefillConfig).length) {
+    return;
+  }
+  if (taskKind === "run_native_workflow") {
+    setters.setWorkflowForm((current) => {
+      const nextBase = {
+        ...current,
+        display_name: String(prefillConfig.display_name ?? current.display_name),
+        description: String(prefillConfig.description ?? current.description),
+        recipe_names: toStringArray(prefillConfig.recipe_names).join(", ") || current.recipe_names,
+      };
+      return Object.prototype.hasOwnProperty.call(prefillConfig, "config_payload")
+        ? workflowFormFromConfigPayload(prefillConfig.config_payload, nextBase)
+        : nextBase;
+    });
+    return;
+  }
+  if (taskKind === "run_research_analysis") {
+    setters.setAnalysisForm((current) => ({
+      ...current,
+      display_name: String(prefillConfig.display_name ?? current.display_name),
+      description: String(prefillConfig.description ?? current.description),
+      analysis_template:
+        prefillConfig.analysis_template === "experiment_review" || prefillConfig.analysis_template === "ui_insight" || prefillConfig.analysis_template === "anomaly_diagnosis"
+          ? prefillConfig.analysis_template
+          : current.analysis_template,
+    }));
+    return;
+  }
+  setters.setExportForm((current) => ({
+    ...current,
+    display_name: String(prefillConfig.display_name ?? current.display_name),
+    description: String(prefillConfig.description ?? current.description),
+  }));
 }
 
 function toStringArray(value: unknown) {
@@ -1850,6 +1981,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function parseJsonObject(value: string) {
+  try {
+    const parsed = JSON.parse(value || "{}");
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 function joinPath(root: string, leaf: string) {
   return `${normalizeDirectory(root, ".")}/${leaf.replace(/^\/+/g, "")}`;
 }
@@ -1858,6 +1998,12 @@ function basename(path: string) {
   const normalized = path.replace(/\/+$/g, "");
   const segments = normalized.split("/");
   return segments[segments.length - 1] || normalized;
+}
+
+function dirname(path: string) {
+  const normalized = path.replace(/\/+$/g, "");
+  const index = normalized.lastIndexOf("/");
+  return index > 0 ? normalized.slice(0, index) : "";
 }
 
 function slugifyPathSegment(value: string, fallback: string) {
@@ -1883,6 +2029,12 @@ function workflowPanelPathFromFilename(value: string) {
   return joinPath(WORKFLOW_PANELS_ROOT_DIR, filename);
 }
 
+function normalizeWorkflowPanelPathInput(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  return trimmed.includes("/") ? trimmed : workflowPanelPathFromFilename(trimmed);
+}
+
 function inferUniverseProfileFromPanelPath(panelPath: string, panel?: Pick<PanelSummary, "universe_profile"> | null) {
   const panelUniverseProfile = panel?.universe_profile;
   if (panelUniverseProfile && UNIVERSE_PROFILE_OPTIONS.includes(panelUniverseProfile as (typeof UNIVERSE_PROFILE_OPTIONS)[number])) {
@@ -1897,22 +2049,32 @@ function inferUniverseProfileFromPanelPath(panelPath: string, panel?: Pick<Panel
   return null;
 }
 
-function buildWorkflowDerivedPaths({
-  display_name,
-  panel_path,
-  universe_profile,
-}: Pick<WorkflowTaskFormState, "display_name" | "panel_path" | "universe_profile">) {
-  const output_root_dir = WORKFLOW_OUTPUT_ROOT_DIR;
-  const output_dir = buildOutputDir(output_root_dir, display_name);
-  const execution_panel_dir = output_dir;
-  const execution_panel_path = buildExecutionPanelPath(execution_panel_dir, panel_path, universe_profile);
-  return { output_root_dir, output_dir, execution_panel_dir, execution_panel_path };
-}
+type WorkflowDerivedSyncOptions = {
+  preserveOutputRootDir?: boolean;
+  preserveOutputDir?: boolean;
+  preserveExecutionPanelDir?: boolean;
+  preserveExecutionPanelPath?: boolean;
+};
 
-function syncWorkflowDerivedFields(form: WorkflowTaskFormState): WorkflowTaskFormState {
+function syncWorkflowDerivedFields(form: WorkflowTaskFormState, options: WorkflowDerivedSyncOptions = {}): WorkflowTaskFormState {
+  const output_root_dir = options.preserveOutputRootDir && form.output_root_dir.trim()
+    ? normalizeDirectory(form.output_root_dir, WORKFLOW_OUTPUT_ROOT_DIR)
+    : WORKFLOW_OUTPUT_ROOT_DIR;
+  const output_dir = options.preserveOutputDir && form.output_dir.trim()
+    ? normalizeDirectory(form.output_dir, buildOutputDir(output_root_dir, form.display_name))
+    : buildOutputDir(output_root_dir, form.display_name);
+  const execution_panel_dir = options.preserveExecutionPanelDir && form.execution_panel_dir.trim()
+    ? normalizeDirectory(form.execution_panel_dir, output_dir)
+    : output_dir;
+  const execution_panel_path = options.preserveExecutionPanelPath && form.execution_panel_path.trim()
+    ? form.execution_panel_path.trim()
+    : buildExecutionPanelPath(execution_panel_dir, form.panel_path, form.universe_profile);
   return {
     ...form,
-    ...buildWorkflowDerivedPaths(form),
+    output_root_dir,
+    output_dir,
+    execution_panel_dir,
+    execution_panel_path,
   };
 }
 
@@ -1965,24 +2127,27 @@ function allowsWorkflowMissingPanelPath(runExport: string) {
 function buildWorkflowPanelFileOptions(panels: PanelSummary[], currentPath: string) {
   const items = panels
     .map((panel) => ({
+      path: panel.path,
       filename: workflowPanelFilename(panel.path),
-      label: workflowPanelFilename(panel.path),
+      label: `${workflowPanelFilename(panel.path)} · ${panel.path}`,
     }))
     .filter((panel) => panel.filename)
-    .sort((left, right) => left.label.localeCompare(right.label));
-  if (currentPath && !items.some((item) => item.filename === workflowPanelFilename(currentPath))) {
+    .sort((left, right) => left.filename.localeCompare(right.filename));
+  if (currentPath && !items.some((item) => item.path === currentPath)) {
     items.unshift({
+      path: currentPath,
       filename: workflowPanelFilename(currentPath),
-      label: workflowPanelFilename(currentPath),
+      label: `${workflowPanelFilename(currentPath)} · ${currentPath}`,
     });
   }
   if (!items.length) {
     items.push({
+      path: currentPath,
       filename: workflowPanelFilename(currentPath),
-      label: currentPath ? workflowPanelFilename(currentPath) : "No panels available",
+      label: currentPath ? `${workflowPanelFilename(currentPath)} · ${currentPath}` : "No panels available",
     });
   }
-  return Array.from(new Map(items.map((item) => [item.filename, item])).values());
+  return Array.from(new Map(items.map((item) => [item.path, item])).values());
 }
 
 function normalizeAnalysisBatchMode(
@@ -1994,6 +2159,22 @@ function normalizeAnalysisBatchMode(
     : includeAllRecipes === true
       ? "run_plus_all_recipes"
       : "run_only";
+}
+
+function normalizeSourceKind(value: string | null | undefined): TaskSourceRef["kind"] {
+  return value === "run" || value === "panel" || value === "recipe" || value === "compare" ? value : "manual";
+}
+
+function supportsPresetSource(
+  taskKind: EditorTaskKind | null,
+  sourceType: string | null,
+  sourceId: string | null,
+) {
+  if (!taskKind || !sourceType || !sourceId) return false;
+  if (sourceType === "panel" && taskKind === "export_panel") return true;
+  if (sourceType === "run" && (taskKind === "run_native_workflow" || taskKind === "run_research_analysis")) return true;
+  if (sourceType === "recipe" && taskKind === "run_research_analysis") return true;
+  return false;
 }
 
 function getWorkflowTaskConfig(task: Pick<ResearchTaskSummary, "config_payload">) {
@@ -2016,12 +2197,14 @@ function getTaskTargetRunId(task: Pick<ResearchTaskSummary, "task_kind" | "outpu
   return basename(outputDirValue);
 }
 
-function workflowFormFromConfigPayload(value: unknown): WorkflowTaskFormState {
+function workflowFormFromConfigPayload(value: unknown, baseForm?: WorkflowTaskFormState): WorkflowTaskFormState {
   const payload = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
   const knownKeys = new Set([
     "panel_path",
     "execution_panel_path",
+    "execution_panel_dir",
     "output_dir",
+    "output_root_dir",
     "task_description",
     "feature_spec_path",
     "universe_profile",
@@ -2065,53 +2248,74 @@ function workflowFormFromConfigPayload(value: unknown): WorkflowTaskFormState {
     "native_only_tradable",
     "publish_model",
   ]);
+  const base = baseForm ?? defaultWorkflowTaskForm();
+  const has = (key: string) => Object.prototype.hasOwnProperty.call(payload, key);
+  const stringValue = (key: string, fallback: string) => (has(key) && payload[key] != null ? String(payload[key]) : fallback);
+  const boolValue = (key: string, fallback: boolean) => (has(key) ? toBoolean(payload[key], fallback) : fallback);
   const advancedOverrides = Object.fromEntries(Object.entries(payload).filter(([key]) => !knownKeys.has(key)));
-  const universeProfile = String(payload.universe_profile ?? "csi300");
-  const panelPath = String(payload.panel_path ?? WORKFLOW_DEFAULT_PANEL_PATH);
-  return syncWorkflowDerivedFields({
-    ...defaultWorkflowTaskForm(),
-    panel_path: panelPath,
-    feature_spec_path: String(payload.feature_spec_path ?? ""),
-    universe_profile: universeProfile,
-    benchmark_mode: String(payload.benchmark_mode ?? "auto"),
-    signal_objective: String(payload.signal_objective ?? "huber_regression"),
-    label_recipe: String(payload.label_recipe ?? "blended_excess_4w_8w"),
-    run_export: String(payload.run_export ?? "auto_if_missing"),
-    reproducibility_mode: String(payload.reproducibility_mode ?? "balanced"),
-    universe_exit_policy: String(payload.universe_exit_policy ?? "retain_quotes_for_existing_positions"),
-    start_date: String(payload.start_date ?? "2016-01-01"),
-    end_date: String(payload.end_date ?? ""),
-    batch_size: String(payload.batch_size ?? "200"),
-    topk: String(payload.topk ?? "10"),
-    train_weeks: String(payload.train_weeks ?? "260"),
-    valid_weeks: String(payload.valid_weeks ?? "52"),
-    eval_count: String(payload.eval_count ?? "52"),
-    rolling_recent_weeks: String(payload.rolling_recent_weeks ?? "52"),
-    step_weeks: String(payload.step_weeks ?? "1"),
-    rebalance_interval_weeks: String(payload.rebalance_interval_weeks ?? "1"),
-    hold_buffer_rank: String(payload.hold_buffer_rank ?? ""),
-    min_liquidity_filter: String(payload.min_liquidity_filter ?? "0"),
-    min_score_spread: String(payload.min_score_spread ?? "0"),
-    industry_max_weight: String(payload.industry_max_weight ?? ""),
-    validation_execution_lag_steps: String(payload.validation_execution_lag_steps ?? "1"),
-    validation_risk_degree: String(payload.validation_risk_degree ?? "1"),
-    native_risk_degree: String(payload.native_risk_degree ?? "0.95"),
-    account: String(payload.account ?? "1000000"),
-    seed: String(payload.seed ?? "42"),
-    recipe_parallel_workers: String(payload.recipe_parallel_workers ?? "1"),
-    model_num_threads: String(payload.model_num_threads ?? ""),
-    walk_forward_enabled: toBoolean(payload.walk_forward_enabled, true),
-    walk_forward_start_date: String(payload.walk_forward_start_date ?? "2016-01-01"),
-    walk_forward_end_date: String(payload.walk_forward_end_date ?? ""),
-    walk_forward_train_weeks: String(payload.walk_forward_train_weeks ?? "260"),
-    walk_forward_valid_weeks: String(payload.walk_forward_valid_weeks ?? "52"),
-    walk_forward_step_weeks: String(payload.walk_forward_step_weeks ?? "1"),
-    walk_forward_eval_count: String(payload.walk_forward_eval_count ?? "0"),
-    diagnostics_enabled: toBoolean(payload.diagnostics_enabled, true),
-    run_validation_comparison: toBoolean(payload.run_validation_comparison, true),
-    validation_only_tradable: toBoolean(payload.validation_only_tradable, false),
-    native_only_tradable: toBoolean(payload.native_only_tradable, true),
-    publish_model: toBoolean(payload.publish_model, false),
-    advanced_overrides: JSON.stringify(advancedOverrides, null, 2),
+  const existingAdvancedOverrides = parseJsonObject(base.advanced_overrides);
+  const executionPanelPath = stringValue("execution_panel_path", base.execution_panel_path);
+  const outputDir = stringValue("output_dir", base.output_dir);
+  const signalObjective = stringValue("signal_objective", base.signal_objective);
+  const labelRecipe = stringValue("label_recipe", base.label_recipe);
+  const nextForm: WorkflowTaskFormState = {
+    ...base,
+    panel_path: stringValue("panel_path", base.panel_path),
+    execution_panel_path: executionPanelPath,
+    execution_panel_dir: stringValue("execution_panel_dir", executionPanelPath ? dirname(executionPanelPath) : base.execution_panel_dir),
+    output_dir: outputDir,
+    output_root_dir: stringValue("output_root_dir", outputDir ? dirname(outputDir) : base.output_root_dir),
+    description: stringValue("task_description", base.description),
+    feature_spec_path: stringValue("feature_spec_path", base.feature_spec_path),
+    universe_profile: stringValue("universe_profile", base.universe_profile),
+    benchmark_mode: stringValue("benchmark_mode", base.benchmark_mode),
+    customize_baseline_recipe: has("signal_objective") || has("label_recipe")
+      ? signalObjective !== DEFAULT_BASELINE_SIGNAL_OBJECTIVE || labelRecipe !== DEFAULT_BASELINE_LABEL_RECIPE
+      : base.customize_baseline_recipe,
+    signal_objective: signalObjective,
+    label_recipe: labelRecipe,
+    run_export: stringValue("run_export", base.run_export),
+    reproducibility_mode: stringValue("reproducibility_mode", base.reproducibility_mode),
+    universe_exit_policy: stringValue("universe_exit_policy", base.universe_exit_policy),
+    start_date: stringValue("start_date", base.start_date),
+    end_date: stringValue("end_date", base.end_date),
+    batch_size: stringValue("batch_size", base.batch_size),
+    topk: stringValue("topk", base.topk),
+    train_weeks: stringValue("train_weeks", base.train_weeks),
+    valid_weeks: stringValue("valid_weeks", base.valid_weeks),
+    eval_count: stringValue("eval_count", base.eval_count),
+    rolling_recent_weeks: stringValue("rolling_recent_weeks", base.rolling_recent_weeks),
+    step_weeks: stringValue("step_weeks", base.step_weeks),
+    rebalance_interval_weeks: stringValue("rebalance_interval_weeks", base.rebalance_interval_weeks),
+    hold_buffer_rank: stringValue("hold_buffer_rank", base.hold_buffer_rank),
+    min_liquidity_filter: stringValue("min_liquidity_filter", base.min_liquidity_filter),
+    min_score_spread: stringValue("min_score_spread", base.min_score_spread),
+    industry_max_weight: stringValue("industry_max_weight", base.industry_max_weight),
+    validation_execution_lag_steps: stringValue("validation_execution_lag_steps", base.validation_execution_lag_steps),
+    validation_risk_degree: stringValue("validation_risk_degree", base.validation_risk_degree),
+    native_risk_degree: stringValue("native_risk_degree", base.native_risk_degree),
+    account: stringValue("account", base.account),
+    seed: stringValue("seed", base.seed),
+    recipe_parallel_workers: stringValue("recipe_parallel_workers", base.recipe_parallel_workers),
+    model_num_threads: stringValue("model_num_threads", base.model_num_threads),
+    walk_forward_enabled: boolValue("walk_forward_enabled", base.walk_forward_enabled),
+    walk_forward_start_date: stringValue("walk_forward_start_date", base.walk_forward_start_date),
+    walk_forward_end_date: stringValue("walk_forward_end_date", base.walk_forward_end_date),
+    walk_forward_train_weeks: stringValue("walk_forward_train_weeks", base.walk_forward_train_weeks),
+    walk_forward_valid_weeks: stringValue("walk_forward_valid_weeks", base.walk_forward_valid_weeks),
+    walk_forward_step_weeks: stringValue("walk_forward_step_weeks", base.walk_forward_step_weeks),
+    walk_forward_eval_count: stringValue("walk_forward_eval_count", base.walk_forward_eval_count),
+    diagnostics_enabled: boolValue("diagnostics_enabled", base.diagnostics_enabled),
+    run_validation_comparison: boolValue("run_validation_comparison", base.run_validation_comparison),
+    validation_only_tradable: boolValue("validation_only_tradable", base.validation_only_tradable),
+    native_only_tradable: boolValue("native_only_tradable", base.native_only_tradable),
+    publish_model: boolValue("publish_model", base.publish_model),
+    advanced_overrides: JSON.stringify({ ...existingAdvancedOverrides, ...advancedOverrides }, null, 2),
+  };
+  return syncWorkflowDerivedFields(nextForm, {
+    preserveOutputRootDir: has("output_root_dir"),
+    preserveOutputDir: has("output_dir"),
+    preserveExecutionPanelDir: has("execution_panel_dir"),
+    preserveExecutionPanelPath: has("execution_panel_path"),
   });
 }

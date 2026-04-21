@@ -6,6 +6,7 @@ import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Bot } from "lucide-react";
 
+import { ChartPayloadPanel } from "@/components/charts/chart-payload-panel";
 import { EChartsChart } from "@/components/charts/echarts-chart";
 import { LatestSummaryLayout } from "@/components/common/latest-summary-layout";
 import { MarkdownPreviewDialog } from "@/components/common/markdown-preview-dialog";
@@ -22,10 +23,12 @@ import { getRecipeTables } from "@/lib/api";
 import { parseLatestSummaryMarkdown } from "@/lib/latest-summary";
 import { DataTablePayload, RecipeDetail } from "@/lib/types";
 import { formatInteger, formatNumber, formatPathName, formatPercent } from "@/lib/format";
+import { buildRecommendationHref } from "@/lib/utils";
 
 export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
   const emptyTable = React.useMemo<DataTablePayload>(() => ({ columns: [], rows: [] }), []);
   const [activeTab, setActiveTab] = React.useState("diagnostics");
+  const [focusedTradeDate, setFocusedTradeDate] = React.useState<string | null>(null);
   const lazyTableNames = React.useMemo(() => {
     if (activeTab === "rolling") {
       return [
@@ -92,18 +95,46 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
     [latestSummaryMarkdown],
   );
   const summaryVerdict = parsedLatestSummary?.verdict ?? detail.research_summary.verdict;
+  const filteredRealizationBridge = React.useMemo(
+    () => filterTableByDate(getTable("signal_realization_bridge"), focusedTradeDate),
+    [focusedTradeDate, getTable],
+  );
+  const filteredHoldingDrift = React.useMemo(
+    () => filterTableByDate(getTable("holding_count_drift"), focusedTradeDate),
+    [focusedTradeDate, getTable],
+  );
+  const filteredExposureHistory = React.useMemo(
+    () => filterTableByDate(getTable("sector_exposure_history"), focusedTradeDate),
+    [focusedTradeDate, getTable],
+  );
 
   return (
     <div className="space-y-6">
       <SectionCard title="Performance Snapshot">
         <div className="mb-4 flex flex-wrap gap-2">
-          <Button size="sm" variant="outline" asChild>
-            <Link href={`/tasks?create=run_research_analysis&sourceType=recipe&sourceId=${encodeURIComponent(`${detail.run_id}:${detail.recipe_name}`)}`}>
-              Generate Analysis Task
-              <Bot className="h-4 w-4" />
-            </Link>
-          </Button>
+          {detail.recommendation_actions.length ? (
+            detail.recommendation_actions.slice(0, 3).map((action) => (
+              <Button key={`${action.task_kind}-${action.label}`} size="sm" variant="outline" asChild>
+                <Link href={buildRecommendationHref(action)}>
+                  {action.label}
+                  <Bot className="h-4 w-4" />
+                </Link>
+              </Button>
+            ))
+          ) : (
+            <Button size="sm" variant="outline" asChild>
+              <Link href={`/tasks?create=run_research_analysis&sourceType=recipe&sourceId=${encodeURIComponent(`${detail.run_id}:${detail.recipe_name}`)}`}>
+                Generate Analysis Task
+                <Bot className="h-4 w-4" />
+              </Link>
+            </Button>
+          )}
           {summaryVerdict ? <Badge variant="info">{summaryVerdict}</Badge> : null}
+          {detail.portfolio_realization_summary.severity ? (
+            <Badge variant={detail.portfolio_realization_summary.severity === "low" ? "success" : detail.portfolio_realization_summary.severity === "medium" ? "warning" : "destructive"}>
+              {detail.portfolio_realization_summary.severity}
+            </Badge>
+          ) : null}
         </div>
         <div className="grid gap-6 xl:grid-cols-2">
           <PerformanceMetricPanel
@@ -243,9 +274,30 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
 
         <TabsContent value="snapshot" className="space-y-6">
           <LazyState queryState={lazyTablesQuery} />
-          <SectionCard title="Latest Score Snapshot">
-            <DataTable table={getTable("latest_score_frame")} maxRows={20} />
-          </SectionCard>
+          <div className="grid gap-6 xl:grid-cols-2">
+            <SectionCard title="Latest Score Snapshot">
+              <DataTable table={getTable("latest_score_frame")} maxRows={20} />
+            </SectionCard>
+            <SectionCard title="Target vs Actual Snapshot">
+              <DataTable
+                table={{
+                  columns: ["view", "rows"],
+                  rows: [
+                    { view: "portfolio_targets", rows: getTable("portfolio_targets").rows.length },
+                    { view: "post_trade_holdings", rows: filteredHoldingDrift.rows.length },
+                    {
+                      view: "差集数量",
+                      rows: Math.max(
+                        getTable("portfolio_targets").rows.length - filteredHoldingDrift.rows.length,
+                        filteredHoldingDrift.rows.length - getTable("portfolio_targets").rows.length,
+                      ),
+                    },
+                  ],
+                }}
+                maxRows={5}
+              />
+            </SectionCard>
+          </div>
           <SectionCard title="Portfolio Targets">
             <DataTable table={getTable("portfolio_targets")} maxRows={20} />
           </SectionCard>
@@ -253,18 +305,41 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
 
         <TabsContent value="realization" className="space-y-6">
           <LazyState queryState={lazyTablesQuery} />
+          <div className="grid gap-6 xl:grid-cols-2">
+            {Object.values(detail.chart_payloads)
+              .filter((chart) => chart.key.includes("holding_trend") || chart.key.includes("blocked_sell"))
+              .map((chart) => (
+                <ChartPayloadPanel key={chart.key} chart={chart} />
+              ))}
+          </div>
+          <SectionCard title="异常时间点与解释">
+            <RealizationExplanationPanel
+              summary={detail.portfolio_realization_summary}
+              focusedTradeDate={focusedTradeDate}
+              onFocusDate={setFocusedTradeDate}
+              table={getTable("holding_count_drift")}
+              actions={detail.recommendation_actions}
+            />
+          </SectionCard>
           <SectionCard title="Signal To Portfolio Bridge">
-            <DataTable table={getTable("signal_realization_bridge")} maxRows={20} />
+            <DataTable table={filteredRealizationBridge} maxRows={20} />
           </SectionCard>
           <SectionCard title="Holding Count Drift">
-            <DataTable table={getTable("holding_count_drift")} maxRows={20} />
+            <DataTable table={filteredHoldingDrift} maxRows={20} />
           </SectionCard>
         </TabsContent>
 
         <TabsContent value="exposure" className="space-y-6">
           <LazyState queryState={lazyTablesQuery} />
+          <div className="grid gap-6 xl:grid-cols-2">
+            {Object.values(detail.chart_payloads)
+              .filter((chart) => chart.key.includes("exposure"))
+              .map((chart) => (
+                <ChartPayloadPanel key={chart.key} chart={chart} />
+              ))}
+          </div>
           <SectionCard title="Sector Exposure History">
-            <DataTable table={getTable("sector_exposure_history")} maxRows={20} />
+            <DataTable table={filteredExposureHistory} maxRows={20} />
           </SectionCard>
           <SectionCard title="Regime Gate Diagnostics">
             <DataTable table={getTable("regime_gate_diagnostics")} maxRows={20} />
@@ -299,20 +374,22 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
         </TabsContent>
 
         <TabsContent value="artifacts">
-          <SectionCard title="Artifact Inventory">
-            <DataTable
-              table={{
-                columns: ["name", "path", "exists", "updated_at"],
-                rows: detail.artifact_inventory.map((item) => ({
-                  name: item.name,
-                  path: formatPathName(item.path),
-                  exists: item.exists,
-                  updated_at: item.updated_at,
-                })),
-              }}
-              maxRows={50}
-            />
-          </SectionCard>
+          {Object.entries(groupArtifactRows(detail.artifact_inventory)).map(([group, rows]) => (
+            <SectionCard key={group} title={group}>
+              <DataTable
+                table={{
+                  columns: ["name", "path", "exists", "updated_at"],
+                  rows: rows.map((item) => ({
+                    name: item.name,
+                    path: formatPathName(item.path),
+                    exists: item.exists,
+                    updated_at: item.updated_at,
+                  })),
+                }}
+                maxRows={50}
+              />
+            </SectionCard>
+          ))}
         </TabsContent>
       </Tabs>
     </div>
@@ -380,6 +457,78 @@ function LazyState({
   return null;
 }
 
+function filterTableByDate(table: DataTablePayload, tradeDate: string | null): DataTablePayload {
+  if (!tradeDate || !table.columns.length) {
+    return table;
+  }
+  const key = table.columns.includes("trade_date") ? "trade_date" : table.columns.includes("signal_date") ? "signal_date" : null;
+  if (!key) {
+    return table;
+  }
+  return {
+    columns: table.columns,
+    rows: table.rows.filter((row) => String(row[key] ?? "") === tradeDate),
+  };
+}
+
+function groupArtifactRows(items: RecipeDetail["artifact_inventory"]) {
+  return items.reduce<Record<string, RecipeDetail["artifact_inventory"]>>((groups, item) => {
+    const group = item.name.includes("analysis/") ? "Research" : item.name.includes("holding_count_drift") || item.name.includes("signal_realization") || item.name.includes("sector_exposure") || item.name.includes("rebalance_audit") ? "Diagnostics" : item.name.includes("native_report") || item.name.includes("summary") || item.name.includes("benchmark") ? "Backtest" : "Exports";
+    groups[group] = [...(groups[group] ?? []), item];
+    return groups;
+  }, {});
+}
+
+function RealizationExplanationPanel({
+  summary,
+  focusedTradeDate,
+  onFocusDate,
+  table,
+  actions,
+}: {
+  summary: RecipeDetail["portfolio_realization_summary"];
+  focusedTradeDate: string | null;
+  onFocusDate: (tradeDate: string | null) => void;
+  table: DataTablePayload;
+  actions: RecipeDetail["recommendation_actions"];
+}) {
+  const dateKey = table.columns.includes("trade_date") ? "trade_date" : table.columns.includes("signal_date") ? "signal_date" : null;
+  const candidateDates = dateKey
+    ? table.rows
+        .filter((row) => Number(row.residual_hold_count ?? 0) > 0 || Number(row.locked_residual_count ?? 0) > 0)
+        .slice(0, 8)
+        .map((row) => String(row[dateKey] ?? ""))
+        .filter(Boolean)
+    : [];
+
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-4 xl:grid-cols-3">
+        <StatCard compact title="Dominant Cause" value={summary.dominant_cause ?? "—"} />
+        <StatCard compact title="Avg Actual Holds" value={formatNumber(summary.avg_actual_hold_count, 2)} />
+        <StatCard compact title="Avg Locked Residual" value={formatNumber(summary.avg_locked_residual_count, 2)} />
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {candidateDates.map((tradeDate) => (
+          <Button key={tradeDate} size="sm" variant={focusedTradeDate === tradeDate ? "default" : "outline"} onClick={() => onFocusDate(focusedTradeDate === tradeDate ? null : tradeDate)}>
+            {tradeDate}
+          </Button>
+        ))}
+      </div>
+      <div className="grid gap-4 xl:grid-cols-2">
+        <SummaryList title="研究解释" items={[summary.summary_label ?? "暂无摘要", ...(summary.recommended_experiments ?? [])]} />
+        <div className="flex flex-wrap gap-2">
+          {actions.map((action) => (
+            <Button key={`${action.task_kind}-${action.label}-explain`} size="sm" variant="outline" asChild>
+              <Link href={buildRecommendationHref(action)}>{action.label}</Link>
+            </Button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 type PerformanceMetricItem = {
   label: string;
   value: string;
@@ -416,16 +565,6 @@ function buildOverviewPerformanceMetrics(
     { label: "Sharpe", value: formatMetricValue(overview[`${prefix}_sharpe_ratio`], "number") },
     { label: "Win Rate", value: formatMetricValue(overview[`${prefix}_win_rate`], "percent") },
     { label: "Calmar", value: formatMetricValue(overview[`${prefix}_calmar_ratio`], "number") },
-  ];
-}
-
-function buildTablePerformanceMetrics(row: Record<string, unknown>): PerformanceMetricItem[] {
-  return [
-    { label: "Ann Return", value: formatMetricValue(row.annualized_return, "percent") },
-    { label: "Ann Vol", value: formatMetricValue(row.annualized_volatility, "percent") },
-    { label: "Sharpe", value: formatMetricValue(row.sharpe_ratio, "number") },
-    { label: "Win Rate", value: formatMetricValue(row.win_rate, "percent") },
-    { label: "Calmar", value: formatMetricValue(row.calmar_ratio, "number") },
   ];
 }
 

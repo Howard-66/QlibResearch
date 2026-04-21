@@ -23,6 +23,8 @@ NodeKey = Literal[
     "signal_snapshot",
 ]
 Tone = Literal["default", "info", "success", "warning", "danger", "neutral"]
+ExecutionSeverity = Literal["low", "medium", "high", "critical"]
+ChartKind = Literal["line", "area", "stacked_bar"]
 
 
 class DataTablePayload(BaseModel):
@@ -69,6 +71,64 @@ class ResearchSummary(BaseModel):
     metrics: dict[str, Any] = Field(default_factory=dict)
 
 
+class ExecutionAnomalySummary(BaseModel):
+    dominant_cause: str | None = None
+    severity: ExecutionSeverity | None = None
+    affected_period_ratio: float | None = None
+    avg_actual_hold_count: float | None = None
+    max_actual_hold_count: float | None = None
+    avg_locked_residual_count: float | None = None
+    recommended_experiments: list[str] = Field(default_factory=list)
+    summary_label: str | None = None
+
+
+class RecommendationAction(BaseModel):
+    label: str
+    task_kind: TaskKind
+    source_type: Literal["manual", "run", "panel", "recipe", "compare"]
+    source_id: str
+    prefill_config: dict[str, Any] = Field(default_factory=dict)
+    reason: str | None = None
+
+
+class ChartSeriesPayload(BaseModel):
+    key: str
+    label: str
+    values: list[float | None] = Field(default_factory=list)
+    role: Literal["line", "bar", "area"] = "line"
+    color: str | None = None
+    stack: str | None = None
+
+
+class ChartThresholdPayload(BaseModel):
+    label: str
+    value: float
+    tone: Tone = "warning"
+
+
+class ChartAnnotationPayload(BaseModel):
+    x: str
+    label: str
+    tone: Tone = "warning"
+
+
+class ChartPayload(BaseModel):
+    key: str
+    title: str
+    kind: ChartKind = "line"
+    x: list[str] = Field(default_factory=list)
+    series: list[ChartSeriesPayload] = Field(default_factory=list)
+    thresholds: list[ChartThresholdPayload] = Field(default_factory=list)
+    annotations: list[ChartAnnotationPayload] = Field(default_factory=list)
+
+
+class CompareWinnerSummary(BaseModel):
+    recommended_winner: str | None = None
+    recommended_next_experiment: str | None = None
+    rejection_reasons: list[str] = Field(default_factory=list)
+    summary_label: str | None = None
+
+
 class DiagnosticNode(BaseModel):
     key: NodeKey
     status: DiagnosticStatus
@@ -100,6 +160,11 @@ class RunQuickSummary(BaseModel):
     incumbent_recipe: str | None = None
     current_problem: str | None = None
     recommended_action: str | None = None
+    dominant_execution_cause: str | None = None
+    portfolio_definition_status: DiagnosticStatus | None = None
+    avg_actual_hold_count: float | None = None
+    max_actual_hold_count: float | None = None
+    top1_sector_weight: float | None = None
     updated_at: str | None = None
 
 
@@ -138,6 +203,10 @@ class RunDetail(BaseModel):
     recipes: list[RecipeSummary] = Field(default_factory=list)
     analysis_reports: list[AnalysisReportRef] = Field(default_factory=list)
     artifact_inventory: list[ArtifactRef] = Field(default_factory=list)
+    experiment_scorecard: dict[str, Any] = Field(default_factory=dict)
+    execution_anomaly_summary: ExecutionAnomalySummary = Field(default_factory=ExecutionAnomalySummary)
+    recommendation_actions: list[RecommendationAction] = Field(default_factory=list)
+    run_level_charts: dict[str, ChartPayload] = Field(default_factory=dict)
 
 
 class ArtifactInventoryResponse(BaseModel):
@@ -156,6 +225,10 @@ class RecipeDetail(BaseModel):
     tables: dict[str, DataTablePayload] = Field(default_factory=dict)
     analysis_reports: list[AnalysisReportRef] = Field(default_factory=list)
     artifact_inventory: list[ArtifactRef] = Field(default_factory=list)
+    portfolio_realization_summary: ExecutionAnomalySummary = Field(default_factory=ExecutionAnomalySummary)
+    exposure_summary: dict[str, Any] = Field(default_factory=dict)
+    recommendation_actions: list[RecommendationAction] = Field(default_factory=list)
+    chart_payloads: dict[str, ChartPayload] = Field(default_factory=dict)
 
 
 class RecipeTablesResponse(BaseModel):
@@ -224,6 +297,9 @@ class CompareResponse(BaseModel):
     sector_exposure: dict[str, DataTablePayload] = Field(default_factory=dict)
     holding_count_drift: dict[str, DataTablePayload] = Field(default_factory=dict)
     analysis_summary: ResearchSummary = Field(default_factory=ResearchSummary)
+    winner_summary: CompareWinnerSummary = Field(default_factory=CompareWinnerSummary)
+    comparison_recommendation_actions: list[RecommendationAction] = Field(default_factory=list)
+    chart_payloads: dict[str, ChartPayload] = Field(default_factory=dict)
 
 
 class OverviewResponse(BaseModel):

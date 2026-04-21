@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { RunListItem } from "@/lib/types";
 import { formatCompactDate, formatNumber, formatPercent } from "@/lib/format";
-import { cn } from "@/lib/utils";
+import { buildRecommendationHref, cn } from "@/lib/utils";
 
 const artifactVariantMap = {
   ready: "success",
@@ -24,6 +24,14 @@ const researchVariantMap = {
   rejected: "destructive",
   needs_explanation: "warning",
   hold: "neutral",
+} as const;
+
+const portfolioVariantMap = {
+  healthy: "success",
+  warning: "warning",
+  danger: "destructive",
+  missing: "outline",
+  info: "info",
 } as const;
 
 export function RunsPageClient({ runs }: { runs: RunListItem[] }) {
@@ -61,13 +69,14 @@ export function RunsPageClient({ runs }: { runs: RunListItem[] }) {
                   ) : null}
                 </div>
 
-                <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
                   <InfoPill label="Panel" value={summary.panel_path?.split("/").pop() ?? "—"} />
                   <InfoPill label="Lead" value={summary.incumbent_recipe ?? summary.baseline_recipe ?? "—"} />
-                  <InfoPill label="Rolling IC" value={formatNumber(summary.baseline_metrics.rolling_rank_ic_ir, 3)} />
-                  <InfoPill label="Rolling Excess" value={formatPercent(summary.baseline_metrics.rolling_topk_mean_excess_return_4w, 2)} />
                   <InfoPill label="WF IC" value={formatNumber(summary.baseline_metrics.walk_forward_rank_ic_ir, 3)} />
                   <InfoPill label="WF Excess" value={formatPercent(summary.baseline_metrics.walk_forward_topk_mean_excess_return_4w, 2)} />
+                  <InfoPill label="Avg Actual Holds" value={formatNumber(summary.avg_actual_hold_count, 2)} />
+                  <InfoPill label="Max Actual Holds" value={formatNumber(summary.max_actual_hold_count, 0)} />
+                  <InfoPill label="Top1 Sector Weight" value={formatPercent(summary.top1_sector_weight, 2)} />
                 </div>
 
                 {isSelected ? (
@@ -107,7 +116,7 @@ function renderQuickJudgeContent(selected: RunListItem) {
           }}
         >
           <Link href={`/runs/${selected.run_id}`}>
-            Details
+            View Detail
             <ReceiptText className="h-4 w-4" />
           </Link>
         </Button>
@@ -120,7 +129,7 @@ function renderQuickJudgeContent(selected: RunListItem) {
           }}
         >
           <Link href={`/compare?runId=${encodeURIComponent(selected.run_id)}`}>
-            Add to Compare
+            Compare vs Candidate
             <GitCompare className="h-4 w-4" />
           </Link>
         </Button>
@@ -132,8 +141,21 @@ function renderQuickJudgeContent(selected: RunListItem) {
             event.stopPropagation();
           }}
         >
-          <Link href={`/tasks?create=run_research_analysis&sourceType=run&sourceId=${encodeURIComponent(selected.run_id)}`}>
-            Analyze Run
+          <Link
+            href={buildRecommendationHref({
+              label: "Run Diagnosis Task",
+              task_kind: "run_research_analysis",
+              source_type: "run",
+              source_id: selected.run_id,
+              prefill_config: {
+                display_name: `Diagnose ${selected.run_id}`,
+                description: "Diagnose execution drift and exposure anomalies",
+                analysis_template: "anomaly_diagnosis",
+              },
+              reason: "先补一份异常诊断，能更快确认需要如何调整 Universe Exit Policy 或持仓上限。",
+            })}
+          >
+            Run Diagnosis Task
             <Bot className="h-4 w-4" />
           </Link>
         </Button>
@@ -153,6 +175,11 @@ function renderQuickJudgeContent(selected: RunListItem) {
       </div>
 
       <div className="flex flex-wrap gap-2">
+        {summary.portfolio_definition_status ? (
+          <Badge variant={portfolioVariantMap[summary.portfolio_definition_status] ?? "neutral"}>
+            组合定义可信度: {summary.portfolio_definition_status}
+          </Badge>
+        ) : null}
         {promotionEntries.length ? (
           promotionEntries.map(([recipe, gate]) => (
             <Badge
@@ -166,6 +193,19 @@ function renderQuickJudgeContent(selected: RunListItem) {
           <Badge variant="neutral">暂无 promotion gate</Badge>
         )}
         {summary.has_execution_gap_issue ? <Badge variant="destructive">执行偏差需关注</Badge> : null}
+        {summary.portfolio_definition_status === "danger" || summary.portfolio_definition_status === "warning" ? (
+          <Badge variant="warning">需要实验 A</Badge>
+        ) : promotionEntries.length > 1 ? (
+          <Badge variant="info">可直接对比</Badge>
+        ) : (
+          <Badge variant="success">可继续推进</Badge>
+        )}
+      </div>
+
+      <div className="grid gap-2 md:grid-cols-3">
+        <InfoPill label="Current Problem" value={summary.current_problem ?? "—"} />
+        <InfoPill label="Recommended Action" value={summary.recommended_action ?? "—"} />
+        <InfoPill label="Dominant Cause" value={summary.dominant_execution_cause ?? "—"} />
       </div>
 
       {summary.missing_artifacts.length ? (

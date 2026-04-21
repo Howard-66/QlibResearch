@@ -20,6 +20,7 @@ from qlib_research.core.portfolio import BacktestTradingConfig
 
 
 NATIVE_SIGNAL_COLUMN = "score"
+DEFAULT_A_SHARE_LIMIT_THRESHOLD = 0.095
 
 
 def _require_qlib():
@@ -319,6 +320,68 @@ def _current_position_weight_dict(current: Any) -> dict[str, float]:
     }
 
 
+def _quote_slice_for_date(quote_frame: pd.DataFrame, trade_date: pd.Timestamp) -> pd.DataFrame:
+    if quote_frame.empty:
+        return pd.DataFrame()
+    datetime_index = quote_frame.index.get_level_values("datetime")
+    if trade_date not in datetime_index:
+        return pd.DataFrame()
+    day_quote = quote_frame.xs(trade_date, level="datetime").copy()
+    day_quote.index = day_quote.index.astype(str)
+    return day_quote
+
+
+def _quote_row_for_code(day_quote: pd.DataFrame, code: str) -> pd.Series | None:
+    if day_quote.empty or str(code) not in day_quote.index:
+        return None
+    return day_quote.loc[str(code)]
+
+
+def _sell_block_reason_from_row(row: pd.Series | None) -> str:
+    if row is None:
+        return "suspend"
+    open_price = pd.to_numeric(pd.Series([row.get("$open")]), errors="coerce").iloc[0]
+    close_price = pd.to_numeric(pd.Series([row.get("$close")]), errors="coerce").iloc[0]
+    change = pd.to_numeric(pd.Series([row.get("$change")]), errors="coerce").iloc[0]
+    volume = pd.to_numeric(pd.Series([row.get("$volume")]), errors="coerce").fillna(0.0).iloc[0]
+    if pd.isna(close_price) or pd.isna(open_price):
+        return "suspend"
+    if bool(row.get("limit_sell", False)) or (pd.notna(change) and float(change) <= -DEFAULT_A_SHARE_LIMIT_THRESHOLD):
+        return "limit"
+    if float(volume) <= 0:
+        return "volume"
+    return "volume"
+
+
+def _buyable_code_set_for_day(day_quote: pd.DataFrame) -> set[str]:
+    if day_quote.empty:
+        return set()
+    buyable: set[str] = set()
+    for code, row in day_quote.iterrows():
+        open_price = pd.to_numeric(pd.Series([row.get("$open")]), errors="coerce").iloc[0]
+        close_price = pd.to_numeric(pd.Series([row.get("$close")]), errors="coerce").iloc[0]
+        volume = pd.to_numeric(pd.Series([row.get("$volume")]), errors="coerce").fillna(0.0).iloc[0]
+        change = pd.to_numeric(pd.Series([row.get("$change")]), errors="coerce").iloc[0]
+        if pd.isna(open_price) or pd.isna(close_price):
+            continue
+        if bool(row.get("limit_buy", False)) or (pd.notna(change) and float(change) >= DEFAULT_A_SHARE_LIMIT_THRESHOLD):
+            continue
+        if float(volume) <= 0:
+            continue
+        buyable.add(str(code))
+    return buyable
+
+
+def _locked_residual_codes_for_day(day_quote: pd.DataFrame, current_holdings: Sequence[str]) -> list[str]:
+    locked: list[str] = []
+    for code in current_holdings:
+        row = _quote_row_for_code(day_quote, str(code))
+        reason = _sell_block_reason_from_row(row)
+        if reason in {"suspend", "limit", "volume"}:
+            locked.append(str(code))
+    return sorted(set(locked))
+
+
 def _code_rank_map(series: pd.Series) -> dict[str, int]:
     return {
         str(code): rank
@@ -605,6 +668,7 @@ class WeeklyTopKEqualWeightStrategy(WeightStrategyBase):
         min_liquidity_filter: float = 0.0,
         min_score_spread: float = 0.0,
         industry_max_weight: float | None = None,
+        enforce_locked_residual_slot_budget: bool = True,
         **kwargs: Any,
     ):
         super().__init__(
@@ -620,8 +684,9 @@ class WeeklyTopKEqualWeightStrategy(WeightStrategyBase):
         self.min_liquidity_filter = float(min_liquidity_filter)
         self.min_score_spread = float(min_score_spread)
         self.industry_max_weight = industry_max_weight
+        self.enforce_locked_residual_slot_budget = bool(enforce_locked_residual_slot_budget)
 
-    def _tradable_codes(
+    def _buyable_codes(
         self,
         codes: Sequence[str],
         trade_start_time: pd.Timestamp,
@@ -629,13 +694,46 @@ class WeeklyTopKEqualWeightStrategy(WeightStrategyBase):
     ) -> set[str]:
         tradable: set[str] = set()
         for code in codes:
-            if self.trade_exchange.is_stock_tradable(
+            if not self.trade_exchange.is_stock_tradable(
                 stock_id=code,
                 start_time=trade_start_time,
                 end_time=trade_end_time,
+                direction=Order.BUY,
             ):
-                tradable.add(str(code))
+                continue
+            volume = pd.to_numeric(
+                pd.Series([self.trade_exchange.get_volume(code, trade_start_time, trade_end_time)]),
+                errors="coerce",
+            ).fillna(0.0).iloc[0]
+            if float(volume) <= 0:
+                continue
+            tradable.add(str(code))
         return tradable
+
+    def _locked_residual_codes(
+        self,
+        current_holdings: Sequence[str],
+        trade_start_time: pd.Timestamp,
+        trade_end_time: pd.Timestamp,
+    ) -> list[str]:
+        locked: list[str] = []
+        for code in current_holdings:
+            sellable = self.trade_exchange.is_stock_tradable(
+                stock_id=code,
+                start_time=trade_start_time,
+                end_time=trade_end_time,
+                direction=Order.SELL,
+            )
+            if not sellable:
+                locked.append(str(code))
+                continue
+            volume = pd.to_numeric(
+                pd.Series([self.trade_exchange.get_volume(code, trade_start_time, trade_end_time)]),
+                errors="coerce",
+            ).fillna(0.0).iloc[0]
+            if float(volume) <= 0:
+                locked.append(str(code))
+        return sorted(set(locked))
 
     def generate_target_weight_position(self, score, current, trade_start_time, trade_end_time):
         if self.rebalance_interval_steps > 1:
@@ -646,24 +744,33 @@ class WeeklyTopKEqualWeightStrategy(WeightStrategyBase):
                     return current_weights
 
         current_holdings = _current_position_stock_list(current)
-        tradable_codes = None
+        locked_residual_codes = (
+            self._locked_residual_codes(current_holdings, trade_start_time, trade_end_time)
+            if self.enforce_locked_residual_slot_budget
+            else []
+        )
+        configurable_slots = max(self.topk - len(locked_residual_codes), 0)
+        active_current_holdings = [code for code in current_holdings if code not in set(locked_residual_codes)]
+        buyable_codes = None
         if self.only_tradable:
-            tradable_codes = self._tradable_codes(
+            buyable_codes = self._buyable_codes(
                 _score_frame_to_series_and_meta(score, score_column=self.score_column)[0].index.tolist(),
                 trade_start_time=trade_start_time,
                 trade_end_time=trade_end_time,
             )
         score_frame = score.copy() if isinstance(score, pd.DataFrame) else pd.Series(score).to_frame(self.score_column)
 
+        if configurable_slots <= 0:
+            return {}
         selected = select_topk_with_buffer(
             score_frame,
-            current_holdings=current_holdings,
-            topk=self.topk,
+            current_holdings=active_current_holdings,
+            topk=configurable_slots,
             hold_buffer_rank=self.hold_buffer_rank,
             min_liquidity_filter=self.min_liquidity_filter,
             min_score_spread=self.min_score_spread,
             industry_max_weight=self.industry_max_weight,
-            buyable_codes=tradable_codes,
+            buyable_codes=buyable_codes,
             score_column=self.score_column,
         )
         if not selected:
@@ -683,6 +790,7 @@ class NativePortfolioArtifacts:
     indicators_normal: pd.DataFrame
     signal_diagnostics: pd.DataFrame | None = None
     portfolio_diagnostics: pd.DataFrame | None = None
+    rebalance_audit: pd.DataFrame | None = None
     recorder_id: str | None = None
 
 
@@ -708,6 +816,7 @@ def build_native_portana_config(
     min_liquidity_filter: float = 0.0,
     min_score_spread: float = 0.0,
     industry_max_weight: float | None = None,
+    enforce_locked_residual_slot_budget: bool = True,
 ) -> dict[str, Any]:
     signal = _coerce_signal_frame(signal_frame)
     if quote_frame.empty:
@@ -754,6 +863,7 @@ def build_native_portana_config(
                 "min_liquidity_filter": float(min_liquidity_filter),
                 "min_score_spread": float(min_score_spread),
                 "industry_max_weight": industry_max_weight,
+                "enforce_locked_residual_slot_budget": bool(enforce_locked_residual_slot_budget),
             },
         },
         "executor": {
@@ -843,23 +953,118 @@ def _tradability_sets_for_date(
     quote_frame: pd.DataFrame,
     trade_date: pd.Timestamp,
 ) -> tuple[set[str], set[str]]:
-    if quote_frame.empty:
-        return set(), set()
-    if trade_date not in quote_frame.index.get_level_values("datetime"):
-        return set(), set()
-    day_quote = quote_frame.xs(trade_date, level="datetime").copy()
-    day_quote.index = day_quote.index.astype(str)
-    buyable = {
-        str(code)
-        for code, row in day_quote.iterrows()
-        if not bool(row.get("limit_buy", False)) and pd.notna(row.get("$open")) and pd.notna(row.get("$close"))
-    }
+    day_quote = _quote_slice_for_date(quote_frame, trade_date)
+    buyable = _buyable_code_set_for_day(day_quote)
     sellable = {
         str(code)
-        for code, row in day_quote.iterrows()
-        if not bool(row.get("limit_sell", False)) and pd.notna(row.get("$close"))
+        for code in day_quote.index.astype(str).tolist()
+        if _sell_block_reason_from_row(_quote_row_for_code(day_quote, str(code))) not in {"suspend", "limit", "volume"}
     }
     return buyable, sellable
+
+
+def build_rebalance_audit(
+    signal_frame: pd.DataFrame | pd.Series,
+    quote_frame: pd.DataFrame,
+    positions_normal: dict[pd.Timestamp, Any],
+    *,
+    topk: int,
+    hold_buffer_rank: int | None = None,
+    rebalance_interval_steps: int = 1,
+    only_tradable: bool = True,
+    min_liquidity_filter: float = 0.0,
+    min_score_spread: float = 0.0,
+    industry_max_weight: float | None = None,
+    enforce_locked_residual_slot_budget: bool = True,
+    score_column: str = NATIVE_SIGNAL_COLUMN,
+) -> pd.DataFrame:
+    signal = build_native_signal_frame(signal_frame, score_column=score_column)
+    signal_dates = _ensure_datetime_series(signal.index.get_level_values("datetime"))
+    trade_dates = sorted(pd.to_datetime(list(positions_normal.keys())))
+    if len(signal_dates) < 2 or not trade_dates:
+        return pd.DataFrame()
+
+    rows: list[dict[str, Any]] = []
+    previous_actual_holdings: list[str] = []
+    for signal_date, trade_date in zip(signal_dates[:-1], trade_dates):
+        signal_slice = signal.xs(signal_date, level="datetime").copy()
+        day_quote = _quote_slice_for_date(quote_frame, pd.Timestamp(trade_date))
+        buyable_codes, _sellable_codes = _tradability_sets_for_date(quote_frame, pd.Timestamp(trade_date))
+        locked_residual_codes = (
+            _locked_residual_codes_for_day(day_quote, previous_actual_holdings)
+            if enforce_locked_residual_slot_budget
+            else []
+        )
+        target_topk = max(int(topk) - len(locked_residual_codes), 0) if enforce_locked_residual_slot_budget else int(topk)
+        active_current_holdings = [code for code in previous_actual_holdings if code not in set(locked_residual_codes)]
+        selected_active = (
+            select_topk_with_buffer(
+                signal_slice,
+                current_holdings=active_current_holdings,
+                topk=max(target_topk, 1),
+                hold_buffer_rank=hold_buffer_rank,
+                min_liquidity_filter=min_liquidity_filter,
+                min_score_spread=min_score_spread,
+                industry_max_weight=industry_max_weight,
+                buyable_codes=buyable_codes if only_tradable else None,
+                score_column=score_column,
+            )
+            if target_topk > 0
+            else []
+        )
+        target_holdings = sorted(set(locked_residual_codes).union(selected_active))
+        post_trade_holdings = sorted(_position_holdings_snapshot(positions_normal.get(trade_date)))
+        intended_sell_codes = sorted(code for code in previous_actual_holdings if code not in target_holdings)
+        blocked_sell_codes = sorted(code for code in intended_sell_codes if code in post_trade_holdings)
+        sell_blocked_by_limit = sorted(
+            code for code in blocked_sell_codes if _sell_block_reason_from_row(_quote_row_for_code(day_quote, code)) == "limit"
+        )
+        sell_blocked_by_suspend = sorted(
+            code for code in blocked_sell_codes if _sell_block_reason_from_row(_quote_row_for_code(day_quote, code)) == "suspend"
+        )
+        sell_blocked_by_volume = sorted(
+            code for code in blocked_sell_codes if _sell_block_reason_from_row(_quote_row_for_code(day_quote, code)) == "volume"
+        )
+        carry_codes = sorted(set(previous_actual_holdings) & set(post_trade_holdings))
+        new_buy_codes = sorted(set(post_trade_holdings) - set(previous_actual_holdings))
+        residual_codes = sorted(set(post_trade_holdings) - set(target_holdings))
+        row = {
+            "signal_date": pd.Timestamp(signal_date),
+            "trade_date": pd.Timestamp(trade_date),
+            "pre_trade_holdings": ",".join(previous_actual_holdings),
+            "target_holdings": ",".join(target_holdings),
+            "post_trade_holdings": ",".join(post_trade_holdings),
+            "pre_trade_hold_count": int(len(previous_actual_holdings)),
+            "target_hold_count": int(len(target_holdings)),
+            "post_trade_hold_count": int(len(post_trade_holdings)),
+            "locked_residual_codes": ",".join(locked_residual_codes),
+            "locked_residual_count": int(len(locked_residual_codes)),
+            "sell_blocked_by_limit_count": int(len(sell_blocked_by_limit)),
+            "sell_blocked_by_suspend_count": int(len(sell_blocked_by_suspend)),
+            "sell_blocked_by_volume_count": int(len(sell_blocked_by_volume)),
+            "sell_blocked_total_count": int(len(blocked_sell_codes)),
+            "sell_blocked_codes": ",".join(blocked_sell_codes),
+            "new_buy_codes": ",".join(new_buy_codes),
+            "new_buy_count": int(len(new_buy_codes)),
+            "carry_codes": ",".join(carry_codes),
+            "carry_count": int(len(carry_codes)),
+            "residual_codes": ",".join(residual_codes),
+            "residual_hold_count": int(len(residual_codes)),
+            "actual_hold_count": int(len(post_trade_holdings)),
+            "rebalance_interval_steps": int(rebalance_interval_steps),
+            "hold_buffer_rank": int(hold_buffer_rank or topk),
+        }
+        rows.append(row)
+        previous_actual_holdings = post_trade_holdings
+
+    audit = pd.DataFrame(rows)
+    if not audit.empty:
+        audit["target_hold_count"] = pd.to_numeric(audit["target_hold_count"], errors="coerce").fillna(0).astype(int)
+        audit["post_trade_hold_count"] = pd.to_numeric(audit["post_trade_hold_count"], errors="coerce").fillna(0).astype(int)
+        audit["locked_residual_count"] = pd.to_numeric(audit["locked_residual_count"], errors="coerce").fillna(0).astype(int)
+        audit["sell_blocked_total_count"] = pd.to_numeric(audit["sell_blocked_total_count"], errors="coerce").fillna(0).astype(int)
+        audit["residual_hold_count"] = pd.to_numeric(audit["residual_hold_count"], errors="coerce").fillna(0).astype(int)
+    return audit
 
 
 def build_native_portfolio_diagnostics(
@@ -874,54 +1079,36 @@ def build_native_portfolio_diagnostics(
     min_liquidity_filter: float = 0.0,
     min_score_spread: float = 0.0,
     industry_max_weight: float | None = None,
+    enforce_locked_residual_slot_budget: bool = True,
     score_column: str = NATIVE_SIGNAL_COLUMN,
 ) -> pd.DataFrame:
     signal = build_native_signal_frame(signal_frame, score_column=score_column)
-    signal_dates = _ensure_datetime_series(signal.index.get_level_values("datetime"))
-    trade_dates = sorted(pd.to_datetime(list(positions_normal.keys())))
-    if len(signal_dates) < 2 or not trade_dates:
+    signal_diagnostics = build_signal_diagnostics(signal, topk=topk, score_column=score_column).set_index("signal_date")
+    audit = build_rebalance_audit(
+        signal,
+        quote_frame,
+        positions_normal,
+        topk=topk,
+        hold_buffer_rank=hold_buffer_rank,
+        rebalance_interval_steps=rebalance_interval_steps,
+        only_tradable=only_tradable,
+        min_liquidity_filter=min_liquidity_filter,
+        min_score_spread=min_score_spread,
+        industry_max_weight=industry_max_weight,
+        enforce_locked_residual_slot_budget=enforce_locked_residual_slot_budget,
+        score_column=score_column,
+    )
+    if audit.empty:
         return pd.DataFrame()
 
-    signal_diagnostics = build_signal_diagnostics(signal, topk=topk, score_column=score_column).set_index("signal_date")
     rows: list[dict[str, Any]] = []
-    previous_actual_holdings: list[str] = []
-
-    for signal_date, trade_date in zip(signal_dates[:-1], trade_dates):
-        signal_slice = signal.xs(signal_date, level="datetime").copy()
-        buyable_codes, sellable_codes = _tradability_sets_for_date(quote_frame, pd.Timestamp(trade_date))
-        target_holdings = select_topk_with_buffer(
-            signal_slice,
-            current_holdings=previous_actual_holdings,
-            topk=topk,
-            hold_buffer_rank=hold_buffer_rank,
-            min_liquidity_filter=min_liquidity_filter,
-            min_score_spread=min_score_spread,
-            industry_max_weight=industry_max_weight,
-            buyable_codes=buyable_codes if only_tradable else None,
-            score_column=score_column,
-        )
-        actual_holdings = _position_holdings_snapshot(positions_normal.get(trade_date))
-        blocked_sell_codes = sorted(
-            code
-            for code in previous_actual_holdings
-            if code not in target_holdings and code not in sellable_codes and code in actual_holdings
-        )
-        row = {
-            "signal_date": pd.Timestamp(signal_date),
-            "trade_date": pd.Timestamp(trade_date),
-            "target_hold_count": int(len(target_holdings)),
-            "actual_hold_count": int(len(actual_holdings)),
-            "blocked_sell_count": int(len(blocked_sell_codes)),
-            "blocked_sell_codes": ",".join(blocked_sell_codes),
-            "residual_hold_count": int(len(set(actual_holdings) - set(target_holdings))),
-            "rebalance_interval_steps": int(rebalance_interval_steps),
-            "hold_buffer_rank": int(hold_buffer_rank or topk),
-        }
-        if pd.Timestamp(signal_date) in signal_diagnostics.index:
-            row.update(signal_diagnostics.loc[pd.Timestamp(signal_date)].to_dict())
-        rows.append(row)
-        previous_actual_holdings = actual_holdings
-
+    for row in audit.to_dict(orient="records"):
+        signal_date = pd.Timestamp(row["signal_date"])
+        item = dict(row)
+        item["blocked_sell_count"] = int(item.get("sell_blocked_total_count", 0) or 0)
+        if signal_date in signal_diagnostics.index:
+            item.update(signal_diagnostics.loc[signal_date].to_dict())
+        rows.append(item)
     return pd.DataFrame(rows)
 
 
@@ -959,6 +1146,7 @@ def run_native_backtest_analysis(
     min_liquidity_filter: float = 0.0,
     min_score_spread: float = 0.0,
     industry_max_weight: float | None = None,
+    enforce_locked_residual_slot_budget: bool = True,
 ) -> NativePortfolioRunResult:
     from qlib.backtest import backtest  # type: ignore
     from qlib.contrib.evaluate import risk_analysis  # type: ignore
@@ -983,6 +1171,7 @@ def run_native_backtest_analysis(
         min_liquidity_filter=min_liquidity_filter,
         min_score_spread=min_score_spread,
         industry_max_weight=industry_max_weight,
+        enforce_locked_residual_slot_budget=enforce_locked_residual_slot_budget,
     )
     direct_config = deepcopy(config)
     direct_config["strategy"]["kwargs"]["signal"] = signal
@@ -1018,6 +1207,20 @@ def run_native_backtest_analysis(
             ),
         }
     )
+    rebalance_audit = build_rebalance_audit(
+        signal,
+        quote_frame,
+        positions_normal,
+        topk=topk,
+        hold_buffer_rank=hold_buffer_rank,
+        rebalance_interval_steps=rebalance_interval_steps,
+        only_tradable=only_tradable,
+        min_liquidity_filter=min_liquidity_filter,
+        min_score_spread=min_score_spread,
+        industry_max_weight=industry_max_weight,
+        enforce_locked_residual_slot_budget=enforce_locked_residual_slot_budget,
+        score_column=NATIVE_SIGNAL_COLUMN,
+    )
     artifacts = NativePortfolioArtifacts(
         signal_frame=signal,
         quote_frame=quote_frame,
@@ -1037,8 +1240,10 @@ def run_native_backtest_analysis(
             min_liquidity_filter=min_liquidity_filter,
             min_score_spread=min_score_spread,
             industry_max_weight=industry_max_weight,
+            enforce_locked_residual_slot_budget=enforce_locked_residual_slot_budget,
             score_column=NATIVE_SIGNAL_COLUMN,
         ),
+        rebalance_audit=rebalance_audit,
     )
     return NativePortfolioRunResult(config=config, artifacts=artifacts)
 
@@ -1060,6 +1265,7 @@ def run_native_portfolio_analysis(
     min_liquidity_filter: float = 0.0,
     min_score_spread: float = 0.0,
     industry_max_weight: float | None = None,
+    enforce_locked_residual_slot_budget: bool = True,
 ) -> NativePortfolioRunResult:
     patch_qlib_resam_compat()
     patch_qlib_index_data_compat()
@@ -1080,6 +1286,7 @@ def run_native_portfolio_analysis(
         min_liquidity_filter=min_liquidity_filter,
         min_score_spread=min_score_spread,
         industry_max_weight=industry_max_weight,
+        enforce_locked_residual_slot_budget=enforce_locked_residual_slot_budget,
     )
     recorder.save_objects(**{"pred.pkl": signal, "native_quote.pkl": quote_frame})
     artifacts = run_portana_record(
@@ -1107,6 +1314,21 @@ def run_native_portfolio_analysis(
             min_liquidity_filter=min_liquidity_filter,
             min_score_spread=min_score_spread,
             industry_max_weight=industry_max_weight,
+            enforce_locked_residual_slot_budget=enforce_locked_residual_slot_budget,
+            score_column=NATIVE_SIGNAL_COLUMN,
+        ),
+        rebalance_audit=build_rebalance_audit(
+            signal,
+            quote_frame,
+            artifacts.positions_normal,
+            topk=topk,
+            hold_buffer_rank=hold_buffer_rank,
+            rebalance_interval_steps=rebalance_interval_steps,
+            only_tradable=only_tradable,
+            min_liquidity_filter=min_liquidity_filter,
+            min_score_spread=min_score_spread,
+            industry_max_weight=industry_max_weight,
+            enforce_locked_residual_slot_budget=enforce_locked_residual_slot_budget,
             score_column=NATIVE_SIGNAL_COLUMN,
         ),
         recorder_id=artifacts.recorder_id,

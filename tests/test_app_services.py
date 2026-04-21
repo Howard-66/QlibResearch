@@ -136,7 +136,7 @@ def test_get_run_detail_does_not_depend_on_listing_all_runs(monkeypatch, tmp_pat
     assert detail.quick_summary.baseline_metrics["walk_forward_net_total_return"] == pytest.approx(0.18)
     assert detail.research_summary.verdict == "incumbent"
     assert detail.research_summary.current_problem == "等待候选胜出"
-    assert detail.artifact_inventory == []
+    assert detail.artifact_inventory
 
 
 def test_get_recipe_detail_backfills_drawdowns_from_native_reports(monkeypatch):

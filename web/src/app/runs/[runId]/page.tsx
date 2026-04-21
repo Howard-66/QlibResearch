@@ -1,11 +1,11 @@
 import Link from "next/link";
 
-import { Bot, CalendarCheck } from "lucide-react";
+import { ChartPayloadPanel } from "@/components/charts/chart-payload-panel";
 import { LatestSummaryLayout } from "@/components/common/latest-summary-layout";
 import { MarkdownPreviewDialog } from "@/components/common/markdown-preview-dialog";
-import { PageHeader } from "@/components/common/page-header";
 import { DataTable } from "@/components/data/data-table";
 import { NodeCard } from "@/components/diagnostics/node-card";
+import { RunAnomalyPeriods } from "@/components/runs/run-anomaly-periods";
 import { RunArtifactInventory } from "@/components/runs/run-artifact-inventory";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -13,6 +13,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { getRunDetail } from "@/lib/api";
 import { formatNumber, formatPathName, formatPercent } from "@/lib/format";
 import { parseLatestSummaryMarkdown } from "@/lib/latest-summary";
+import { buildRecommendationHref } from "@/lib/utils";
 import { describeWorkflowConfigKey } from "@/lib/workflow-config-descriptions";
 
 export default async function RunDetailPage({ params }: { params: Promise<{ runId: string }> }) {
@@ -22,6 +23,13 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
     detail.analysis_reports.find((item) => item.name === "latest_summary.md")?.content_preview ?? null;
   const parsedLatestSummary = latestSummaryMarkdown ? parseLatestSummaryMarkdown(latestSummaryMarkdown) : null;
   const summaryVerdict = parsedLatestSummary?.verdict || detail.research_summary.verdict;
+  const anomalyPeriods = Array.isArray(detail.experiment_scorecard?.anomaly_periods)
+    ? (detail.experiment_scorecard.anomaly_periods as Array<Record<string, unknown>>)
+    : [];
+  const chartList = Object.values(detail.run_level_charts);
+  const exposureCharts = chartList.filter((chart) => chart.key.includes("exposure") || chart.key.includes("holding_trend"));
+  const executionCharts = chartList.filter((chart) => chart.key.includes("blocked_sell") || chart.key.includes("realization_bridge"));
+  const diagnosisAction = detail.recommendation_actions.find((action) => action.task_kind === "run_research_analysis");
 
   return (
     <div className="space-y-6">
@@ -29,15 +37,13 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
         <Button asChild>
           <Link href={`/tasks?create=run_native_workflow&sourceType=run&sourceId=${encodeURIComponent(detail.run_id)}`}>
             Create Workflow Task
-            <CalendarCheck className="h-4 w-4" />
           </Link>
         </Button>
-        <Button variant="outline" asChild>
-          <Link href={`/tasks?create=run_research_analysis&sourceType=run&sourceId=${encodeURIComponent(detail.run_id)}`}>
-            Generate Research Task
-            <Bot className="h-4 w-4" />
-          </Link>
-        </Button>
+        {diagnosisAction ? (
+          <Button variant="outline" asChild>
+            <Link href={buildRecommendationHref(diagnosisAction)}>Run Diagnosis Task</Link>
+          </Button>
+        ) : null}
         {detail.recipes.map((recipe) => (
           <Button key={recipe.recipe_name} variant="outline" asChild>
             <Link href={`/runs/${detail.run_id}/recipes/${recipe.recipe_name}`}>{recipe.recipe_name}</Link>
@@ -48,8 +54,8 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <SummaryCard title="Universe" value={String(detail.quick_summary.universe_profile ?? "—")} />
         <SummaryCard title="Panel" value={formatPathName(detail.quick_summary.panel_path)} />
-        <SummaryCard title="Recipes" value={`${detail.recipes.length}`} />
-        <SummaryCard title="Artifacts" value={`${detail.quick_summary.artifact_ready_count}/${detail.quick_summary.artifact_total_count}`} />
+        <SummaryCard title="Avg Actual Holds" value={formatNumber(detail.execution_anomaly_summary.avg_actual_hold_count, 2)} />
+        <SummaryCard title="Top1 Sector Weight" value={formatPercent(detail.quick_summary.top1_sector_weight, 2)} />
       </div>
 
       <Card className="glass-card">
@@ -58,6 +64,11 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
             <div className="flex flex-wrap items-center gap-2">
               <CardTitle className="text-base">Research Summary</CardTitle>
               {summaryVerdict ? <Badge variant="info">{summaryVerdict}</Badge> : null}
+              {detail.execution_anomaly_summary.severity ? (
+                <Badge variant={detail.execution_anomaly_summary.severity === "low" ? "success" : detail.execution_anomaly_summary.severity === "medium" ? "warning" : "destructive"}>
+                  {detail.execution_anomaly_summary.severity}
+                </Badge>
+              ) : null}
             </div>
             {latestSummaryMarkdown ? (
               <MarkdownPreviewDialog
@@ -72,25 +83,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
           {latestSummaryMarkdown ? (
             <LatestSummaryLayout content={latestSummaryMarkdown} mode="compact" />
           ) : (
-            <>
-              <div className="grid gap-4 xl:grid-cols-2">
-                <SummaryList title="Key Findings" items={detail.research_summary.key_findings} />
-                <SummaryList title="Risks" items={detail.research_summary.risks} />
-              </div>
-              <div className="grid gap-4 xl:grid-cols-2">
-                <SummaryCard title="Current Problem" value={detail.research_summary.current_problem ?? "—"} />
-                <SummaryCard title="Recommended Action" value={detail.research_summary.recommended_action ?? "—"} />
-              </div>
-              {detail.research_summary.recommended_next_actions.length ? (
-                <DataTable
-                  table={{
-                    columns: ["next_action"],
-                    rows: detail.research_summary.recommended_next_actions.map((item) => ({ next_action: item })),
-                  }}
-                  maxRows={8}
-                />
-              ) : null}
-            </>
+            <SummaryList title="Key Findings" items={detail.research_summary.key_findings} />
           )}
         </CardContent>
       </Card>
@@ -136,6 +129,48 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
         </CardContent>
       </Card>
 
+      <div className="grid gap-4 xl:grid-cols-2">
+        {detail.nodes.map((node) => (
+          <NodeCard key={node.key} node={node} />
+        ))}
+      </div>
+
+      {exposureCharts.length ? (
+        <div className="grid gap-4 xl:grid-cols-2">
+          {exposureCharts.map((chart) => (
+            <ChartPayloadPanel key={chart.key} chart={chart} />
+          ))}
+        </div>
+      ) : null}
+
+      {executionCharts.length ? (
+        <div className="grid gap-4 xl:grid-cols-2">
+          {executionCharts.map((chart) => (
+            <ChartPayloadPanel key={chart.key} chart={chart} />
+          ))}
+        </div>
+      ) : null}
+
+      <div className="grid gap-4 xl:grid-cols-[1.2fr,0.8fr]">
+        <Card className="glass-card">
+          <CardHeader>
+            <CardTitle className="text-base">异常期列表</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <RunAnomalyPeriods anomalyPeriods={anomalyPeriods} firstRecipeName={detail.recipes[0]?.recipe_name} />
+          </CardContent>
+        </Card>
+
+        <Card className="glass-card">
+          <CardHeader>
+            <CardTitle className="text-base">Artifact Inventory</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <RunArtifactInventory runId={detail.run_id} />
+          </CardContent>
+        </Card>
+      </div>
+
       <Card className="glass-card">
         <CardHeader>
           <CardTitle className="text-base">Config Summary</CardTitle>
@@ -163,49 +198,6 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
               />
             </div>
           </details>
-        </CardContent>
-      </Card>
-
-      <div className="grid gap-4 xl:grid-cols-2">
-        {detail.nodes.map((node) => (
-          <NodeCard key={node.key} node={node} />
-        ))}
-      </div>
-
-      <div className="grid gap-4 xl:grid-cols-2">
-        <Card className="glass-card">
-          <CardHeader>
-            <CardTitle className="text-base">Risk & Exposure</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <DataTable
-              table={{
-                columns: ["metric", "value"],
-                rows: [
-                  { metric: "research_status", value: detail.quick_summary.research_status ?? "—" },
-                  { metric: "incumbent_recipe", value: detail.quick_summary.incumbent_recipe ?? "—" },
-                  { metric: "wf_rank_ic_ir", value: formatNumber(detail.quick_summary.baseline_metrics.walk_forward_rank_ic_ir, 3) },
-                  { metric: "wf_net_return", value: formatPercent(detail.quick_summary.baseline_metrics.walk_forward_net_total_return, 2) },
-                  { metric: "wf_max_drawdown", value: formatPercent(detail.quick_summary.baseline_metrics.walk_forward_max_drawdown, 2) },
-                ],
-              }}
-              maxRows={10}
-            />
-          </CardContent>
-        </Card>
-        <Card className="glass-card">
-          <CardHeader>
-            <CardTitle className="text-base">Experiment Recommendations</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <SummaryList title="Next Actions" items={detail.research_summary.recommended_next_actions} />
-          </CardContent>
-        </Card>
-      </div>
-
-      <Card className="glass-card">
-        <CardContent>
-          <RunArtifactInventory runId={detail.run_id} />
         </CardContent>
       </Card>
     </div>

@@ -35,6 +35,7 @@ from qlib_research.core.notebook_workflow import (
     load_feature_config,
 )
 from qlib_research.core.qlib_native_backtest import (
+    build_rebalance_audit,
     build_native_portfolio_diagnostics,
     build_native_quote_frame,
     build_native_signal_frame,
@@ -161,6 +162,7 @@ class NativeWorkflowConfig:
     min_liquidity_filter: float = 0.0
     min_score_spread: float = 0.0
     industry_max_weight: float | None = None
+    enforce_locked_residual_slot_budget: bool = True
     diagnostics_enabled: bool = True
     run_validation_comparison: bool = True
     validation_execution_lag_steps: int = 1
@@ -203,6 +205,7 @@ class NativeRecipeArtifacts:
     holding_count_drift: pd.DataFrame = field(default_factory=pd.DataFrame)
     sector_exposure_history: pd.DataFrame = field(default_factory=pd.DataFrame)
     regime_gate_diagnostics: pd.DataFrame = field(default_factory=pd.DataFrame)
+    rebalance_audit: pd.DataFrame = field(default_factory=pd.DataFrame)
     experiment_scorecard: dict[str, Any] = field(default_factory=dict)
 
 
@@ -344,6 +347,7 @@ def _compact_native_recipe_artifacts(artifacts: NativeRecipeArtifacts) -> Native
         native_provider_dir=artifacts.native_provider_dir,
         benchmark_frames={},
         native_summary=artifacts.native_summary,
+        rebalance_audit=artifacts.rebalance_audit,
     )
 
 
@@ -1232,49 +1236,30 @@ def _mean_return_for_codes(signal_slice: pd.DataFrame, codes: Iterable[str], col
 
 def build_signal_realization_bridge(
     predictions: pd.DataFrame,
-    positions_normal: dict[pd.Timestamp, Any],
+    rebalance_audit: pd.DataFrame,
     report_frame: pd.DataFrame,
-    *,
-    topk: int,
-    hold_buffer_rank: int | None = None,
-    rebalance_interval_steps: int = 1,
-    min_liquidity_filter: float = 0.0,
-    min_score_spread: float = 0.0,
-    industry_max_weight: float | None = None,
 ) -> pd.DataFrame:
-    if predictions.empty or not positions_normal:
+    if predictions.empty or rebalance_audit.empty:
         return pd.DataFrame()
 
     frame = predictions.copy()
     frame["feature_date"] = pd.to_datetime(frame["feature_date"], errors="coerce")
     frame = frame.dropna(subset=["feature_date"]).sort_values(["feature_date", "score"], ascending=[True, False])
-    trade_dates = sorted(pd.to_datetime(list(positions_normal.keys())))
-    signal_dates = sorted(frame["feature_date"].dropna().unique())
-    if len(signal_dates) < 2 or not trade_dates:
-        return pd.DataFrame()
-
+    audit = rebalance_audit.copy()
+    audit["signal_date"] = pd.to_datetime(audit["signal_date"], errors="coerce")
+    audit["trade_date"] = pd.to_datetime(audit["trade_date"], errors="coerce")
     rows: list[dict[str, Any]] = []
-    previous_actual_holdings: list[str] = []
-    for signal_date, trade_date in zip(signal_dates[:-1], trade_dates):
+    for audit_row in audit.to_dict(orient="records"):
+        signal_date = pd.Timestamp(audit_row["signal_date"])
+        trade_date = pd.Timestamp(audit_row["trade_date"])
         signal_slice = frame.loc[frame["feature_date"] == signal_date].copy()
         if signal_slice.empty:
             continue
         signal_slice = signal_slice.set_index(signal_slice["instrument"].astype(str))
-        target_holdings = select_topk_with_buffer(
-            signal_slice,
-            current_holdings=previous_actual_holdings,
-            topk=topk,
-            hold_buffer_rank=hold_buffer_rank,
-            min_liquidity_filter=min_liquidity_filter,
-            min_score_spread=min_score_spread,
-            industry_max_weight=industry_max_weight,
-            score_column="score",
-        )
-        actual_holdings = _safe_position_holdings_snapshot(positions_normal.get(pd.Timestamp(trade_date)))
-        current_set = set(target_holdings)
-        previous_set = set(previous_actual_holdings)
-        new_codes = sorted(current_set - previous_set)
-        carry_codes = sorted(current_set & previous_set)
+        target_holdings = [code for code in str(audit_row.get("target_holdings") or "").split(",") if code]
+        pre_trade_holdings = [code for code in str(audit_row.get("pre_trade_holdings") or "").split(",") if code]
+        new_codes = sorted(set(target_holdings) - set(pre_trade_holdings))
+        carry_codes = sorted(set(target_holdings) & set(pre_trade_holdings))
         report_row = _report_row_for_trade_date(report_frame, pd.Timestamp(trade_date))
         target_mean_return = _mean_return_for_codes(signal_slice, target_holdings, "future_return_4w")
         gross_return = pd.to_numeric(pd.Series([report_row.get("gross_return")]), errors="coerce").iloc[0] if report_row else np.nan
@@ -1293,45 +1278,52 @@ def build_signal_realization_bridge(
                 "realized_portfolio_return": net_return,
                 "new_position_count": int(len(new_codes)),
                 "carry_position_count": int(len(carry_codes)),
+                "post_trade_hold_count": int(audit_row.get("post_trade_hold_count") or 0),
             }
         )
-        previous_actual_holdings = actual_holdings
 
     return pd.DataFrame(rows)
 
 
-def build_holding_count_drift(portfolio_diagnostics: pd.DataFrame) -> pd.DataFrame:
-    if portfolio_diagnostics.empty:
+def build_holding_count_drift(rebalance_audit: pd.DataFrame) -> pd.DataFrame:
+    if rebalance_audit.empty:
         return pd.DataFrame()
     candidate_columns = [
         "signal_date",
         "trade_date",
         "target_hold_count",
+        "post_trade_hold_count",
         "actual_hold_count",
+        "locked_residual_count",
         "residual_hold_count",
-        "blocked_sell_count",
+        "sell_blocked_by_limit_count",
+        "sell_blocked_by_suspend_count",
+        "sell_blocked_by_volume_count",
+        "sell_blocked_total_count",
+        "sell_blocked_codes",
+        "new_buy_count",
+        "carry_count",
         "topk_overlap_prev",
         "score_dispersion",
         "topk_unique_score_ratio",
     ]
-    existing_columns = [column for column in candidate_columns if column in portfolio_diagnostics.columns]
-    return portfolio_diagnostics[existing_columns].copy()
+    existing_columns = [column for column in candidate_columns if column in rebalance_audit.columns]
+    return rebalance_audit[existing_columns].copy()
 
 
 def build_sector_exposure_history(
     predictions: pd.DataFrame,
-    positions_normal: dict[pd.Timestamp, Any],
+    rebalance_audit: pd.DataFrame,
 ) -> pd.DataFrame:
-    if predictions.empty or not positions_normal:
+    if predictions.empty or rebalance_audit.empty:
         return pd.DataFrame()
 
     frame = predictions.copy()
     frame["feature_date"] = pd.to_datetime(frame["feature_date"], errors="coerce")
     frame = frame.dropna(subset=["feature_date"])
-    trade_dates = sorted(pd.to_datetime(list(positions_normal.keys())))
-    signal_dates = sorted(frame["feature_date"].dropna().unique())
-    if len(signal_dates) < 2 or not trade_dates:
-        return pd.DataFrame()
+    audit = rebalance_audit.copy()
+    audit["signal_date"] = pd.to_datetime(audit["signal_date"], errors="coerce")
+    audit["trade_date"] = pd.to_datetime(audit["trade_date"], errors="coerce")
 
     all_sectors = sorted(
         {
@@ -1343,7 +1335,9 @@ def build_sector_exposure_history(
     finance_sectors = {"银行", "非银金融"}
     rows: list[dict[str, Any]] = []
 
-    for signal_date, trade_date in zip(signal_dates[:-1], trade_dates):
+    for audit_row in audit.to_dict(orient="records"):
+        signal_date = pd.Timestamp(audit_row["signal_date"])
+        trade_date = pd.Timestamp(audit_row["trade_date"])
         signal_slice = frame.loc[frame["feature_date"] == signal_date].copy()
         if signal_slice.empty:
             continue
@@ -1355,7 +1349,7 @@ def build_sector_exposure_history(
             .set_index("instrument")["l1_name"]
             .to_dict()
         )
-        actual_holdings = _safe_position_holdings_snapshot(positions_normal.get(pd.Timestamp(trade_date)))
+        actual_holdings = [code for code in str(audit_row.get("post_trade_holdings") or "").split(",") if code]
         sector_weights: dict[str, float] = {}
         if actual_holdings:
             equal_weight = 1.0 / len(actual_holdings)
@@ -2017,6 +2011,7 @@ def run_native_recipe(
             min_liquidity_filter=config.min_liquidity_filter,
             min_score_spread=config.min_score_spread,
             industry_max_weight=config.industry_max_weight,
+            enforce_locked_residual_slot_budget=config.enforce_locked_residual_slot_budget,
         )
         native_results[bundle_name] = native_result
         native_report = _build_native_report_frame(native_result.artifacts.report_normal, config.account)
@@ -2044,16 +2039,39 @@ def run_native_recipe(
                 topk=config.topk,
                 hold_buffer_rank=config.hold_buffer_rank,
                 rebalance_interval_steps=config.rebalance_interval_weeks,
+                only_tradable=config.native_only_tradable,
+                min_liquidity_filter=config.min_liquidity_filter,
+                min_score_spread=config.min_score_spread,
+                industry_max_weight=config.industry_max_weight,
+                enforce_locked_residual_slot_budget=config.enforce_locked_residual_slot_budget,
             ),
         )
         portfolio_diag["recipe"] = recipe.name
         portfolio_diag["bundle"] = bundle_name
         portfolio_diag_frames.append(portfolio_diag)
+        rebalance_audit = _prefer_non_empty_frame(
+            native_result.artifacts.rebalance_audit,
+            build_rebalance_audit(
+                native_signal,
+                native_quote_frame,
+                native_result.artifacts.positions_normal,
+                topk=config.topk,
+                hold_buffer_rank=config.hold_buffer_rank,
+                rebalance_interval_steps=config.rebalance_interval_weeks,
+                only_tradable=config.native_only_tradable,
+                min_liquidity_filter=config.min_liquidity_filter,
+                min_score_spread=config.min_score_spread,
+                industry_max_weight=config.industry_max_weight,
+                enforce_locked_residual_slot_budget=config.enforce_locked_residual_slot_budget,
+            ),
+        )
+        if not rebalance_audit.empty:
+            rebalance_audit["recipe"] = recipe.name
+            rebalance_audit["bundle"] = bundle_name
         signal_realization = build_signal_realization_bridge(
             bundle["predictions"],
-            native_result.artifacts.positions_normal,
-            native_result.artifacts.report_normal,
-            topk=config.topk,
+            rebalance_audit,
+            native_report,
         )
         if not signal_realization.empty:
             signal_realization["recipe"] = recipe.name
@@ -2064,7 +2082,7 @@ def run_native_recipe(
             holding_drift["recipe"] = recipe.name
             holding_drift["bundle"] = bundle_name
             holding_drift_frames.append(holding_drift)
-        sector_exposure = build_sector_exposure_history(bundle["predictions"], native_result.artifacts.positions_normal)
+        sector_exposure = build_sector_exposure_history(bundle["predictions"], rebalance_audit)
         if not sector_exposure.empty:
             sector_exposure["recipe"] = recipe.name
             sector_exposure["bundle"] = bundle_name
@@ -2101,6 +2119,24 @@ def run_native_recipe(
         if sector_exposure_frames
         else pd.DataFrame()
     )
+    rebalance_audit_history = (
+        pd.concat(
+            [
+                frame
+                for frame in [
+                    _prefer_non_empty_frame(
+                        native_results[bundle_name].artifacts.rebalance_audit,
+                        pd.DataFrame(),
+                    ).assign(recipe=recipe.name, bundle=bundle_name)
+                    for bundle_name in native_results
+                ]
+                if not frame.empty
+            ],
+            ignore_index=True,
+        )
+        if native_results
+        else pd.DataFrame()
+    )
     regime_gate_diagnostics = (
         pd.concat(regime_gate_frames, ignore_index=True)
         if regime_gate_frames
@@ -2122,6 +2158,7 @@ def run_native_recipe(
     portfolio_diagnostics.to_csv(recipe_dir / "portfolio_diagnostics.csv", index=False)
     slice_regime_summary.to_csv(recipe_dir / "slice_regime_summary.csv", index=False)
     execution_diff_summary.to_csv(recipe_dir / "execution_diff_summary.csv", index=False)
+    rebalance_audit_history.to_csv(recipe_dir / "rebalance_audit.csv", index=False)
     signal_realization_bridge.to_csv(recipe_dir / "signal_realization_bridge.csv", index=False)
     holding_count_drift.to_csv(recipe_dir / "holding_count_drift.csv", index=False)
     sector_exposure_history.to_csv(recipe_dir / "sector_exposure_history.csv", index=False)
@@ -2189,6 +2226,7 @@ def run_native_recipe(
         holding_count_drift=holding_count_drift,
         sector_exposure_history=sector_exposure_history,
         regime_gate_diagnostics=regime_gate_diagnostics,
+        rebalance_audit=rebalance_audit_history,
     )
 
 
