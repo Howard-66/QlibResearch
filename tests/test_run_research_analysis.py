@@ -1,10 +1,22 @@
 from __future__ import annotations
 
+import json
+import importlib.util
+import sys
 import types
 import subprocess
 from pathlib import Path
 
-from scripts import run_research_analysis
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.modules.pop("scripts", None)
+sys.path.insert(0, str(PROJECT_ROOT))
+_SPEC = importlib.util.spec_from_file_location(
+    "run_research_analysis",
+    PROJECT_ROOT / "scripts" / "run_research_analysis.py",
+)
+assert _SPEC and _SPEC.loader
+run_research_analysis = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(run_research_analysis)
 
 
 def test_build_local_markdown_uses_research_memo_sections():
@@ -45,6 +57,75 @@ def test_build_cli_prompt_requires_structured_markdown_without_json():
     assert "`## Recommended Next Actions`" in prompt
     assert "不要输出 JSON" in prompt
     assert "当前 source_kind 的重点" in prompt
+
+
+def test_build_cli_prompt_requires_native_workflow_json_contract():
+    prompt = run_research_analysis._build_cli_prompt(
+        {
+            "source_kind": "run",
+            "run_id": "demo_run",
+            "evidence_pack": {"run_id": "demo_run", "recipe_matrix": []},
+        },
+        template="native_workflow_system_report",
+        skills=["native-workflow-artifact-analysis"],
+    )
+
+    assert "严格只输出一个 JSON 对象" in prompt
+    assert "native-workflow-artifact-analysis" in prompt
+    assert "execution_diff_summary.csv" in prompt
+    assert "新旧 run summary 比较" in prompt
+    assert "四舍五入" in prompt
+    assert "markdown" in prompt
+
+
+def test_native_workflow_skill_path_prefers_repo_copy():
+    assert run_research_analysis.NATIVE_WORKFLOW_ANALYSIS_SKILL_PATH == (
+        PROJECT_ROOT / "skills" / "native-workflow-artifact-analysis" / "SKILL.md"
+    )
+
+
+def test_evidence_pack_detects_csi300_fixture_risks():
+    pack = run_research_analysis.build_evidence_pack(
+        Path("artifacts/native_workflow/csi300_2016_20260410_a1_industry")
+    )
+
+    assert pack["lead_recipe"] == "rank_blended"
+    assert pack["verdict"] == "investigate"
+    assert len(pack["recipe_matrix"]) == 5
+    roles = {row["recipe"]: row["role"] for row in pack["recipe_matrix"]}
+    assert roles["rank_blended"] == "lead"
+    assert roles["binary_4w"] == "diagnose_only"
+    assert roles["mae_4w"] == "filter"
+    assert any(gap["type"] == "empty_execution_diff" for gap in pack["evidence_gaps"])
+    assert any("signal_realization_bridge" in gap.get("message", "") for gap in pack["evidence_gaps"])
+
+
+def test_native_workflow_report_uses_readable_chinese_summary():
+    pack = run_research_analysis.build_evidence_pack(
+        Path("artifacts/native_workflow/csi300_2016_20260410_a1_industry")
+    )
+
+    report = run_research_analysis.build_system_report_from_evidence_pack(pack)
+    markdown = report["markdown"]
+
+    assert "## Executive Verdict" in markdown
+    assert "rank_blended 暂时最适合作为下一轮主线" in markdown
+    assert "67.5%" in markdown
+    assert "0.6745489921187544" not in markdown
+    assert "walk_forward_performance_metrics.csv" not in markdown
+    assert "新旧 run summary" not in markdown
+
+
+def test_evidence_pack_detects_csi500_investigate_fixture():
+    pack = run_research_analysis.build_evidence_pack(
+        Path("artifacts/native_workflow/csi500_2016_20260410_a1_industry")
+    )
+
+    assert pack["lead_recipe"] == "rank_blended"
+    assert pack["verdict"] == "investigate"
+    roles = {row["recipe"]: row["role"] for row in pack["recipe_matrix"]}
+    assert roles["binary_4w"] == "diagnose_only"
+    assert any(row["walk_forward_max_drawdown"] <= -0.30 for row in pack["recipe_matrix"])
 
 
 def test_invoke_codex_cli_runs_subprocess(monkeypatch):
@@ -97,6 +178,118 @@ def test_invoke_claude_cli_runs_subprocess(monkeypatch):
     assert calls
     assert calls[0][0].endswith("claude")
     assert "-p" in calls[0]
+
+
+def test_run_single_native_workflow_analysis_falls_back_on_invalid_cli_json(monkeypatch, tmp_path):
+    pack = {
+        "run_id": "demo_run",
+        "lead_recipe": "rank_blended",
+        "verdict": "investigate",
+        "recipe_matrix": [
+            {
+                "rank": 1,
+                "recipe": "rank_blended",
+                "role": "lead",
+                "score": 0.1,
+                "walk_forward_net_total_return": 0.2,
+                "walk_forward_max_drawdown": -0.1,
+                "walk_forward_topk_mean_excess_return_4w": -0.01,
+                "signal_unique_mean": 0.9,
+                "actual_hold_max": 10,
+            }
+        ],
+        "recipe_dossiers": {
+            "rank_blended": {
+                "metrics": {
+                    "walk_forward_rank_ic_ir": 0.2,
+                    "walk_forward_topk_mean_excess_return_4w": -0.01,
+                    "walk_forward_net_total_return": 0.2,
+                    "walk_forward_max_drawdown": -0.1,
+                },
+                "latest_snapshot": {"top_industries": {"银行": 4}, "score_gap_10_20": 0.02, "target_rows": 10},
+            }
+        },
+        "system_findings": ["finding"],
+        "evidence_gaps": [{"message": "gap"}],
+        "next_experiments": [],
+        "evidence_refs": [],
+    }
+
+    def fake_prepare(payload, *, cwd, output_dir):
+        return {
+            **payload,
+            "evidence_pack": pack,
+            "run_artifact_dir": str(cwd),
+            "skill_name": "native-workflow-artifact-analysis",
+            "skill_path": "/tmp/skill/SKILL.md",
+            "evidence_pack_path": str(output_dir / "evidence_pack.json"),
+            "recipe_matrix_path": str(output_dir / "recipe_matrix.csv"),
+        }, {}
+
+    monkeypatch.setattr(run_research_analysis, "_prepare_native_workflow_payload", fake_prepare)
+    monkeypatch.setattr(
+        run_research_analysis,
+        "_invoke_codex_cli",
+        lambda payload, template, skills, cwd: {"engine": "codex_cli", "command": ["codex"], "content": "not json"},
+    )
+
+    result = run_research_analysis._run_single_analysis(
+        payload={"source_kind": "run", "run_id": "demo_run"},
+        output_dir=tmp_path,
+        analysis_template="native_workflow_system_report",
+        analysis_engine="codex_cli",
+        skills=[],
+        cwd=Path("/tmp/demo_run"),
+    )
+
+    summary = json.loads((tmp_path / "latest_summary.json").read_text(encoding="utf-8"))
+    assert result["engine_used"] == "codex_cli"
+    assert summary["lead_recipe"] == "rank_blended"
+    assert summary["validation_warnings"]
+    assert "# demo_run 系统诊断报告" in (tmp_path / "latest_summary.md").read_text(encoding="utf-8")
+
+
+def test_run_single_native_workflow_analysis_writes_valid_json_report(monkeypatch, tmp_path):
+    report = {
+        "headline": "Demo headline",
+        "verdict": "investigate",
+        "lead_recipe": "rank_blended",
+        "recipe_rankings": [],
+        "system_findings": ["finding"],
+        "live_feasibility": {"status": "caution", "summary": "summary", "checks": []},
+        "next_experiments": [],
+        "evidence_refs": [],
+        "markdown": "# demo_run 系统诊断报告\n\n## Executive Verdict\n- verdict: investigate\n",
+    }
+
+    def fake_prepare(payload, *, cwd, output_dir):
+        return {
+            **payload,
+            "evidence_pack": {"run_id": "demo_run", "recipe_matrix": []},
+            "evidence_pack_path": str(output_dir / "evidence_pack.json"),
+            "recipe_matrix_path": str(output_dir / "recipe_matrix.csv"),
+        }, {}
+
+    monkeypatch.setattr(run_research_analysis, "_prepare_native_workflow_payload", fake_prepare)
+    monkeypatch.setattr(
+        run_research_analysis,
+        "_invoke_codex_cli",
+        lambda payload, template, skills, cwd: {"engine": "codex_cli", "command": ["codex"], "content": json.dumps(report)},
+    )
+
+    run_research_analysis._run_single_analysis(
+        payload={"source_kind": "run", "run_id": "demo_run"},
+        output_dir=tmp_path,
+        analysis_template="native_workflow_system_report",
+        analysis_engine="codex_cli",
+        skills=[],
+        cwd=Path("/tmp/demo_run"),
+    )
+
+    summary = json.loads((tmp_path / "latest_summary.json").read_text(encoding="utf-8"))
+    assert summary["headline"] == "Demo headline"
+    assert summary["lead_recipe"] == "rank_blended"
+    assert (tmp_path / "latest_summary.md").read_text(encoding="utf-8").startswith("# demo_run")
 
 
 def test_run_batch_analysis_runs_run_and_all_recipes(monkeypatch, tmp_path):

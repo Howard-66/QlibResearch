@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 TaskKind = Literal["export_panel", "run_native_workflow", "run_convergence", "publish_model", "sync_model", "run_research_analysis"]
 TaskStatus = Literal["queued", "running", "stopping", "succeeded", "failed", "cancelled"]
 DiagnosticStatus = Literal["healthy", "warning", "danger", "missing", "info"]
-ResearchVerdict = Literal["incumbent", "promoted", "rejected", "needs_explanation", "hold", "reject", "investigate"]
+ResearchVerdict = Literal["incumbent", "promoted", "promote", "rejected", "needs_explanation", "hold", "reject", "investigate"]
 NodeKey = Literal[
     "panel_input",
     "label_definition",
@@ -362,7 +362,13 @@ class RunResearchAnalysisTaskRequest(BaseModel):
     run_id: str | None = None
     recipe_name: str | None = None
     compare_items: list[dict[str, Any]] | None = None
-    analysis_template: Literal["investment_report", "experiment_review", "ui_insight", "anomaly_diagnosis"] = "investment_report"
+    analysis_template: Literal[
+        "investment_report",
+        "experiment_review",
+        "ui_insight",
+        "anomaly_diagnosis",
+        "native_workflow_system_report",
+    ] = "investment_report"
     analysis_engine: Literal["auto", "codex_cli", "claude_cli"] = "codex_cli"
     skills: list[str] | None = None
     output_dir: str | None = None

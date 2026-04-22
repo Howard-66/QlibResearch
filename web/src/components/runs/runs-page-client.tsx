@@ -21,9 +21,12 @@ const artifactVariantMap = {
 const researchVariantMap = {
   incumbent: "info",
   promoted: "success",
+  promote: "success",
   rejected: "destructive",
   needs_explanation: "warning",
   hold: "neutral",
+  reject: "destructive",
+  investigate: "warning",
 } as const;
 
 const portfolioVariantMap = {
@@ -149,10 +152,14 @@ function renderQuickJudgeContent(selected: RunListItem) {
               source_id: selected.run_id,
               prefill_config: {
                 display_name: `Diagnose ${selected.run_id}`,
-                description: "Diagnose execution drift and exposure anomalies",
-                analysis_template: "anomaly_diagnosis",
+                description: "Generate a run-level native workflow system diagnosis",
+                analysis_template: "native_workflow_system_report",
+                analysis_engine: "auto",
+                batch_mode: "run_only",
+                include_all_recipes: false,
+                skills: ["native-workflow-artifact-analysis"],
               },
-              reason: "先补一份异常诊断，能更快确认需要如何调整 Universe Exit Policy 或持仓上限。",
+              reason: "生成 run 级系统诊断，优先比较 recipe、信号兑现、持仓漂移和实盘可行性。",
             })}
           >
             Run Diagnosis Task

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Native Workflow Artifact Analysis"
+  short_description: "Analyze Qlib native workflow run artifacts"
+  default_prompt: "Use $native-workflow-artifact-analysis to produce a run-level system diagnosis for a native_workflow artifact directory."

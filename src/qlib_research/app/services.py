@@ -83,12 +83,15 @@ TASK_QUEUE_FILENAME = "queue.json"
 RESEARCH_VERDICT_VALUES = {
     "incumbent",
     "promoted",
+    "promote",
     "rejected",
     "needs_explanation",
     "hold",
     "reject",
     "investigate",
 }
+NATIVE_WORKFLOW_SYSTEM_TEMPLATE = "native_workflow_system_report"
+NATIVE_WORKFLOW_ANALYSIS_SKILL_NAME = "native-workflow-artifact-analysis"
 
 REQUIRED_RECIPE_ARTIFACTS = {
     "native_workflow_manifest.json",
@@ -332,14 +335,35 @@ def _normalize_markdown_heading(value: str) -> str:
         return "recommended_action"
     if normalized in {"current problem", "当前问题", "核心问题", "当前主要问题", "current issue"}:
         return "current_problem"
-    if normalized in {"key findings", "关键发现", "核心发现", "主要结论", "结论摘要", "核心判断"}:
+    if normalized in {
+        "key findings",
+        "关键发现",
+        "核心发现",
+        "主要结论",
+        "结论摘要",
+        "核心判断",
+        "executive verdict",
+        "system diagnosis",
+    }:
         return "key_findings"
-    if normalized in {"risks", "风险", "主要风险", "风险与约束", "当前研究的主要问题", "当前结果的主要问题", "方法学约束", "方法学问题"}:
+    if normalized in {
+        "risks",
+        "风险",
+        "主要风险",
+        "风险与约束",
+        "当前研究的主要问题",
+        "当前结果的主要问题",
+        "方法学约束",
+        "方法学问题",
+        "live portfolio feasibility",
+        "evidence gaps",
+    }:
         return "risks"
     if normalized in {
         "recommended next actions",
         "next actions",
         "recommended next experiments",
+        "next experiment roadmap",
         "后续动作",
         "下一步动作",
         "下一步实验",
@@ -483,6 +507,38 @@ def _merge_research_summaries(primary: ResearchSummary, markdown_payload: dict[s
     )
 
 
+def _parse_latest_summary_json(base_dir: Path) -> dict[str, Any]:
+    payload = _safe_read_json(_analysis_dir(base_dir) / "latest_summary.json", {})
+    if not isinstance(payload, dict) or not payload:
+        return {}
+    live_feasibility = payload.get("live_feasibility") if isinstance(payload.get("live_feasibility"), dict) else {}
+    next_experiments = payload.get("next_experiments") if isinstance(payload.get("next_experiments"), list) else []
+    next_actions: list[str] = []
+    for item in next_experiments:
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+            rationale = str(item.get("rationale") or "").strip()
+            priority = str(item.get("priority") or "").strip()
+            label = "：".join(part for part in (priority, name) if part)
+            if rationale:
+                label = f"{label}。{rationale}" if label else rationale
+            if label:
+                next_actions.append(label)
+        elif item is not None:
+            next_actions.append(str(item))
+    system_findings = payload.get("system_findings") if isinstance(payload.get("system_findings"), list) else []
+    live_checks = live_feasibility.get("checks") if isinstance(live_feasibility.get("checks"), list) else []
+    return {
+        "headline": payload.get("headline"),
+        "verdict": _normalize_research_verdict(payload.get("verdict")),
+        "current_problem": payload.get("current_problem") or live_feasibility.get("summary"),
+        "recommended_action": payload.get("recommended_action") or (next_actions[0] if next_actions else None),
+        "key_findings": [str(item) for item in system_findings if item is not None],
+        "risks": [str(item) for item in live_checks if item is not None],
+        "recommended_next_actions": next_actions,
+    }
+
+
 def _read_research_summary(base_dir: Path) -> ResearchSummary:
     payload = _safe_read_json(_scorecard_path(base_dir), {})
     summary = ResearchSummary()
@@ -507,7 +563,8 @@ def _read_research_summary(base_dir: Path) -> ResearchSummary:
             promoted_recipe=payload.get("promoted_recipe"),
             metrics=sanitize_for_json(payload.get("metrics", {})),
         )
-    return _merge_research_summaries(summary, _parse_latest_summary_markdown(base_dir))
+    summary = _merge_research_summaries(summary, _parse_latest_summary_markdown(base_dir))
+    return _merge_research_summaries(summary, _parse_latest_summary_json(base_dir))
 
 
 def _fallback_run_research_summary(index_payload: dict[str, Any]) -> ResearchSummary:
@@ -587,6 +644,72 @@ def _scan_analysis_reports(base_dir: Path) -> list[AnalysisReportRef]:
             )
         )
     return refs
+
+
+def _extract_run_recipe_dossier_markdown(run_dir: Path, recipe_name: str) -> str | None:
+    path = _latest_summary_markdown_path(run_dir)
+    if not path.exists():
+        return None
+    text = path.read_text(encoding="utf-8")
+    lines = text.replace("\r\n", "\n").split("\n")
+    in_dossiers = False
+    in_recipe = False
+    collected: list[str] = []
+    in_code_block = False
+
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+        if not in_code_block and stripped.startswith("## "):
+            section = _normalize_markdown_heading(stripped[3:].strip())
+            if in_recipe:
+                break
+            in_dossiers = section == "recipe dossiers"
+            continue
+        if not in_dossiers:
+            continue
+        if not in_code_block and stripped.startswith("### "):
+            heading = stripped[4:].strip().strip("`")
+            if in_recipe:
+                break
+            if heading == recipe_name:
+                in_recipe = True
+                collected.append(f"### {recipe_name}")
+            continue
+        if in_recipe:
+            collected.append(raw_line.rstrip())
+
+    content = "\n".join(collected).strip()
+    return content + "\n" if content else None
+
+
+def _run_recipe_dossier_report(run_dir: Path, recipe_name: str) -> AnalysisReportRef | None:
+    content = _extract_run_recipe_dossier_markdown(run_dir, recipe_name)
+    if not content:
+        return None
+    path = _latest_summary_markdown_path(run_dir)
+    latest_json_payload = _safe_read_json(_analysis_dir(run_dir) / "latest_summary.json", {})
+    engine = latest_json_payload.get("engine") if isinstance(latest_json_payload, dict) else None
+    template = latest_json_payload.get("template") if isinstance(latest_json_payload, dict) else None
+    verdict = latest_json_payload.get("verdict") if isinstance(latest_json_payload, dict) else None
+    return AnalysisReportRef(
+        name="run_recipe_dossier.md",
+        path=str(path),
+        exists=True,
+        engine=engine,
+        template=template,
+        verdict=verdict,
+        updated_at=_path_updated_at(path),
+        content_type="markdown",
+        content_preview=content,
+    )
+
+
+def _scan_recipe_analysis_reports(run_dir: Path, recipe_dir: Path, recipe_name: str) -> list[AnalysisReportRef]:
+    reports = _scan_analysis_reports(recipe_dir)
+    run_dossier = _run_recipe_dossier_report(run_dir, recipe_name)
+    return [run_dossier, *reports] if run_dossier else reports
 
 
 def _list_run_dirs() -> list[Path]:
@@ -1079,10 +1202,14 @@ def _build_recommendation_actions(
                 source_id=source_id,
                 prefill_config={
                     "display_name": f"Diagnose {source_label}",
-                    "description": "Diagnose execution drift and exposure anomalies",
-                    "analysis_template": "anomaly_diagnosis",
+                    "description": "Generate a run-level native workflow system diagnosis",
+                    "analysis_template": NATIVE_WORKFLOW_SYSTEM_TEMPLATE if source_type == "run" else "anomaly_diagnosis",
+                    "analysis_engine": "auto" if source_type == "run" else "codex_cli",
+                    "batch_mode": "run_only",
+                    "include_all_recipes": False,
+                    "skills": [NATIVE_WORKFLOW_ANALYSIS_SKILL_NAME] if source_type == "run" else [],
                 },
-                reason="先补一份异常诊断，能更快确认需要如何调整 Universe Exit Policy 或持仓上限。",
+                reason="生成 run 级系统诊断，优先比较 recipe、信号兑现、持仓漂移和实盘可行性。",
             )
         )
     return actions
@@ -2064,7 +2191,7 @@ def get_recipe_detail(run_id: str, recipe_name: str) -> RecipeDetail:
         research_summary=research_summary,
         nodes=nodes,
         tables=tables,
-        analysis_reports=_scan_analysis_reports(recipe_dir),
+        analysis_reports=_scan_recipe_analysis_reports(run_dir, recipe_dir, recipe_name),
         artifact_inventory=_recipe_inventory(recipe_dir, prefix=recipe_name),
         portfolio_realization_summary=anomaly_summary,
         exposure_summary=_build_exposure_summary(recipe_frames.get("sector_exposure_history", pd.DataFrame())),
@@ -2839,7 +2966,10 @@ def _build_research_analysis_command(request: RunResearchAnalysisTaskRequest, ou
         command += ["--run-id", request.run_id]
     if request.recipe_name:
         command += ["--recipe-name", request.recipe_name]
-    for skill in request.skills or []:
+    skills = list(request.skills or [])
+    if request.analysis_template == NATIVE_WORKFLOW_SYSTEM_TEMPLATE and NATIVE_WORKFLOW_ANALYSIS_SKILL_NAME not in skills:
+        skills.append(NATIVE_WORKFLOW_ANALYSIS_SKILL_NAME)
+    for skill in skills:
         command += ["--skill", skill]
     if request.compare_items:
         command += ["--compare-items-json", json.dumps(sanitize_for_json(request.compare_items), ensure_ascii=False)]
@@ -2855,6 +2985,11 @@ def create_research_analysis_task(request: RunResearchAnalysisTaskRequest) -> Re
     config_payload = request.model_dump(mode="json")
     config_payload["batch_mode"] = batch_mode
     config_payload["include_all_recipes"] = batch_mode == "run_plus_all_recipes"
+    if request.analysis_template == NATIVE_WORKFLOW_SYSTEM_TEMPLATE:
+        skills = list(config_payload.get("skills") or [])
+        if NATIVE_WORKFLOW_ANALYSIS_SKILL_NAME not in skills:
+            skills.append(NATIVE_WORKFLOW_ANALYSIS_SKILL_NAME)
+        config_payload["skills"] = skills
     summary = ResearchTaskSummary(
         task_id=task_id,
         task_kind="run_research_analysis",
@@ -3011,20 +3146,20 @@ def get_run_analysis_task_preset(run_id: str) -> TaskPresetResponse:
     detail = get_run_detail(run_id)
     return TaskPresetResponse(
         task_kind="run_research_analysis",
-        display_name=f"Analyze {detail.run_id} + recipes",
+        display_name=f"Diagnose {detail.run_id}",
         source_ref=TaskSourceRef(kind="run", source_id=detail.run_id, label=detail.run_id, path=detail.output_dir),
         payload={
-            "display_name": f"Analyze {detail.run_id} + recipes",
+            "display_name": f"Diagnose {detail.run_id}",
             "description": detail.research_summary.headline,
             "requested_by": "webapp",
             "source_ref": {"kind": "run", "source_id": detail.run_id, "label": detail.run_id, "path": detail.output_dir},
             "source_kind": "run",
-            "batch_mode": "run_plus_all_recipes",
-            "include_all_recipes": True,
+            "batch_mode": "run_only",
+            "include_all_recipes": False,
             "run_id": detail.run_id,
-            "analysis_template": "investment_report",
-            "analysis_engine": "codex_cli",
-            "skills": [],
+            "analysis_template": NATIVE_WORKFLOW_SYSTEM_TEMPLATE,
+            "analysis_engine": "auto",
+            "skills": [NATIVE_WORKFLOW_ANALYSIS_SKILL_NAME],
             "output_dir": str(Path(detail.output_dir) / "analysis"),
         },
     )

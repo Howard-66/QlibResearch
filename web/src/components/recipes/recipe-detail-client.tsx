@@ -9,7 +9,7 @@ import { Bot } from "lucide-react";
 import { ChartPayloadPanel } from "@/components/charts/chart-payload-panel";
 import { EChartsChart } from "@/components/charts/echarts-chart";
 import { LatestSummaryLayout } from "@/components/common/latest-summary-layout";
-import { MarkdownPreviewDialog } from "@/components/common/markdown-preview-dialog";
+import { MarkdownContent } from "@/components/common/markdown-preview-dialog";
 import { TrendChart } from "@/components/charts/trend-chart";
 import { StatCard } from "@/components/common/stat-card";
 import { DataTable } from "@/components/data/data-table";
@@ -88,6 +88,10 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
   const walkExecutionGap = React.useMemo(() => filterTableByBundle(getTable("execution_diff_summary"), "walk_forward"), [getTable]);
   const latestSummaryMarkdown = React.useMemo(
     () => detail.analysis_reports.find((item) => item.name === "latest_summary.md")?.content_preview ?? null,
+    [detail.analysis_reports],
+  );
+  const runRecipeDossierMarkdown = React.useMemo(
+    () => detail.analysis_reports.find((item) => item.name === "run_recipe_dossier.md")?.content_preview ?? null,
     [detail.analysis_reports],
   );
   const parsedLatestSummary = React.useMemo(
@@ -347,20 +351,13 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
         </TabsContent>
 
         <TabsContent value="interpretation" className="space-y-6">
-          <SectionCard
-            title="Interpretation Summary"
-            action={
-              latestSummaryMarkdown ? (
-                <MarkdownPreviewDialog
-                  title={`${detail.run_id}/${detail.recipe_name} · Research Summary`}
-                  content={latestSummaryMarkdown}
-                  triggerLabel="查看详情"
-                />
-              ) : null
-            }
-          >
+          <SectionCard title="Interpretation Summary">
             <div className="space-y-4">
-              {latestSummaryMarkdown ? (
+              {runRecipeDossierMarkdown ? (
+                <div className="rounded-lg border border-border/50 bg-surface-2/30 p-4">
+                  <MarkdownContent content={runRecipeDossierMarkdown} />
+                </div>
+              ) : latestSummaryMarkdown ? (
                 <LatestSummaryLayout content={latestSummaryMarkdown} mode="compact" />
               ) : (
                 <>

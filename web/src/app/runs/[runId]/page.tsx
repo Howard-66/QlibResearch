@@ -16,6 +16,9 @@ import { parseLatestSummaryMarkdown } from "@/lib/latest-summary";
 import { buildRecommendationHref } from "@/lib/utils";
 import { describeWorkflowConfigKey } from "@/lib/workflow-config-descriptions";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export default async function RunDetailPage({ params }: { params: Promise<{ runId: string }> }) {
   const { runId } = await params;
   const detail = await getRunDetail(runId);

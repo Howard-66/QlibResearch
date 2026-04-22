@@ -15,7 +15,21 @@ type Block =
   | { type: "heading"; level: 1 | 2 | 3; text: string }
   | { type: "paragraph"; text: string }
   | { type: "list"; items: string[] }
+  | { type: "table"; headers: string[]; rows: string[][] }
   | { type: "code"; code: string };
+
+function isTableSeparator(line: string) {
+  return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line);
+}
+
+function parseTableRow(line: string) {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
 
 function parseMarkdown(content: string): Block[] {
   const lines = content.replace(/\r\n/g, "\n").split("\n");
@@ -59,14 +73,27 @@ function parseMarkdown(content: string): Block[] {
       continue;
     }
 
-    if (trimmed.startsWith("- ")) {
+    if (trimmed.startsWith("|") && index + 1 < lines.length && isTableSeparator(lines[index + 1] ?? "")) {
+      const headers = parseTableRow(trimmed);
+      const rows: string[][] = [];
+      index += 2;
+      while (index < lines.length && (lines[index]?.trim() ?? "").startsWith("|")) {
+        rows.push(parseTableRow(lines[index] ?? ""));
+        index += 1;
+      }
+      blocks.push({ type: "table", headers, rows });
+      continue;
+    }
+
+    if (/^([-*]\s+|\d+[.)]\s+)/u.test(trimmed)) {
       const items: string[] = [];
       while (index < lines.length) {
         const itemLine = lines[index]?.trim() ?? "";
-        if (!itemLine.startsWith("- ")) {
+        const match = itemLine.match(/^([-*]\s+|\d+[.)]\s+)/u);
+        if (!match) {
           break;
         }
-        items.push(itemLine.slice(2).trim());
+        items.push(itemLine.slice(match[0].length).trim());
         index += 1;
       }
       blocks.push({ type: "list", items });
@@ -76,13 +103,13 @@ function parseMarkdown(content: string): Block[] {
     const paragraphLines: string[] = [];
     while (index < lines.length) {
       const next = lines[index]?.trim() ?? "";
-      if (!next || next.startsWith("#") || next.startsWith("- ") || next.startsWith("```")) {
+      if (!next || next.startsWith("#") || /^([-*]\s+|\d+[.)]\s+)/u.test(next) || next.startsWith("```") || next.startsWith("|")) {
         break;
       }
       paragraphLines.push(next);
       index += 1;
     }
-    blocks.push({ type: "paragraph", text: paragraphLines.join(" ") });
+    blocks.push({ type: "paragraph", text: paragraphLines.join("\n") });
   }
 
   return blocks;
@@ -105,7 +132,7 @@ function InlineMarkdown({ text }: { text: string }) {
   );
 }
 
-function MarkdownContent({ content }: { content: string }) {
+export function MarkdownContent({ content }: { content: string }) {
   const blocks = React.useMemo(() => parseMarkdown(content), [content]);
   return (
     <div className="space-y-4 text-sm leading-7 text-foreground">
@@ -149,8 +176,36 @@ function MarkdownContent({ content }: { content: string }) {
             </pre>
           );
         }
+        if (block.type === "table") {
+          return (
+            <div key={index} className="overflow-x-auto rounded-lg border border-border/60">
+              <table className="min-w-full border-collapse text-left text-xs">
+                <thead className="bg-surface-2/80 text-muted-foreground">
+                  <tr>
+                    {block.headers.map((header, headerIndex) => (
+                      <th key={`${header}-${headerIndex}`} className="border-b border-border/60 px-3 py-2 font-medium">
+                        <InlineMarkdown text={header} />
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {block.rows.map((row, rowIndex) => (
+                    <tr key={`${row.join("|")}-${rowIndex}`} className="border-b border-border/40 last:border-0">
+                      {row.map((cell, cellIndex) => (
+                        <td key={`${cell}-${cellIndex}`} className="max-w-[22rem] px-3 py-2 align-top leading-6">
+                          <InlineMarkdown text={cell} />
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        }
         return (
-          <p key={index} className="text-sm text-foreground/90">
+          <p key={index} className="whitespace-pre-line text-sm text-foreground/90">
             <InlineMarkdown text={block.text} />
           </p>
         );

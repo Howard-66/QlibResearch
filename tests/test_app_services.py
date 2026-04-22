@@ -298,6 +298,83 @@ def test_get_recipe_detail_reads_analysis_reports(monkeypatch, tmp_path):
     assert detail.research_summary.headline == "report"
 
 
+def test_get_recipe_detail_includes_run_recipe_dossier(monkeypatch, tmp_path):
+    run_dir = tmp_path / "demo_run"
+    recipe_dir = run_dir / "rank_blended"
+    recipe_dir.mkdir(parents=True)
+    run_analysis_dir = run_dir / "analysis"
+    run_analysis_dir.mkdir(parents=True)
+    (run_analysis_dir / "latest_summary.json").write_text(
+        json.dumps({"engine": "auto", "template": "native_workflow_system_report", "verdict": "investigate"}),
+        encoding="utf-8",
+    )
+    (run_analysis_dir / "latest_summary.md").write_text(
+        "\n".join(
+            [
+                "# demo_run 系统诊断报告",
+                "",
+                "## Recipe Dossiers",
+                "### baseline",
+                "- baseline content",
+                "### rank_blended",
+                "- 角色：主线。",
+                "- 需要警惕的部分：TopK 超额为负。",
+                "### mae_4w",
+                "- mae content",
+                "",
+                "## Live Portfolio Feasibility",
+                "- live content",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    index_payload = {
+        "run_id": "demo_run",
+        "quick_summary": RunQuickSummary(
+            run_id="demo_run",
+            output_dir=str(run_dir),
+            recipe_names=["rank_blended"],
+            baseline_recipe="rank_blended",
+            artifact_status="ready",
+        ).model_dump(mode="json"),
+        "overview_lookup": {"rank_blended": {}},
+    }
+    summary_payload = {"recipe_registry": {"executed_recipes": ["rank_blended"]}, "promotion_gate": {}}
+    empty_frames = {name: pd.DataFrame() for name in {
+        "rolling_summary",
+        "walk_forward_summary",
+        "rolling_native_report",
+        "walk_forward_native_report",
+        "rolling_performance_metrics",
+        "walk_forward_performance_metrics",
+        "feature_prefilter",
+        "signal_diagnostics",
+        "portfolio_diagnostics",
+        "execution_diff_summary",
+        "slice_regime_summary",
+        "latest_score_frame",
+        "signal_realization_bridge",
+        "holding_count_drift",
+        "sector_exposure_history",
+        "regime_gate_diagnostics",
+    }}
+    frames = {"manifest": {}, **empty_frames}
+    monkeypatch.setattr(services, "_collect_run_context", lambda run_id: (run_dir, summary_payload, index_payload))
+    monkeypatch.setattr(services, "_load_recipe_frames", lambda run_dir, recipe_name, table_names: frames)
+    monkeypatch.setattr(services, "_get_recipe_config", lambda summary_payload, recipe_name: {})
+    monkeypatch.setattr(services, "_panel_summary_for_path", lambda panel_path: None)
+    monkeypatch.setattr(services, "_resolve_artifact_path", lambda value: None)
+    monkeypatch.setattr(services, "_recipe_inventory", lambda recipe_dir, prefix: [])
+
+    detail = services.get_recipe_detail("demo_run", "rank_blended")
+    dossier = next(item for item in detail.analysis_reports if item.name == "run_recipe_dossier.md")
+
+    assert "### rank_blended" in (dossier.content_preview or "")
+    assert "TopK 超额为负" in (dossier.content_preview or "")
+    assert "baseline content" not in (dossier.content_preview or "")
+    assert "mae content" not in (dossier.content_preview or "")
+
+
 def test_read_research_summary_prefers_latest_summary_markdown_sections(tmp_path):
     base_dir = tmp_path / "demo_run"
     analysis_dir = base_dir / "analysis"
@@ -385,6 +462,36 @@ def test_read_research_summary_accepts_numbered_chinese_headings(tmp_path):
     assert summary.key_findings == ["baseline 的收益与回撤更均衡。", "binary_4w 收益高但信号退化。"]
     assert summary.risks == ["行业集中度仍偏高。"]
     assert summary.recommended_next_actions == ["先做行业上限实验。", "再做 score dispersion 门限实验。"]
+
+
+def test_read_research_summary_accepts_native_workflow_json(tmp_path):
+    base_dir = tmp_path / "demo_run"
+    analysis_dir = base_dir / "analysis"
+    analysis_dir.mkdir(parents=True)
+    (analysis_dir / "latest_summary.json").write_text(
+        json.dumps(
+            {
+                "headline": "rank_blended 暂时最适合作为下一轮主线，但还不能进入实盘。",
+                "verdict": "investigate",
+                "current_problem": "收益来源还没有解释清楚。",
+                "recommended_action": "先修复 TopK 兑现。",
+                "system_findings": ["rank_blended 收益领先。", "TopK 兑现仍为负。"],
+                "live_feasibility": {"checks": ["执行验证表为空。"]},
+                "next_experiments": [
+                    {"priority": "P0", "name": "topk_repair", "rationale": "拆解信号兑现。"}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = services._read_research_summary(base_dir)
+
+    assert summary.headline == "rank_blended 暂时最适合作为下一轮主线，但还不能进入实盘。"
+    assert summary.verdict == "investigate"
+    assert summary.key_findings == ["rank_blended 收益领先。", "TopK 兑现仍为负。"]
+    assert summary.risks == ["执行验证表为空。"]
+    assert summary.recommended_next_actions == ["P0：topk_repair。拆解信号兑现。"]
 
 
 def test_build_run_index_payload_backfills_recipe_overview_from_summary_and_existing_index(tmp_path):
@@ -991,6 +1098,27 @@ def test_create_research_analysis_task_supports_run_and_all_recipes_batch(monkey
     assert task.config_payload["include_all_recipes"] is True
 
 
+def test_create_research_analysis_task_adds_native_workflow_skill(monkeypatch, tmp_path):
+    monkeypatch.setattr(services, "TASKS_ROOT", tmp_path / "tasks")
+    monkeypatch.setattr(services, "_resolve_artifact_path", lambda value, base_dir=services.PROJECT_ROOT: Path(value) if value else None)
+
+    task = services.create_research_analysis_task(
+        RunResearchAnalysisTaskRequest(
+            display_name="Diagnose demo",
+            source_ref=services.TaskSourceRef(kind="run", source_id="demo_run", label="demo_run"),
+            source_kind="run",
+            run_id="demo_run",
+            analysis_template="native_workflow_system_report",
+            analysis_engine="codex_cli",
+            output_dir=str(tmp_path / "analysis"),
+        )
+    )
+
+    assert "--skill" in task.command
+    assert "native-workflow-artifact-analysis" in task.command
+    assert task.config_payload["skills"] == ["native-workflow-artifact-analysis"]
+
+
 def test_get_run_analysis_task_preset_defaults_to_batch_mode(monkeypatch):
     monkeypatch.setattr(
         services,
@@ -1019,5 +1147,8 @@ def test_get_run_analysis_task_preset_defaults_to_batch_mode(monkeypatch):
     preset = services.get_run_analysis_task_preset("demo_run")
 
     assert preset.payload["source_kind"] == "run"
-    assert preset.payload["batch_mode"] == "run_plus_all_recipes"
-    assert preset.payload["include_all_recipes"] is True
+    assert preset.payload["batch_mode"] == "run_only"
+    assert preset.payload["include_all_recipes"] is False
+    assert preset.payload["analysis_template"] == "native_workflow_system_report"
+    assert preset.payload["analysis_engine"] == "auto"
+    assert preset.payload["skills"] == ["native-workflow-artifact-analysis"]

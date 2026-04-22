@@ -1,6 +1,9 @@
 import { RecipeDetailClient } from "@/components/recipes/recipe-detail-client";
 import { getRecipeDetail } from "@/lib/api";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export default async function RecipeDetailPage({
   params,
 }: {

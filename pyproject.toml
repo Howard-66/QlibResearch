@@ -41,7 +41,7 @@ build-backend = "hatchling.build"
 packages = ["src/qlib_research"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = [".", "src"]
 testpaths = ["tests"]
 
 [tool.uv.sources]

@@ -128,7 +128,7 @@ type ResearchAnalysisTaskFormState = {
   run_id: string;
   recipe_name: string;
   compare_items_json: string;
-  analysis_template: "investment_report" | "experiment_review" | "ui_insight" | "anomaly_diagnosis";
+  analysis_template: "investment_report" | "experiment_review" | "ui_insight" | "anomaly_diagnosis" | "native_workflow_system_report";
   analysis_engine: "auto" | "codex_cli" | "claude_cli";
   skills: string;
   output_dir: string;
@@ -1282,6 +1282,7 @@ function ResearchAnalysisTaskEditor({
             <option value="experiment_review">experiment_review</option>
             <option value="ui_insight">ui_insight</option>
             <option value="anomaly_diagnosis">anomaly_diagnosis</option>
+            <option value="native_workflow_system_report">native_workflow_system_report</option>
           </select>
         </FormField>
         <FormField label="Engine">
@@ -1581,6 +1582,16 @@ function normalizeTaskKind(value: string | null): EditorTaskKind | null {
   return null;
 }
 
+function isAnalysisTemplate(value: unknown): value is ResearchAnalysisTaskFormState["analysis_template"] {
+  return (
+    value === "investment_report" ||
+    value === "experiment_review" ||
+    value === "ui_insight" ||
+    value === "anomaly_diagnosis" ||
+    value === "native_workflow_system_report"
+  );
+}
+
 function defaultExportTaskForm(): ExportTaskFormState {
   return {
     display_name: "Export Panel",
@@ -1668,8 +1679,8 @@ function defaultResearchAnalysisTaskForm(): ResearchAnalysisTaskFormState {
     run_id: "",
     recipe_name: "",
     compare_items_json: "[]",
-    analysis_template: "investment_report",
-    analysis_engine: "codex_cli",
+    analysis_template: "native_workflow_system_report",
+    analysis_engine: "auto",
     skills: "",
     output_dir: "artifacts/analysis",
   };
@@ -1875,10 +1886,7 @@ function applyPresetToEditor(
       run_id: String(payload.run_id ?? ""),
       recipe_name: String(payload.recipe_name ?? ""),
       compare_items_json: JSON.stringify(payload.compare_items ?? [], null, 2),
-      analysis_template:
-        payload.analysis_template === "experiment_review" || payload.analysis_template === "ui_insight" || payload.analysis_template === "anomaly_diagnosis"
-          ? payload.analysis_template
-          : "investment_report",
+      analysis_template: isAnalysisTemplate(payload.analysis_template) ? payload.analysis_template : "investment_report",
       analysis_engine:
         payload.analysis_engine === "codex_cli" || payload.analysis_engine === "claude_cli"
           ? payload.analysis_engine
@@ -1935,10 +1943,13 @@ function applyPrefillToEditor(
       ...current,
       display_name: String(prefillConfig.display_name ?? current.display_name),
       description: String(prefillConfig.description ?? current.description),
-      analysis_template:
-        prefillConfig.analysis_template === "experiment_review" || prefillConfig.analysis_template === "ui_insight" || prefillConfig.analysis_template === "anomaly_diagnosis"
-          ? prefillConfig.analysis_template
-          : current.analysis_template,
+      analysis_template: isAnalysisTemplate(prefillConfig.analysis_template) ? prefillConfig.analysis_template : current.analysis_template,
+      batch_mode:
+        Object.prototype.hasOwnProperty.call(prefillConfig, "batch_mode") ||
+        Object.prototype.hasOwnProperty.call(prefillConfig, "include_all_recipes")
+          ? normalizeAnalysisBatchMode(prefillConfig.batch_mode, prefillConfig.include_all_recipes)
+          : current.batch_mode,
+      skills: toStringArray(prefillConfig.skills).join(", ") || current.skills,
     }));
     return;
   }
