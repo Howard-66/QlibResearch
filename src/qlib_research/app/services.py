@@ -875,15 +875,23 @@ def _build_recipe_overview_row(
     walk_summary = recipe_frames.get("walk_forward_summary", pd.DataFrame())
     rolling_performance = recipe_frames.get("rolling_performance_metrics", pd.DataFrame())
     walk_forward_performance = recipe_frames.get("walk_forward_performance_metrics", pd.DataFrame())
+    signal_diagnostics = recipe_frames.get("signal_diagnostics", pd.DataFrame())
+    sector_exposure = recipe_frames.get("sector_exposure_history", pd.DataFrame())
     manifest = recipe_frames.get("manifest", {}) if isinstance(recipe_frames.get("manifest", {}), dict) else {}
     rolling_row = _summary_row(rolling_summary)
     walk_row = _summary_row(walk_summary)
     rolling_performance_row = _performance_metrics_row(rolling_performance)
     walk_forward_performance_row = _performance_metrics_row(walk_forward_performance)
+    rolling_signal = _bundle_frame(signal_diagnostics, "rolling")
+    walk_forward_signal = _bundle_frame(signal_diagnostics, "walk_forward")
+    rolling_exposure = _bundle_frame(sector_exposure, "rolling")
+    walk_forward_exposure = _bundle_frame(sector_exposure, "walk_forward")
     computed_row = {
         "recipe": recipe_name,
         "used_feature_count": rolling_row.get("used_feature_count") or walk_row.get("used_feature_count") or len(manifest.get("used_feature_columns", [])),
         "rolling_rank_ic_ir": rolling_row.get("rank_ic_ir"),
+        "rolling_score_distinction": _mean_or_none(rolling_signal, "topk_unique_score_ratio"),
+        "rolling_top1_sector_weight": _max_or_none(rolling_exposure, "top1_sector_weight"),
         "rolling_topk_mean_excess_return_4w": rolling_row.get("topk_mean_excess_return_4w"),
         "rolling_net_total_return": _safe_native_report_return(recipe_frames.get("rolling_native_report", pd.DataFrame())),
         "rolling_max_drawdown": _safe_native_report_max_drawdown(recipe_frames.get("rolling_native_report", pd.DataFrame())),
@@ -893,6 +901,8 @@ def _build_recipe_overview_row(
         "rolling_win_rate": rolling_performance_row.get("win_rate"),
         "rolling_calmar_ratio": rolling_performance_row.get("calmar_ratio"),
         "walk_forward_rank_ic_ir": walk_row.get("rank_ic_ir"),
+        "walk_forward_score_distinction": _mean_or_none(walk_forward_signal, "topk_unique_score_ratio"),
+        "walk_forward_top1_sector_weight": _max_or_none(walk_forward_exposure, "top1_sector_weight"),
         "walk_forward_topk_mean_excess_return_4w": walk_row.get("topk_mean_excess_return_4w"),
         "walk_forward_net_total_return": _safe_native_report_return(recipe_frames.get("walk_forward_native_report", pd.DataFrame())),
         "walk_forward_max_drawdown": _safe_native_report_max_drawdown(recipe_frames.get("walk_forward_native_report", pd.DataFrame())),
@@ -1986,6 +1996,10 @@ def _build_recipe_summary(
         used_feature_count=_normalize_value(overview_row.get("used_feature_count")),
         rolling_rank_ic_ir=_normalize_value(overview_row.get("rolling_rank_ic_ir")),
         walk_forward_rank_ic_ir=_normalize_value(overview_row.get("walk_forward_rank_ic_ir")),
+        rolling_score_distinction=_normalize_value(overview_row.get("rolling_score_distinction")),
+        walk_forward_score_distinction=_normalize_value(overview_row.get("walk_forward_score_distinction")),
+        rolling_top1_sector_weight=_normalize_value(overview_row.get("rolling_top1_sector_weight")),
+        walk_forward_top1_sector_weight=_normalize_value(overview_row.get("walk_forward_top1_sector_weight")),
         rolling_topk_mean_excess_return_4w=_normalize_value(overview_row.get("rolling_topk_mean_excess_return_4w")),
         walk_forward_topk_mean_excess_return_4w=_normalize_value(overview_row.get("walk_forward_topk_mean_excess_return_4w")),
         rolling_net_total_return=_normalize_value(overview_row.get("rolling_net_total_return")),

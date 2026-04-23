@@ -182,6 +182,10 @@ class RecipeSummary(BaseModel):
     used_feature_count: int | None = None
     rolling_rank_ic_ir: float | None = None
     walk_forward_rank_ic_ir: float | None = None
+    rolling_score_distinction: float | None = None
+    walk_forward_score_distinction: float | None = None
+    rolling_top1_sector_weight: float | None = None
+    walk_forward_top1_sector_weight: float | None = None
     rolling_topk_mean_excess_return_4w: float | None = None
     walk_forward_topk_mean_excess_return_4w: float | None = None
     rolling_net_total_return: float | None = None

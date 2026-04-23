@@ -76,7 +76,7 @@ def test_build_cli_prompt_requires_native_workflow_json_contract():
     assert "新旧 run summary 比较" in prompt
     assert "四舍五入" in prompt
     assert "markdown" in prompt
-    assert "排名、recipe、角色、总收益、最大回撤、TopK 超额、分数区分度、研究判断" in prompt
+    assert "排名、recipe、角色、总收益、最大回撤、Rank IC IR、TopK 超额、分数区分度、行业暴露、研究判断" in prompt
 
 
 def test_native_workflow_skill_path_prefers_repo_copy():
@@ -185,6 +185,34 @@ def test_invoke_codex_cli_runs_subprocess(monkeypatch):
     assert stdin_prompts[0]
     assert "Demo" in stdin_prompts[0]
     assert "Demo" not in calls[0]
+
+
+def test_generate_analysis_content_falls_back_locally_when_codex_models_are_at_capacity(monkeypatch):
+    capacity_error = RuntimeError("ERROR: Selected model is at capacity. Please try a different model.")
+
+    def fake_invoke(payload, *, template, skills, cwd):
+        raise capacity_error
+
+    def fake_invoke_with_model(payload, *, template, skills, cwd, model):
+        raise capacity_error
+
+    monkeypatch.setattr(run_research_analysis, "_invoke_codex_cli", fake_invoke)
+    monkeypatch.setattr(run_research_analysis, "_invoke_codex_cli_with_model", fake_invoke_with_model)
+
+    content, metadata = run_research_analysis._generate_analysis_content(
+        {"source_kind": "run", "run_id": "demo_run"},
+        analysis_template="native_workflow_system_report",
+        analysis_engine="codex_cli",
+        skills=[],
+        cwd=Path("."),
+    )
+
+    parsed = json.loads(content)
+    assert metadata["engine_used"] == "codex_cli_capacity_fallback_local"
+    assert metadata["codex_retry_count"] >= 1
+    assert isinstance(metadata.get("codex_capacity_retries"), list)
+    assert parsed["verdict"] == "investigate"
+    assert "markdown" in parsed
 
 
 def test_invoke_claude_cli_runs_subprocess(monkeypatch):

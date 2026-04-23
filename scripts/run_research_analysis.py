@@ -36,6 +36,11 @@ NATIVE_WORKFLOW_ANALYSIS_SKILL_PATH = (
     if REPO_NATIVE_WORKFLOW_ANALYSIS_SKILL_PATH.exists()
     else USER_NATIVE_WORKFLOW_ANALYSIS_SKILL_PATH
 )
+CODEX_CAPACITY_FALLBACK_MODELS = (
+    "gpt-5.2",
+    "gpt-5.3-codex",
+    "gpt-5.4-mini",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -230,7 +235,7 @@ def _build_cli_prompt(payload: dict[str, Any], *, template: str, skills: list[st
             "8. 正文面向研究用户：使用自然中文，术语可保留英文；不要写“promote 到 live”这类中英文混排表达，改写成“进入实盘”。\n"
             "9. 正文数字必须四舍五入：收益/回撤/超额用百分比，普通比率保留 2 位，持仓数取整数；不要把文件名和完整小数塞进结论句。\n"
             "10. 表格只做横向比较，正文必须解释这些数字对研究决策的含义，不能只堆指标。\n"
-            "11. `Recipe Ranking & Roles` 表格固定使用列：排名、recipe、角色、总收益、最大回撤、TopK 超额、分数区分度、研究判断。\n"
+            "11. `Recipe Ranking & Roles` 表格固定使用列：排名、recipe、角色、总收益、最大回撤、Rank IC IR、TopK 超额、分数区分度、行业暴露、研究判断。\n"
             "12. 文件名、metric 名和完整 evidence_refs 放在 JSON 的 evidence_refs 或 Evidence Gaps 中；正文优先用中文指标名。\n\n"
             f"{json.dumps(prompt_payload, ensure_ascii=False, indent=2)}"
         )
@@ -286,7 +291,14 @@ def _run_subprocess(command: list[str], *, prompt: str | None, cwd: Path) -> str
     return output
 
 
-def _invoke_codex_cli(payload: dict[str, Any], *, template: str, skills: list[str], cwd: Path) -> dict[str, Any]:
+def _invoke_codex_cli_with_model(
+    payload: dict[str, Any],
+    *,
+    template: str,
+    skills: list[str],
+    cwd: Path,
+    model: str | None,
+) -> dict[str, Any]:
     executable = shutil.which("codex")
     if not executable:
         raise RuntimeError("codex executable not found")
@@ -299,14 +311,31 @@ def _invoke_codex_cli(payload: dict[str, Any], *, template: str, skills: list[st
         "read-only",
         "--cd",
         str(cwd),
-        "-",
     ]
+    if model:
+        command.extend(["--model", model])
+    command.append("-")
     content = _run_subprocess(command, prompt=prompt, cwd=cwd)
     return {
         "engine": "codex_cli",
         "command": command,
+        "model": model,
         "content": content,
     }
+
+
+def _invoke_codex_cli(payload: dict[str, Any], *, template: str, skills: list[str], cwd: Path) -> dict[str, Any]:
+    return _invoke_codex_cli_with_model(payload, template=template, skills=skills, cwd=cwd, model=None)
+
+
+def _is_codex_model_capacity_error(message: str) -> bool:
+    lowered = message.lower()
+    return (
+        "selected model is at capacity" in lowered
+        or "model is at capacity" in lowered
+        or ("at capacity" in lowered and "model" in lowered)
+        or "please try a different model" in lowered
+    )
 
 
 def _invoke_claude_cli(payload: dict[str, Any], *, template: str, skills: list[str], cwd: Path) -> dict[str, Any]:
@@ -387,11 +416,63 @@ def _generate_analysis_content(
             skills=skills,
         ), {"engine_used": "auto", "cli_invoked": False}
     if analysis_engine == "codex_cli":
-        cli_result = _invoke_codex_cli(payload, template=analysis_template, skills=skills, cwd=cwd.resolve())
-        return str(cli_result["content"]), {
-            "engine_used": "codex_cli",
-            "cli_invoked": True,
-            "cli_command": cli_result["command"],
+        codex_errors: list[dict[str, Any]] = []
+        try:
+            cli_result = _invoke_codex_cli(payload, template=analysis_template, skills=skills, cwd=cwd.resolve())
+            return str(cli_result["content"]), {
+                "engine_used": "codex_cli",
+                "cli_invoked": True,
+                "cli_command": cli_result["command"],
+                "codex_model": cli_result.get("model"),
+                "codex_retry_count": 0,
+            }
+        except RuntimeError as exc:
+            if not _is_codex_model_capacity_error(str(exc)):
+                raise
+            codex_errors.append({"model": "default", "error": str(exc)})
+
+        for retry_model in CODEX_CAPACITY_FALLBACK_MODELS:
+            try:
+                cli_result = _invoke_codex_cli_with_model(
+                    payload,
+                    template=analysis_template,
+                    skills=skills,
+                    cwd=cwd.resolve(),
+                    model=retry_model,
+                )
+                return str(cli_result["content"]), {
+                    "engine_used": "codex_cli",
+                    "cli_invoked": True,
+                    "cli_command": cli_result["command"],
+                    "codex_model": cli_result.get("model"),
+                    "codex_retry_count": len(codex_errors),
+                    "codex_capacity_retries": codex_errors,
+                }
+            except RuntimeError as retry_exc:
+                codex_errors.append({"model": retry_model, "error": str(retry_exc)})
+                if not _is_codex_model_capacity_error(str(retry_exc)):
+                    continue
+
+        if _is_native_workflow_system_report(analysis_template, payload):
+            fallback_report = _native_workflow_local_report(payload)
+            return json.dumps(fallback_report, ensure_ascii=False), {
+                "engine_used": "codex_cli_capacity_fallback_local",
+                "cli_invoked": False,
+                "codex_model": None,
+                "codex_retry_count": len(codex_errors),
+                "codex_capacity_retries": codex_errors,
+            }
+        return _build_local_markdown(
+            payload,
+            template=analysis_template,
+            engine="codex_cli_capacity_fallback_local",
+            skills=skills,
+        ), {
+            "engine_used": "codex_cli_capacity_fallback_local",
+            "cli_invoked": False,
+            "codex_model": None,
+            "codex_retry_count": len(codex_errors),
+            "codex_capacity_retries": codex_errors,
         }
     if analysis_engine == "claude_cli":
         cli_result = _invoke_claude_cli(payload, template=analysis_template, skills=skills, cwd=cwd.resolve())
