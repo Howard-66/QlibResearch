@@ -14,12 +14,14 @@ from qlib_research.core.qlib_native_workflow import (
     _build_recipe_experiment_scorecard,
     _build_parallel_recipe_heartbeat,
     _prime_parallel_workflow_inputs,
+    build_execution_diff_summary,
     build_native_performance_metrics_frame,
     build_annual_return_heatmap_frame,
     build_holding_count_drift,
     build_monthly_return_heatmap_frame,
     build_native_recipe_registry,
     build_regime_gate_diagnostics,
+    build_validation_signal_matrix,
     select_evaluation_dates_for_label,
 )
 
@@ -211,6 +213,128 @@ def test_build_native_performance_metrics_frame_computes_weekly_metrics():
     assert metrics["win_rate"] == pytest.approx(2 / 3)
     assert metrics["max_drawdown"] == pytest.approx(-0.02)
     assert metrics["calmar_ratio"] > 0
+
+
+def test_validation_signal_matrix_uses_risk_degree_and_locked_residual_budget():
+    dates = pd.to_datetime(["2026-01-02", "2026-01-09", "2026-01-16"])
+    predictions = pd.DataFrame(
+        [
+            {"feature_date": dates[0], "instrument": "A", "score": 0.9},
+            {"feature_date": dates[0], "instrument": "B", "score": 0.2},
+            {"feature_date": dates[1], "instrument": "A", "score": 0.1},
+            {"feature_date": dates[1], "instrument": "B", "score": 0.8},
+            {"feature_date": dates[2], "instrument": "A", "score": 0.1},
+            {"feature_date": dates[2], "instrument": "B", "score": 0.9},
+        ]
+    )
+    execution_price = pd.DataFrame(
+        {
+            "A": [10.0, 10.0, 10.0],
+            "B": [10.0, 10.0, 10.0],
+        },
+        index=dates,
+    )
+    volume = pd.DataFrame(
+        {
+            "A": [1000.0, 0.0, 1000.0],
+            "B": [1000.0, 1000.0, 1000.0],
+        },
+        index=dates,
+    )
+
+    result = build_validation_signal_matrix(
+        predictions,
+        execution_price,
+        topk=1,
+        risk_degree=0.5,
+        only_tradable=True,
+        enforce_locked_residual_slot_budget=True,
+        volume_frame=volume,
+    )
+
+    assert result.signal_matrix.loc[dates[0], "A"] == pytest.approx(0.5)
+    assert result.signal_matrix.loc[dates[1], "A"] == pytest.approx(0.5)
+    assert result.signal_matrix.loc[dates[1], "B"] == pytest.approx(0.0)
+    assert result.signal_matrix.loc[dates[2], "B"] == pytest.approx(0.5)
+    assert result.diagnostics.loc[1, "locked_residual_count"] == 1
+
+
+def test_validation_signal_matrix_can_disable_tradability_locking():
+    dates = pd.to_datetime(["2026-01-02", "2026-01-09"])
+    predictions = pd.DataFrame(
+        [
+            {"feature_date": dates[0], "instrument": "A", "score": 0.9},
+            {"feature_date": dates[0], "instrument": "B", "score": 0.2},
+            {"feature_date": dates[1], "instrument": "A", "score": 0.1},
+            {"feature_date": dates[1], "instrument": "B", "score": 0.8},
+        ]
+    )
+    execution_price = pd.DataFrame({"A": [10.0, 10.0], "B": [10.0, 10.0]}, index=dates)
+    volume = pd.DataFrame({"A": [1000.0, 0.0], "B": [1000.0, 1000.0]}, index=dates)
+
+    result = build_validation_signal_matrix(
+        predictions,
+        execution_price,
+        topk=1,
+        only_tradable=False,
+        enforce_locked_residual_slot_budget=True,
+        volume_frame=volume,
+    )
+
+    assert result.signal_matrix.loc[dates[1], "A"] == pytest.approx(0.0)
+    assert result.signal_matrix.loc[dates[1], "B"] == pytest.approx(1.0)
+    assert result.diagnostics.loc[1, "locked_residual_count"] == 0
+
+
+def test_build_execution_diff_summary_includes_validation_alignment_fields():
+    native_report = pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(["2026-01-02", "2026-01-09"]),
+            "net_value": [100.0, 110.0],
+            "relative_drawdown": [0.0, -0.01],
+        }
+    )
+    validation_frame = pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(["2026-01-02", "2026-01-09"]),
+            "net_value": [100.0, 104.0],
+            "holding_count": [1, 2],
+        }
+    )
+    validation_result = {
+        "equity_curve_frame": validation_frame,
+        "signal_diagnostics": pd.DataFrame(
+            [
+                {"target_hold_count": 1, "locked_residual_count": 0},
+                {"target_hold_count": 2, "locked_residual_count": 1},
+            ]
+        ),
+    }
+    config = NativeWorkflowConfig(
+        account=100.0,
+        native_risk_degree=0.95,
+        validation_risk_degree=0.9,
+        native_only_tradable=True,
+        validation_only_tradable=True,
+        validation_execution_lag_steps=2,
+    )
+
+    summary = build_execution_diff_summary(
+        "baseline",
+        "rolling",
+        native_report,
+        validation_result,
+        account=100.0,
+        config=config,
+    ).iloc[0]
+
+    assert summary["native_minus_validation_return"] == pytest.approx(0.06)
+    assert summary["validation_target_hold_max"] == 2
+    assert summary["validation_locked_residual_max"] == 1
+    assert summary["validation_actual_hold_latest"] == 2
+    assert summary["native_risk_degree"] == pytest.approx(0.95)
+    assert summary["validation_risk_degree"] == pytest.approx(0.9)
+    assert summary["validation_execution_lag_steps"] == 2
 
 
 def test_build_holding_count_drift_keeps_portfolio_columns():

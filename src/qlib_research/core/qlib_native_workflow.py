@@ -166,8 +166,8 @@ class NativeWorkflowConfig:
     diagnostics_enabled: bool = True
     run_validation_comparison: bool = True
     validation_execution_lag_steps: int = 1
-    validation_only_tradable: bool = False
-    validation_risk_degree: float = 1.0
+    validation_only_tradable: bool = True
+    validation_risk_degree: float = 0.95
     native_risk_degree: float = 0.95
     native_only_tradable: bool = True
     account: float = 1_000_000.0
@@ -1240,9 +1240,15 @@ def run_validation_backtest(
 ) -> dict[str, Any]:
     eval_dates = sorted(pd.to_datetime(predictions["feature_date"]).unique())
     frames = build_backtest_price_frames(panel=panel, eval_dates=eval_dates)
-    signal_matrix = build_buffered_signal_matrix(
+    volume_frame = _build_validation_volume_frame(panel, eval_dates)
+    validation_execution_price = (
+        _mask_untradable_execution_prices(frames.execution_price, volume_frame)
+        if config.validation_only_tradable
+        else frames.execution_price
+    )
+    signal_result = build_validation_signal_matrix(
         predictions,
-        execution_price_frame=frames.execution_price,
+        execution_price_frame=validation_execution_price,
         topk=config.topk,
         hold_buffer_rank=config.hold_buffer_rank,
         rebalance_interval_weeks=config.rebalance_interval_weeks,
@@ -1250,11 +1256,15 @@ def run_validation_backtest(
         min_score_spread=config.min_score_spread,
         industry_max_weight=config.industry_max_weight,
         execution_lag_steps=config.validation_execution_lag_steps,
+        only_tradable=config.validation_only_tradable,
+        risk_degree=config.validation_risk_degree,
+        enforce_locked_residual_slot_budget=config.enforce_locked_residual_slot_budget,
+        volume_frame=volume_frame,
     )
     equity_curve, metrics = run_strategy_backtest(
         frames.mark_price,
-        signal_matrix,
-        execution_price_frame=frames.execution_price,
+        signal_result.signal_matrix,
+        execution_price_frame=validation_execution_price,
         initial_capital=config.account,
         trading_config=default_weekly_net_backtest_config(),
     )
@@ -1266,11 +1276,18 @@ def run_validation_backtest(
             equity_curve_frame["net_value"].iloc[0] / config.account - 1.0
         )
     return {
-        "signal_matrix": signal_matrix,
+        "signal_matrix": signal_result.signal_matrix,
+        "signal_diagnostics": signal_result.diagnostics,
         "equity_curve": equity_curve,
         "equity_curve_frame": equity_curve_frame,
         "metrics": metrics,
     }
+
+
+def _numeric_series_from_frame(frame: pd.DataFrame, column: str) -> pd.Series:
+    if frame.empty or column not in frame.columns:
+        return pd.Series(dtype=float)
+    return pd.to_numeric(frame[column], errors="coerce").dropna()
 
 
 def build_execution_diff_summary(
@@ -1279,6 +1296,7 @@ def build_execution_diff_summary(
     native_report_frame: pd.DataFrame,
     validation_result: dict[str, Any],
     account: float,
+    config: NativeWorkflowConfig | None = None,
 ) -> pd.DataFrame:
     validation_frame = validation_result.get("equity_curve_frame", pd.DataFrame())
     if native_report_frame.empty or validation_frame.empty:
@@ -1287,6 +1305,26 @@ def build_execution_diff_summary(
     validation_final = float(validation_frame["net_value"].iloc[-1])
     native_drawdown = float(native_report_frame["relative_drawdown"].min())
     validation_drawdown = float((validation_frame["net_value"] / validation_frame["net_value"].cummax() - 1.0).min())
+    validation_signal_diagnostics = validation_result.get("signal_diagnostics", pd.DataFrame())
+    validation_target_counts = (
+        _numeric_series_from_frame(validation_signal_diagnostics, "target_hold_count")
+        if isinstance(validation_signal_diagnostics, pd.DataFrame)
+        else pd.Series(dtype=float)
+    )
+    validation_locked_counts = (
+        _numeric_series_from_frame(validation_signal_diagnostics, "locked_residual_count")
+        if isinstance(validation_signal_diagnostics, pd.DataFrame)
+        else pd.Series(dtype=float)
+    )
+    validation_actual_counts = _numeric_series_from_frame(validation_frame, "holding_count")
+    config_payload = {
+        "native_risk_degree": config.native_risk_degree if config else np.nan,
+        "validation_risk_degree": config.validation_risk_degree if config else np.nan,
+        "native_only_tradable": config.native_only_tradable if config else np.nan,
+        "validation_only_tradable": config.validation_only_tradable if config else np.nan,
+        "validation_execution_lag_steps": config.validation_execution_lag_steps if config else np.nan,
+        "enforce_locked_residual_slot_budget": config.enforce_locked_residual_slot_budget if config else np.nan,
+    }
     return pd.DataFrame(
         [
             {
@@ -1297,6 +1335,12 @@ def build_execution_diff_summary(
                 "native_minus_validation_return": (native_final / float(account) - 1.0) - (validation_final / float(account) - 1.0),
                 "native_max_drawdown": native_drawdown,
                 "validation_max_drawdown": validation_drawdown,
+                "validation_target_hold_max": float(validation_target_counts.max()) if not validation_target_counts.empty else np.nan,
+                "validation_target_hold_latest": float(validation_target_counts.iloc[-1]) if not validation_target_counts.empty else np.nan,
+                "validation_locked_residual_max": float(validation_locked_counts.max()) if not validation_locked_counts.empty else np.nan,
+                "validation_actual_hold_max": float(validation_actual_counts.max()) if not validation_actual_counts.empty else np.nan,
+                "validation_actual_hold_latest": float(validation_actual_counts.iloc[-1]) if not validation_actual_counts.empty else np.nan,
+                **config_payload,
             }
         ]
     )
@@ -2218,7 +2262,7 @@ def run_native_recipe(
             validation_result = run_validation_backtest(bundle["predictions"], execution_panel, config)
             validation_results[bundle_name] = validation_result
             execution_diff_frames.append(
-                build_execution_diff_summary(recipe.name, bundle_name, native_report, validation_result, config.account)
+                build_execution_diff_summary(recipe.name, bundle_name, native_report, validation_result, config.account, config=config)
             )
 
     signal_diagnostics = pd.concat(signal_diag_frames, ignore_index=True) if signal_diag_frames else pd.DataFrame()

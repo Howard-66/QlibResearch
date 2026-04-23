@@ -89,6 +89,7 @@ class BacktestEngine:
                     "total_value": total_value,
                     "cash": self.portfolio.cash,
                     "market_value": market_value,
+                    "holding_count": len(self.portfolio.holdings),
                     **trade_summary,
                 }
             )
