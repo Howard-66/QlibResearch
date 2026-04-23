@@ -7,7 +7,7 @@ implementation paths as the CLI scripts.
 
 from __future__ import annotations
 
-from dataclasses import fields
+from dataclasses import asdict, fields
 import importlib.metadata
 import json
 import math
@@ -291,6 +291,11 @@ def build_native_workflow_cli_command(
     command_lines.append(f"  --recipe-parallel-workers {int(config.recipe_parallel_workers)}")
     if config.model_num_threads is not None:
         command_lines.append(f"  --model-num-threads {int(config.model_num_threads)}")
+    for consensus_spec in config.consensus_recipe_specs:
+        command_lines.append(
+            "  --consensus-spec-json "
+            + shlex.quote(json.dumps(asdict(consensus_spec), ensure_ascii=False))
+        )
 
     selected_recipe_names = list(recipe_names) if recipe_names is not None else ["baseline"]
     for recipe_name in selected_recipe_names:

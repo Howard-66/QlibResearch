@@ -78,7 +78,7 @@ RAW_LABEL_COLUMN_MAP = {
 }
 
 MONTH_HEATMAP_COLUMNS = [f"{month:02d}" for month in range(1, 13)]
-NATIVE_WORKFLOW_SUMMARY_SCHEMA_VERSION = 2
+NATIVE_WORKFLOW_SUMMARY_SCHEMA_VERSION = 3
 
 RESEARCH_DEFAULT_FEATURE_GROUPS = (
     "technical_core",
@@ -130,6 +130,14 @@ class NativeResearchRecipe:
 
 
 @dataclass(frozen=True)
+class ConsensusRecipeSpec:
+    primary_recipe: str
+    filter_recipe: str
+    filter_topn: int | None = None
+    name: str | None = None
+
+
+@dataclass(frozen=True)
 class NativeWorkflowConfig:
     universe_profile: str = "csi300"
     panel_path: str | Path = "artifacts/panels/csi300_weekly.parquet"
@@ -177,9 +185,17 @@ class NativeWorkflowConfig:
     model_num_threads: int | None = None
     publish_model: bool = False
     feature_spec_path: str | Path | None = None
+    consensus_recipe_specs: tuple[ConsensusRecipeSpec, ...] = field(default_factory=tuple)
     feature_groups: tuple[str, ...] = field(default_factory=lambda: RESEARCH_DEFAULT_FEATURE_GROUPS)
     included_features: tuple[str, ...] = field(default_factory=tuple)
     excluded_features: tuple[str, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "consensus_recipe_specs",
+            tuple(_coerce_consensus_recipe_spec_value(spec) for spec in self.consensus_recipe_specs),
+        )
 
 
 @dataclass
@@ -218,6 +234,83 @@ class ValidationSignalMatrixResult:
 def apply_research_seed(seed: int) -> None:
     random.seed(int(seed))
     np.random.seed(int(seed))
+
+
+def _coerce_consensus_recipe_spec_value(value: ConsensusRecipeSpec | dict[str, Any]) -> ConsensusRecipeSpec:
+    if isinstance(value, ConsensusRecipeSpec):
+        return value
+    if not isinstance(value, dict):
+        raise TypeError(f"Unsupported consensus recipe spec: {type(value)!r}")
+    return ConsensusRecipeSpec(
+        primary_recipe=str(value.get("primary_recipe") or "").strip(),
+        filter_recipe=str(value.get("filter_recipe") or "").strip(),
+        filter_topn=int(value["filter_topn"]) if value.get("filter_topn") is not None else None,
+        name=str(value.get("name") or "").strip() or None,
+    )
+
+
+def _default_consensus_recipe_name(primary_recipe: str, filter_recipe: str, filter_topn: int) -> str:
+    return f"{primary_recipe}__consensus__{filter_recipe}_top{int(filter_topn)}"
+
+
+def _resolve_consensus_filter_topn(spec: ConsensusRecipeSpec, *, topk: int, hold_buffer_rank: int | None) -> int:
+    default_topn = max(int(topk), int(hold_buffer_rank or topk))
+    return max(int(spec.filter_topn or default_topn), 1)
+
+
+def _normalize_consensus_recipe_specs(
+    config: NativeWorkflowConfig,
+    registry: dict[str, NativeResearchRecipe],
+) -> tuple[ConsensusRecipeSpec, ...]:
+    normalized_specs: list[ConsensusRecipeSpec] = []
+    used_names = set(registry)
+    base_recipe_names = set(registry)
+    for raw_spec in config.consensus_recipe_specs:
+        spec = _coerce_consensus_recipe_spec_value(raw_spec)
+        primary_recipe = spec.primary_recipe.strip()
+        filter_recipe = spec.filter_recipe.strip()
+        if not primary_recipe or not filter_recipe:
+            raise ValueError("Consensus recipe spec requires both primary_recipe and filter_recipe")
+        if primary_recipe == filter_recipe:
+            raise ValueError(f"Consensus recipe spec cannot reuse the same recipe twice: {primary_recipe}")
+        if primary_recipe not in base_recipe_names:
+            raise ValueError(f"Unknown consensus primary recipe: {primary_recipe}")
+        if filter_recipe not in base_recipe_names:
+            raise ValueError(f"Unknown consensus filter recipe: {filter_recipe}")
+        filter_topn = _resolve_consensus_filter_topn(spec, topk=config.topk, hold_buffer_rank=config.hold_buffer_rank)
+        recipe_name = spec.name or _default_consensus_recipe_name(primary_recipe, filter_recipe, filter_topn)
+        if recipe_name in used_names:
+            raise ValueError(f"Duplicate consensus recipe name: {recipe_name}")
+        used_names.add(recipe_name)
+        normalized_specs.append(
+            ConsensusRecipeSpec(
+                primary_recipe=primary_recipe,
+                filter_recipe=filter_recipe,
+                filter_topn=filter_topn,
+                name=recipe_name,
+            )
+        )
+    return tuple(normalized_specs)
+
+
+def _consensus_dependency_recipe_names(consensus_specs: Sequence[ConsensusRecipeSpec]) -> list[str]:
+    ordered: list[str] = []
+    for spec in consensus_specs:
+        for recipe_name in (spec.primary_recipe, spec.filter_recipe):
+            if recipe_name not in ordered:
+                ordered.append(recipe_name)
+    return ordered
+
+
+def _bundle_stub(bundle_name: str) -> dict[str, Any]:
+    return {
+        "bundle": bundle_name,
+        "eval_dates": [],
+        "predictions": pd.DataFrame(),
+        "details": pd.DataFrame(),
+        "summary": pd.DataFrame(),
+        "feature_importance": pd.DataFrame(),
+    }
 
 
 def build_model_params(
@@ -335,10 +428,20 @@ def _resolve_model_num_threads(
 
 
 def _compact_native_recipe_artifacts(artifacts: NativeRecipeArtifacts) -> NativeRecipeArtifacts:
+    compact_prediction_bundles: dict[str, dict[str, Any]] = {}
+    for bundle_name, bundle in artifacts.prediction_bundles.items():
+        compact_prediction_bundles[bundle_name] = {
+            "bundle": bundle_name,
+            "eval_dates": list(bundle.get("eval_dates") or []),
+            "predictions": pd.DataFrame(),
+            "details": bundle.get("details", pd.DataFrame()).copy(),
+            "summary": bundle.get("summary", pd.DataFrame()).copy(),
+            "feature_importance": bundle.get("feature_importance", pd.DataFrame()).copy(),
+        }
     return NativeRecipeArtifacts(
         recipe=artifacts.recipe,
         latest_score_frame=artifacts.latest_score_frame,
-        prediction_bundles={},
+        prediction_bundles=compact_prediction_bundles,
         native_results={},
         validation_results={},
         executor_comparison_summary=artifacts.executor_comparison_summary,
@@ -353,7 +456,12 @@ def _compact_native_recipe_artifacts(artifacts: NativeRecipeArtifacts) -> Native
         native_provider_dir=artifacts.native_provider_dir,
         benchmark_frames={},
         native_summary=artifacts.native_summary,
+        signal_realization_bridge=artifacts.signal_realization_bridge,
+        holding_count_drift=artifacts.holding_count_drift,
+        sector_exposure_history=artifacts.sector_exposure_history,
+        regime_gate_diagnostics=artifacts.regime_gate_diagnostics,
         rebalance_audit=artifacts.rebalance_audit,
+        experiment_scorecard=artifacts.experiment_scorecard,
     )
 
 
@@ -926,6 +1034,100 @@ def collect_prediction_bundle(
         "summary": summary_frame,
         "feature_importance": feature_importance,
     }
+
+
+def _rebuild_prediction_bundle_from_predictions(
+    *,
+    bundle_name: str,
+    predictions: pd.DataFrame,
+    recipe: NativeResearchRecipe,
+    topk: int,
+    used_feature_count: int,
+    feature_importance: pd.DataFrame | None = None,
+) -> dict[str, Any]:
+    if predictions.empty:
+        bundle = _bundle_stub(bundle_name)
+        bundle["feature_importance"] = feature_importance.copy() if isinstance(feature_importance, pd.DataFrame) else pd.DataFrame()
+        return bundle
+
+    frame = predictions.copy()
+    frame["feature_date"] = pd.to_datetime(frame["feature_date"], errors="coerce")
+    frame = frame.dropna(subset=["feature_date"]).sort_values(["feature_date", "score"], ascending=[True, False]).reset_index(drop=True)
+    detail_rows: list[dict[str, Any]] = []
+    for feature_date, group in frame.groupby("feature_date", dropna=False):
+        metrics = evaluate_prediction_frame_extended(group, topk=topk)
+        detail_rows.append(
+            {
+                "bundle": bundle_name,
+                "feature_date": pd.Timestamp(feature_date),
+                "used_feature_count": int(used_feature_count),
+                "signal_objective": recipe.signal_objective,
+                "label_recipe": recipe.label_recipe,
+                **metrics,
+            }
+        )
+    detail_frame = pd.DataFrame(detail_rows)
+    summary_frame = summarize_details(detail_frame, group_columns=("bundle",))
+    return {
+        "bundle": bundle_name,
+        "eval_dates": [pd.Timestamp(value) for value in sorted(frame["feature_date"].unique())],
+        "predictions": frame,
+        "details": detail_frame,
+        "summary": summary_frame,
+        "feature_importance": feature_importance.copy() if isinstance(feature_importance, pd.DataFrame) else pd.DataFrame(),
+    }
+
+
+def _coerce_prediction_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame.copy()
+    normalized = frame.copy()
+    if "feature_date" in normalized.columns:
+        normalized["feature_date"] = pd.to_datetime(normalized["feature_date"], errors="coerce")
+    if "instrument" in normalized.columns:
+        normalized["instrument"] = normalized["instrument"].astype(str)
+    if "score" in normalized.columns:
+        normalized["score"] = pd.to_numeric(normalized["score"], errors="coerce")
+    return normalized
+
+
+def _apply_consensus_filter(
+    primary_frame: pd.DataFrame,
+    filter_frame: pd.DataFrame,
+    *,
+    filter_topn: int,
+) -> pd.DataFrame:
+    primary = _coerce_prediction_frame(primary_frame)
+    filter_candidate = _coerce_prediction_frame(filter_frame)
+    if primary.empty or filter_candidate.empty:
+        return pd.DataFrame()
+    required_columns = {"feature_date", "instrument", "score"}
+    if not required_columns.issubset(primary.columns):
+        raise ValueError("Primary frame is missing required consensus filter columns")
+    if not required_columns.issubset(filter_candidate.columns):
+        raise ValueError("Filter frame is missing required consensus filter columns")
+
+    filter_ranked = (
+        filter_candidate.sort_values(["feature_date", "score", "instrument"], ascending=[True, False, True])
+        .dropna(subset=["feature_date", "instrument", "score"])
+        .copy()
+    )
+    filter_ranked["filter_score"] = filter_ranked["score"]
+    filter_ranked["filter_rank"] = (
+        filter_ranked.groupby("feature_date", dropna=False).cumcount() + 1
+    )
+    merged = primary.merge(
+        filter_ranked[["feature_date", "instrument", "filter_score", "filter_rank"]],
+        on=["feature_date", "instrument"],
+        how="inner",
+    )
+    if merged.empty:
+        return merged
+    merged["consensus_passed"] = pd.to_numeric(merged["filter_rank"], errors="coerce") <= int(filter_topn)
+    filtered = merged.loc[merged["consensus_passed"]].copy()
+    if filtered.empty:
+        return filtered
+    return filtered.sort_values(["feature_date", "score", "instrument"], ascending=[True, False, True]).reset_index(drop=True)
 
 
 def _build_validation_volume_frame(panel: pd.DataFrame, eval_dates: Sequence[pd.Timestamp]) -> pd.DataFrame:
@@ -1995,130 +2197,90 @@ def _build_native_workflow_summary_payload(
     }
 
 
-def run_native_recipe(
+def _read_optional_csv(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_csv(path)
+
+
+def _load_saved_recipe_inputs(run_dir: Path, recipe_name: str) -> dict[str, Any]:
+    recipe_dir = run_dir / recipe_name
+    manifest = {}
+    manifest_path = recipe_dir / "native_workflow_manifest.json"
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    return {
+        "manifest": manifest,
+        "latest_score_frame": _read_optional_csv(recipe_dir / "latest_score_frame.csv"),
+        "feature_prefilter": _read_optional_csv(recipe_dir / "feature_prefilter.csv"),
+        "feature_corr_candidates": _read_optional_csv(recipe_dir / "feature_corr_candidates.csv"),
+        "feature_redundancy": _read_optional_csv(recipe_dir / "feature_redundancy.csv"),
+        "feature_outlier_audit": _read_optional_csv(recipe_dir / "feature_outlier_audit.csv"),
+        "rolling_predictions": _read_optional_csv(recipe_dir / "rolling_predictions.csv"),
+        "rolling_feature_importance": _read_optional_csv(recipe_dir / "rolling_feature_importance.csv"),
+        "walk_forward_predictions": _read_optional_csv(recipe_dir / "walk_forward_predictions.csv"),
+        "walk_forward_feature_importance": _read_optional_csv(recipe_dir / "walk_forward_feature_importance.csv"),
+    }
+
+
+def _resolve_latest_feature_date(
+    latest_score_frame: pd.DataFrame,
+    prediction_bundles: dict[str, dict[str, Any]],
+) -> pd.Timestamp:
+    if not latest_score_frame.empty and "feature_date" in latest_score_frame.columns:
+        latest_dates = pd.to_datetime(latest_score_frame["feature_date"], errors="coerce").dropna()
+        if not latest_dates.empty:
+            return pd.Timestamp(latest_dates.max())
+    all_prediction_dates = [
+        pd.to_datetime(bundle["predictions"]["feature_date"], errors="coerce").dropna().max()
+        for bundle in prediction_bundles.values()
+        if isinstance(bundle.get("predictions"), pd.DataFrame)
+        and not bundle["predictions"].empty
+        and "feature_date" in bundle["predictions"].columns
+    ]
+    all_prediction_dates = [pd.Timestamp(value) for value in all_prediction_dates if pd.notna(value)]
+    if not all_prediction_dates:
+        raise RuntimeError("Unable to resolve latest feature date for recipe artifacts")
+    return max(all_prediction_dates)
+
+
+def _materialize_recipe_artifacts(
+    *,
     config: NativeWorkflowConfig,
     recipe: NativeResearchRecipe,
+    latest_score_frame: pd.DataFrame,
+    prediction_bundles: dict[str, dict[str, Any]],
+    execution_panel: pd.DataFrame,
+    feature_prefilter_stats: pd.DataFrame,
+    corr_candidates: pd.DataFrame,
+    feature_redundancy: pd.DataFrame,
+    feature_outlier_audit: pd.DataFrame,
+    feature_columns: list[str],
+    manifest_extra: dict[str, Any] | None = None,
 ) -> NativeRecipeArtifacts:
-    apply_research_seed(config.seed)
-    panel_path, execution_path, output_dir = _resolve_paths(config)
-    research_panel = _ensure_panel(
-        panel_path,
-        universe_profile=config.universe_profile,
-        start_date=config.start_date,
-        end_date=config.end_date,
-        batch_size=config.batch_size,
-        run_export=config.run_export,
-        filter_to_universe_membership=True,
-        enrichment_scope="research_full",
-        task_description=config.task_description,
-    )
-    research_panel = filter_panel_by_universe_profile(research_panel, config.universe_profile)
-    modeling_panel = prepare_modeling_panel(research_panel, label_recipe=recipe.label_recipe, signal_objective=recipe.signal_objective)
-    rolling_dates = select_evaluation_dates_for_label(
-        modeling_panel,
-        label_column="model_label_raw",
-        train_weeks=config.train_weeks,
-        valid_weeks=config.valid_weeks,
-        eval_count=config.eval_count,
-        recent_weeks=config.rolling_recent_weeks,
-        step_weeks=config.step_weeks,
-    )
-    walk_forward_dates: list[pd.Timestamp] = []
-    if config.walk_forward_enabled:
-        walk_forward_dates = select_evaluation_dates_for_label(
-            modeling_panel,
-            label_column="model_label_raw",
-            train_weeks=config.walk_forward_train_weeks,
-            valid_weeks=config.walk_forward_valid_weeks,
-            eval_count=config.walk_forward_eval_count,
-            step_weeks=config.walk_forward_step_weeks,
-            start_date=config.walk_forward_start_date,
-            end_date=config.walk_forward_end_date,
-        )
-    calibration_dates = [date for date in [*rolling_dates[:1], *walk_forward_dates[:1]] if pd.notna(date)]
-    calibration_end_date = min(calibration_dates) if calibration_dates else pd.to_datetime(modeling_panel["datetime"]).max()
-    (
-        normalized_panel,
-        feature_columns,
-        feature_prefilter_stats,
-        corr_candidates,
-        feature_redundancy,
-        feature_outlier_audit,
-    ) = _prefilter_and_normalize_features(
-        modeling_panel,
-        recipe,
-        calibration_end_date=calibration_end_date,
-    )
-
-    execution_panel, execution_path = _prepare_execution_panel(config, execution_path)
-    if execution_panel.empty:
-        execution_panel = normalized_panel
-    execution_panel["datetime"] = pd.to_datetime(execution_panel["datetime"])
-    execution_panel["instrument"] = execution_panel["instrument"].astype(str)
-
-    latest_feature_date = pd.to_datetime(normalized_panel["datetime"]).max()
-    _booster, latest_score_frame, used_features, _latest_importance = train_lightgbm_model_for_date(
-        normalized_panel,
-        feature_date=latest_feature_date,
-        feature_columns=feature_columns,
-        label_column="model_label",
-        signal_objective=recipe.signal_objective,
-        model_params=build_model_params(
-            config.seed,
-            config.reproducibility_mode,
-            recipe.signal_objective,
-            recipe.model_params,
-            num_threads=config.model_num_threads,
-        ),
-        train_weeks=config.train_weeks,
-        valid_weeks=config.valid_weeks,
-    )
-    latest_score_frame = attach_prediction_metadata(latest_score_frame, normalized_panel, latest_feature_date).sort_values("score", ascending=False).reset_index(drop=True)
-
-    rolling_bundle = collect_prediction_bundle(
-        "rolling",
-        normalized_panel,
-        eval_dates=rolling_dates,
-        feature_columns=feature_columns,
-        recipe=recipe,
-        config=config,
-    )
-    walk_forward_bundle = {
-        "bundle": "walk_forward",
-        "eval_dates": [],
-        "predictions": pd.DataFrame(),
-        "details": pd.DataFrame(),
-        "summary": pd.DataFrame(),
-        "feature_importance": pd.DataFrame(),
-    }
-    if config.walk_forward_enabled:
-        walk_forward_bundle = collect_prediction_bundle(
-            "walk_forward",
-            normalized_panel,
-            eval_dates=walk_forward_dates,
-            feature_columns=feature_columns,
-            recipe=recipe,
-            config=config,
-        )
-    prediction_bundles = {
-        bundle["bundle"]: bundle
-        for bundle in (rolling_bundle, walk_forward_bundle)
-        if not bundle["predictions"].empty
-    }
     if not prediction_bundles:
-        raise RuntimeError("No native workflow prediction bundles were produced")
+        raise RuntimeError(f"No prediction bundles available for recipe '{recipe.name}'")
+
+    resolved_bundles = {
+        bundle_name: bundle
+        for bundle_name, bundle in prediction_bundles.items()
+        if isinstance(bundle.get("predictions"), pd.DataFrame) and not bundle["predictions"].empty
+    }
+    if not resolved_bundles:
+        raise RuntimeError(f"All prediction bundles are empty for recipe '{recipe.name}'")
 
     combined_prediction_frame = pd.concat(
-        [bundle["predictions"] for bundle in prediction_bundles.values()],
+        [bundle["predictions"] for bundle in resolved_bundles.values()],
         ignore_index=True,
     )
-    native_signal_dates = sorted(pd.to_datetime(combined_prediction_frame["feature_date"]).unique())
+    native_signal_dates = sorted(pd.to_datetime(combined_prediction_frame["feature_date"]).dropna().unique())
     native_symbols = sorted(combined_prediction_frame["instrument"].astype(str).unique())
     native_quote_panel = execution_panel.loc[
         execution_panel["datetime"].isin(native_signal_dates)
         & execution_panel["instrument"].astype(str).isin(native_symbols)
     ].copy()
     native_quote_frame = build_native_quote_frame(native_quote_panel, symbols=native_symbols)
+    output_dir = Path(config.output_dir).expanduser().resolve()
     native_provider_dir = ensure_minimal_qlib_provider(
         provider_dir=output_dir / recipe.name / "qlib_native_provider",
         calendar_dates=native_signal_dates,
@@ -2145,7 +2307,7 @@ def run_native_recipe(
     regime_gate_frames: list[pd.DataFrame] = []
     native_summary_rows: list[dict[str, Any]] = []
 
-    for bundle_name, bundle in prediction_bundles.items():
+    for bundle_name, bundle in resolved_bundles.items():
         native_signal = build_native_signal_frame(bundle["predictions"])
         benchmark_frame = build_universe_benchmark_frame(
             bundle["eval_dates"],
@@ -2270,21 +2432,9 @@ def run_native_recipe(
     execution_diff_summary = pd.concat(execution_diff_frames, ignore_index=True) if execution_diff_frames else pd.DataFrame()
     slice_regime_summary = build_slice_regime_summary(combined_prediction_frame, recipe.name)
     native_summary = pd.DataFrame(native_summary_rows)
-    signal_realization_bridge = (
-        pd.concat(signal_realization_frames, ignore_index=True)
-        if signal_realization_frames
-        else pd.DataFrame()
-    )
-    holding_count_drift = (
-        pd.concat(holding_drift_frames, ignore_index=True)
-        if holding_drift_frames
-        else pd.DataFrame()
-    )
-    sector_exposure_history = (
-        pd.concat(sector_exposure_frames, ignore_index=True)
-        if sector_exposure_frames
-        else pd.DataFrame()
-    )
+    signal_realization_bridge = pd.concat(signal_realization_frames, ignore_index=True) if signal_realization_frames else pd.DataFrame()
+    holding_count_drift = pd.concat(holding_drift_frames, ignore_index=True) if holding_drift_frames else pd.DataFrame()
+    sector_exposure_history = pd.concat(sector_exposure_frames, ignore_index=True) if sector_exposure_frames else pd.DataFrame()
     rebalance_audit_history = (
         pd.concat(
             [
@@ -2303,17 +2453,18 @@ def run_native_recipe(
         if native_results
         else pd.DataFrame()
     )
-    regime_gate_diagnostics = (
-        pd.concat(regime_gate_frames, ignore_index=True)
-        if regime_gate_frames
-        else pd.DataFrame()
-    )
+    regime_gate_diagnostics = pd.concat(regime_gate_frames, ignore_index=True) if regime_gate_frames else pd.DataFrame()
 
     recipe_dir = output_dir / recipe.name
     recipe_dir.mkdir(parents=True, exist_ok=True)
     latest_score_frame.to_csv(recipe_dir / "latest_score_frame.csv", index=False)
-    latest_feature_date_str = str(pd.Timestamp(latest_feature_date).date())
-    portfolio_targets = build_portfolio_targets(latest_score_frame, model_id=f"{config.universe_profile}-{recipe.name}-qlib-native", feature_date=latest_feature_date_str, topk=config.topk)
+    latest_feature_date_str = str(_resolve_latest_feature_date(latest_score_frame, resolved_bundles).date())
+    portfolio_targets = build_portfolio_targets(
+        latest_score_frame,
+        model_id=f"{config.universe_profile}-{recipe.name}-qlib-native",
+        feature_date=latest_feature_date_str,
+        topk=config.topk,
+    )
     publish_portfolio_targets(portfolio_targets, model_id=f"{config.universe_profile}-{recipe.name}-qlib-native")
     portfolio_targets.to_csv(recipe_dir / "portfolio_targets.csv", index=False)
     feature_prefilter_stats.to_csv(recipe_dir / "feature_prefilter.csv", index=False)
@@ -2329,7 +2480,7 @@ def run_native_recipe(
     holding_count_drift.to_csv(recipe_dir / "holding_count_drift.csv", index=False)
     sector_exposure_history.to_csv(recipe_dir / "sector_exposure_history.csv", index=False)
     regime_gate_diagnostics.to_csv(recipe_dir / "regime_gate_diagnostics.csv", index=False)
-    for bundle_name, bundle in prediction_bundles.items():
+    for bundle_name, bundle in resolved_bundles.items():
         bundle["predictions"].to_csv(recipe_dir / f"{bundle_name}_predictions.csv", index=False)
         bundle["details"].to_csv(recipe_dir / f"{bundle_name}_details.csv", index=False)
         bundle["summary"].to_csv(recipe_dir / f"{bundle_name}_summary.csv", index=False)
@@ -2358,6 +2509,8 @@ def run_native_recipe(
         "used_feature_columns": feature_columns,
         "native_provider_dir": str(native_provider_dir),
     }
+    if manifest_extra:
+        manifest.update(manifest_extra)
     (recipe_dir / "native_workflow_manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",
@@ -2373,7 +2526,7 @@ def run_native_recipe(
     return NativeRecipeArtifacts(
         recipe=recipe,
         latest_score_frame=latest_score_frame,
-        prediction_bundles=prediction_bundles,
+        prediction_bundles=resolved_bundles,
         native_results=native_results,
         validation_results=validation_results,
         executor_comparison_summary=execution_diff_summary,
@@ -2393,6 +2546,198 @@ def run_native_recipe(
         sector_exposure_history=sector_exposure_history,
         regime_gate_diagnostics=regime_gate_diagnostics,
         rebalance_audit=rebalance_audit_history,
+    )
+
+
+def _build_consensus_recipe_artifacts(
+    *,
+    config: NativeWorkflowConfig,
+    spec: ConsensusRecipeSpec,
+    registry: dict[str, NativeResearchRecipe],
+    execution_panel: pd.DataFrame,
+) -> tuple[str, NativeRecipeArtifacts]:
+    output_dir = Path(config.output_dir).expanduser().resolve()
+    primary_inputs = _load_saved_recipe_inputs(output_dir, spec.primary_recipe)
+    filter_inputs = _load_saved_recipe_inputs(output_dir, spec.filter_recipe)
+    recipe_name = str(spec.name or _default_consensus_recipe_name(spec.primary_recipe, spec.filter_recipe, int(spec.filter_topn or config.topk)))
+    derived_recipe = replace(registry[spec.primary_recipe], name=recipe_name)
+
+    latest_score_frame = _apply_consensus_filter(
+        primary_inputs["latest_score_frame"],
+        filter_inputs["latest_score_frame"],
+        filter_topn=int(spec.filter_topn or config.topk),
+    )
+
+    prediction_bundles: dict[str, dict[str, Any]] = {}
+    for bundle_name in ("rolling", "walk_forward"):
+        filtered_predictions = _apply_consensus_filter(
+            primary_inputs[f"{bundle_name}_predictions"],
+            filter_inputs[f"{bundle_name}_predictions"],
+            filter_topn=int(spec.filter_topn or config.topk),
+        )
+        if filtered_predictions.empty:
+            continue
+        prediction_bundles[bundle_name] = _rebuild_prediction_bundle_from_predictions(
+            bundle_name=bundle_name,
+            predictions=filtered_predictions,
+            recipe=derived_recipe,
+            topk=config.topk,
+            used_feature_count=len(primary_inputs["manifest"].get("used_feature_columns") or []),
+            feature_importance=primary_inputs[f"{bundle_name}_feature_importance"],
+        )
+
+    if not prediction_bundles:
+        raise RuntimeError(f"Consensus recipe '{recipe_name}' produced no overlapping prediction bundles")
+
+    feature_columns = [str(value) for value in primary_inputs["manifest"].get("used_feature_columns") or []]
+    manifest_extra = {
+        "recipe_kind": "consensus_filter",
+        "primary_recipe": spec.primary_recipe,
+        "filter_recipe": spec.filter_recipe,
+        "filter_topn": int(spec.filter_topn or config.topk),
+        "derived_from": {
+            "primary_recipe": spec.primary_recipe,
+            "filter_recipe": spec.filter_recipe,
+        },
+    }
+    return recipe_name, _materialize_recipe_artifacts(
+        config=config,
+        recipe=derived_recipe,
+        latest_score_frame=latest_score_frame,
+        prediction_bundles=prediction_bundles,
+        execution_panel=execution_panel,
+        feature_prefilter_stats=primary_inputs["feature_prefilter"],
+        corr_candidates=primary_inputs["feature_corr_candidates"],
+        feature_redundancy=primary_inputs["feature_redundancy"],
+        feature_outlier_audit=primary_inputs["feature_outlier_audit"],
+        feature_columns=feature_columns,
+        manifest_extra=manifest_extra,
+    )
+
+
+def run_native_recipe(
+    config: NativeWorkflowConfig,
+    recipe: NativeResearchRecipe,
+) -> NativeRecipeArtifacts:
+    apply_research_seed(config.seed)
+    panel_path, execution_path, output_dir = _resolve_paths(config)
+    research_panel = _ensure_panel(
+        panel_path,
+        universe_profile=config.universe_profile,
+        start_date=config.start_date,
+        end_date=config.end_date,
+        batch_size=config.batch_size,
+        run_export=config.run_export,
+        filter_to_universe_membership=True,
+        enrichment_scope="research_full",
+        task_description=config.task_description,
+    )
+    research_panel = filter_panel_by_universe_profile(research_panel, config.universe_profile)
+    modeling_panel = prepare_modeling_panel(research_panel, label_recipe=recipe.label_recipe, signal_objective=recipe.signal_objective)
+    rolling_dates = select_evaluation_dates_for_label(
+        modeling_panel,
+        label_column="model_label_raw",
+        train_weeks=config.train_weeks,
+        valid_weeks=config.valid_weeks,
+        eval_count=config.eval_count,
+        recent_weeks=config.rolling_recent_weeks,
+        step_weeks=config.step_weeks,
+    )
+    walk_forward_dates: list[pd.Timestamp] = []
+    if config.walk_forward_enabled:
+        walk_forward_dates = select_evaluation_dates_for_label(
+            modeling_panel,
+            label_column="model_label_raw",
+            train_weeks=config.walk_forward_train_weeks,
+            valid_weeks=config.walk_forward_valid_weeks,
+            eval_count=config.walk_forward_eval_count,
+            step_weeks=config.walk_forward_step_weeks,
+            start_date=config.walk_forward_start_date,
+            end_date=config.walk_forward_end_date,
+        )
+    calibration_dates = [date for date in [*rolling_dates[:1], *walk_forward_dates[:1]] if pd.notna(date)]
+    calibration_end_date = min(calibration_dates) if calibration_dates else pd.to_datetime(modeling_panel["datetime"]).max()
+    (
+        normalized_panel,
+        feature_columns,
+        feature_prefilter_stats,
+        corr_candidates,
+        feature_redundancy,
+        feature_outlier_audit,
+    ) = _prefilter_and_normalize_features(
+        modeling_panel,
+        recipe,
+        calibration_end_date=calibration_end_date,
+    )
+
+    execution_panel, execution_path = _prepare_execution_panel(config, execution_path)
+    if execution_panel.empty:
+        execution_panel = normalized_panel
+    execution_panel["datetime"] = pd.to_datetime(execution_panel["datetime"])
+    execution_panel["instrument"] = execution_panel["instrument"].astype(str)
+
+    latest_feature_date = pd.to_datetime(normalized_panel["datetime"]).max()
+    _booster, latest_score_frame, used_features, _latest_importance = train_lightgbm_model_for_date(
+        normalized_panel,
+        feature_date=latest_feature_date,
+        feature_columns=feature_columns,
+        label_column="model_label",
+        signal_objective=recipe.signal_objective,
+        model_params=build_model_params(
+            config.seed,
+            config.reproducibility_mode,
+            recipe.signal_objective,
+            recipe.model_params,
+            num_threads=config.model_num_threads,
+        ),
+        train_weeks=config.train_weeks,
+        valid_weeks=config.valid_weeks,
+    )
+    latest_score_frame = attach_prediction_metadata(latest_score_frame, normalized_panel, latest_feature_date).sort_values("score", ascending=False).reset_index(drop=True)
+
+    rolling_bundle = collect_prediction_bundle(
+        "rolling",
+        normalized_panel,
+        eval_dates=rolling_dates,
+        feature_columns=feature_columns,
+        recipe=recipe,
+        config=config,
+    )
+    walk_forward_bundle = {
+        "bundle": "walk_forward",
+        "eval_dates": [],
+        "predictions": pd.DataFrame(),
+        "details": pd.DataFrame(),
+        "summary": pd.DataFrame(),
+        "feature_importance": pd.DataFrame(),
+    }
+    if config.walk_forward_enabled:
+        walk_forward_bundle = collect_prediction_bundle(
+            "walk_forward",
+            normalized_panel,
+            eval_dates=walk_forward_dates,
+            feature_columns=feature_columns,
+            recipe=recipe,
+            config=config,
+        )
+    prediction_bundles = {
+        bundle["bundle"]: bundle
+        for bundle in (rolling_bundle, walk_forward_bundle)
+        if not bundle["predictions"].empty
+    }
+    if not prediction_bundles:
+        raise RuntimeError("No native workflow prediction bundles were produced")
+    return _materialize_recipe_artifacts(
+        config=config,
+        recipe=recipe,
+        latest_score_frame=latest_score_frame,
+        prediction_bundles=prediction_bundles,
+        execution_panel=execution_panel,
+        feature_prefilter_stats=feature_prefilter_stats,
+        corr_candidates=corr_candidates,
+        feature_redundancy=feature_redundancy,
+        feature_outlier_audit=feature_outlier_audit,
+        feature_columns=feature_columns,
     )
 
 
@@ -2437,11 +2782,16 @@ def run_native_research_workflow(
     progress_callback: NativeWorkflowProgressCallback | None = None,
 ) -> dict[str, Any]:
     registry = build_native_recipe_registry(config)
-    selected_names = list(recipe_names) if recipe_names is not None else ["baseline"]
-    missing = [name for name in selected_names if name not in registry]
+    normalized_consensus_specs = _normalize_consensus_recipe_specs(config, registry)
+    requested_base_names = list(recipe_names) if recipe_names is not None else ["baseline"]
+    missing = [name for name in requested_base_names if name not in registry]
     if missing:
         raise ValueError(f"Unknown native workflow recipes: {missing}")
-    selected_recipes = [registry[name] for name in selected_names]
+    selected_base_names: list[str] = []
+    for recipe_name in [*requested_base_names, *_consensus_dependency_recipe_names(normalized_consensus_specs)]:
+        if recipe_name not in selected_base_names:
+            selected_base_names.append(recipe_name)
+    selected_recipes = [registry[name] for name in selected_base_names]
     resolved_parallel_workers = _resolve_recipe_parallel_workers(config.recipe_parallel_workers, len(selected_recipes))
     resolved_model_num_threads = _resolve_model_num_threads(
         config.model_num_threads,
@@ -2452,19 +2802,20 @@ def run_native_research_workflow(
         config,
         recipe_parallel_workers=resolved_parallel_workers,
         model_num_threads=resolved_model_num_threads,
+        consensus_recipe_specs=normalized_consensus_specs,
     )
     if resolved_parallel_workers > 1:
         effective_config = _prime_parallel_workflow_inputs(effective_config)
     artifacts: dict[str, NativeRecipeArtifacts] = {}
+    total_recipe_count = len(selected_recipes) + len(normalized_consensus_specs)
     if resolved_parallel_workers <= 1:
-        total = len(selected_recipes)
         for index, recipe in enumerate(selected_recipes, start=1):
             _emit_native_workflow_progress(
                 progress_callback,
                 "recipe_start",
                 recipe=recipe.name,
                 index=index,
-                total=total,
+                total=total_recipe_count,
                 execution_mode="serial",
                 recipe_parallel_workers=resolved_parallel_workers,
                 model_num_threads=resolved_model_num_threads,
@@ -2478,14 +2829,13 @@ def run_native_research_workflow(
                 recipe=recipe_name,
                 index=index,
                 completed=index,
-                total=total,
+                total=total_recipe_count,
                 elapsed=time.perf_counter() - started_at,
                 execution_mode="serial",
                 recipe_parallel_workers=resolved_parallel_workers,
                 model_num_threads=resolved_model_num_threads,
             )
     else:
-        total = len(selected_recipes)
         future_to_meta: dict[Any, dict[str, Any]] = {}
         with ProcessPoolExecutor(
             max_workers=resolved_parallel_workers,
@@ -2503,7 +2853,7 @@ def run_native_research_workflow(
                     "recipe_submitted",
                     recipe=recipe.name,
                     index=index,
-                    total=total,
+                    total=total_recipe_count,
                     execution_mode="parallel",
                     recipe_parallel_workers=resolved_parallel_workers,
                     model_num_threads=resolved_model_num_threads,
@@ -2527,7 +2877,7 @@ def run_native_research_workflow(
                             pending,
                             future_to_meta,
                             completed=completed,
-                            total=total,
+                            total=total_recipe_count,
                             now=time.perf_counter(),
                         ),
                     )
@@ -2543,13 +2893,71 @@ def run_native_research_workflow(
                         recipe=recipe_name,
                         index=meta["index"],
                         completed=completed,
-                        total=total,
+                        total=total_recipe_count,
                         elapsed=time.perf_counter() - float(meta["started_at"]),
                         execution_mode="parallel",
                         recipe_parallel_workers=resolved_parallel_workers,
                         model_num_threads=resolved_model_num_threads,
                     )
-    artifacts = {name: artifacts[name] for name in selected_names}
+    derived_recipe_names: list[str] = []
+    if normalized_consensus_specs:
+        panel_path, execution_path, _ = _resolve_paths(effective_config)
+        execution_panel, _ = _prepare_execution_panel(effective_config, execution_path)
+        if execution_panel.empty:
+            execution_panel = _ensure_panel(
+                panel_path,
+                universe_profile=effective_config.universe_profile,
+                start_date=effective_config.start_date,
+                end_date=effective_config.end_date,
+                batch_size=effective_config.batch_size,
+                run_export=effective_config.run_export,
+                filter_to_universe_membership=True,
+                enrichment_scope="research_full",
+                task_description=effective_config.task_description,
+            )
+            execution_panel = filter_panel_by_universe_profile(execution_panel, effective_config.universe_profile)
+        execution_panel["datetime"] = pd.to_datetime(execution_panel["datetime"])
+        execution_panel["instrument"] = execution_panel["instrument"].astype(str)
+
+        derived_completed = len(selected_recipes)
+        for offset, spec in enumerate(normalized_consensus_specs, start=1):
+            recipe_name = str(spec.name or "")
+            recipe_index = len(selected_recipes) + offset
+            _emit_native_workflow_progress(
+                progress_callback,
+                "recipe_start",
+                recipe=recipe_name,
+                index=recipe_index,
+                total=total_recipe_count,
+                execution_mode="derived",
+                recipe_parallel_workers=resolved_parallel_workers,
+                model_num_threads=resolved_model_num_threads,
+            )
+            started_at = time.perf_counter()
+            derived_name, derived_artifact = _build_consensus_recipe_artifacts(
+                config=effective_config,
+                spec=spec,
+                registry=registry,
+                execution_panel=execution_panel,
+            )
+            artifacts[derived_name] = _compact_native_recipe_artifacts(derived_artifact)
+            derived_recipe_names.append(derived_name)
+            derived_completed += 1
+            _emit_native_workflow_progress(
+                progress_callback,
+                "recipe_done",
+                recipe=derived_name,
+                index=recipe_index,
+                completed=derived_completed,
+                total=total_recipe_count,
+                elapsed=time.perf_counter() - started_at,
+                execution_mode="derived",
+                recipe_parallel_workers=resolved_parallel_workers,
+                model_num_threads=resolved_model_num_threads,
+            )
+
+    executed_names = [*selected_base_names, *derived_recipe_names]
+    artifacts = {name: artifacts[name] for name in executed_names}
     output_dir = Path(config.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     registry_payload = {
@@ -2559,7 +2967,19 @@ def run_native_research_workflow(
             for name, recipe in registry.items()
             if name != "baseline"
         },
-        "executed_recipes": selected_names,
+        "derived_recipes": {
+            str(spec.name): {
+                "name": str(spec.name),
+                "recipe_kind": "consensus_filter",
+                "primary_recipe": spec.primary_recipe,
+                "filter_recipe": spec.filter_recipe,
+                "filter_topn": int(spec.filter_topn or effective_config.topk),
+                **asdict(replace(registry[spec.primary_recipe], name=str(spec.name))),
+            }
+            for spec in normalized_consensus_specs
+        },
+        "requested_recipes": requested_base_names,
+        "executed_recipes": executed_names,
     }
     (output_dir / "recipe_registry.json").write_text(
         json.dumps(registry_payload, ensure_ascii=False, indent=2, default=str),
@@ -2593,7 +3013,7 @@ def run_native_research_workflow(
     run_experiment_scorecard = _build_run_experiment_scorecard(
         run_id=output_dir.name,
         scorecards_by_recipe=scorecards_by_recipe,
-        baseline_recipe="baseline" if "baseline" in selected_names else selected_names[0],
+        baseline_recipe="baseline" if "baseline" in selected_base_names else selected_base_names[0],
     )
     (output_dir / "experiment_scorecard.json").write_text(
         json.dumps(run_experiment_scorecard, ensure_ascii=False, indent=2, default=str),

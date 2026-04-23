@@ -116,7 +116,18 @@ type WorkflowTaskFormState = {
   validation_only_tradable: boolean;
   native_only_tradable: boolean;
   publish_model: boolean;
+  consensus_specs: ConsensusSpecFormState[];
   advanced_overrides: string;
+};
+
+type ConsensusSpecFormState = {
+  id: string;
+  enabled: boolean;
+  primary_recipe: string;
+  filter_recipe: string;
+  filter_topn: string;
+  name: string;
+  use_custom_name: boolean;
 };
 
 type ResearchAnalysisTaskFormState = {
@@ -147,6 +158,7 @@ const LABEL_RECIPE_OPTIONS = ["blended_excess_4w_8w", "excess_4w", "excess_8w"] 
 const RUN_EXPORT_OPTIONS = ["always", "auto_if_missing", "never"] as const;
 const REPRODUCIBILITY_OPTIONS = ["balanced", "strict"] as const;
 const UNIVERSE_EXIT_POLICY_OPTIONS = ["retain_quotes_for_existing_positions", "strict_membership_only"] as const;
+let consensusSpecIdCounter = 0;
 
 const MANUAL_SOURCE: TaskSourceRef = {
   kind: "manual",
@@ -938,8 +950,21 @@ function WorkflowTaskEditor({
     () => new Map(panels.map((panel) => [panel.path, panel])),
     [panels],
   );
-  const recipeOptions = React.useMemo(() => buildWorkflowRecipeOptions(form.recipe_names), [form.recipe_names]);
-  const selectedRecipeNames = React.useMemo(() => parseListInput(form.recipe_names), [form.recipe_names]);
+  const baseRecipeOptions = React.useMemo(
+    () => buildBaseWorkflowRecipeOptions(form.recipe_names, form.consensus_specs),
+    [form.consensus_specs, form.recipe_names],
+  );
+  const consensusRecipeOptions = React.useMemo(() => ["", ...baseRecipeOptions], [baseRecipeOptions]);
+  const requiredRecipeNames = React.useMemo(
+    () => getConsensusRequiredRecipeNames(form.consensus_specs),
+    [form.consensus_specs],
+  );
+  const requiredRecipeNameSet = React.useMemo(() => new Set(requiredRecipeNames), [requiredRecipeNames]);
+  const manualRecipeNames = React.useMemo(() => parseListInput(form.recipe_names), [form.recipe_names]);
+  const selectedRecipeNames = React.useMemo(
+    () => Array.from(new Set([...manualRecipeNames, ...requiredRecipeNames])),
+    [manualRecipeNames, requiredRecipeNames],
+  );
   const hasBaselineRecipe = selectedRecipeNames.includes("baseline");
   const benchmarkModeSelectValue = getBenchmarkModeSelectValue(form.benchmark_mode);
   const allowCustomPanelPath = allowsWorkflowMissingPanelPath(form.run_export);
@@ -960,11 +985,12 @@ function WorkflowTaskEditor({
   };
 
   const toggleRecipeName = (recipeName: string) => {
+    if (requiredRecipeNameSet.has(recipeName)) return;
     onChange((current) => {
       const selected = parseListInput(current.recipe_names);
       const nextSelected = selected.includes(recipeName)
         ? selected.filter((item) => item !== recipeName)
-        : recipeOptions.filter((item) => item === recipeName || selected.includes(item));
+        : baseRecipeOptions.filter((item) => item === recipeName || selected.includes(item));
       return {
         ...current,
         recipe_names: (nextSelected.length ? nextSelected : selected).join(", "),
@@ -1045,8 +1071,9 @@ function WorkflowTaskEditor({
           <div className="md:col-span-2">
             <FormField label="Recipe Names" description={describe("recipe_names")}>
               <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                {recipeOptions.map((recipeName) => {
+                {baseRecipeOptions.map((recipeName) => {
                   const checked = selectedRecipeNames.includes(recipeName);
+                  const locked = requiredRecipeNameSet.has(recipeName);
                   return (
                     <label
                       key={recipeName}
@@ -1061,14 +1088,172 @@ function WorkflowTaskEditor({
                         type="checkbox"
                         className="h-4 w-4 rounded border-input"
                         checked={checked}
+                        disabled={locked}
                         onChange={() => toggleRecipeName(recipeName)}
                       />
                       <span>{recipeName}</span>
+                      {locked ? <Badge variant="info">required by consensus</Badge> : null}
                     </label>
                   );
                 })}
               </div>
             </FormField>
+          </div>
+          <div className="md:col-span-2">
+            <Card className="border border-border/60 bg-surface-2/40">
+              <CardHeader className="flex flex-row items-center justify-between gap-3">
+                <CardTitle className="text-sm">Consensus Filter Recipes</CardTitle>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() =>
+                    onChange((current) => ({
+                      ...current,
+                      consensus_specs: [...current.consensus_specs, createConsensusSpecFormState()],
+                    }))
+                  }
+                >
+                  Add Consensus Spec
+                </Button>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {form.consensus_specs.length ? (
+                  form.consensus_specs.map((spec, index) => {
+                    const derivedName = buildConsensusRecipeName(spec, form);
+                    const filterTopNValue = spec.filter_topn || consensusDefaultFilterTopN(form);
+                    const usesInvalidPair = !!spec.primary_recipe && spec.primary_recipe === spec.filter_recipe;
+                    return (
+                      <div key={spec.id} className="rounded-lg border border-border/60 bg-surface-1/40 p-4">
+                        <div className="mb-3 flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-2">
+                            <Badge variant={spec.enabled ? "success" : "outline"}>{`Spec ${index + 1}`}</Badge>
+                            {usesInvalidPair ? <Badge variant="destructive">primary/filter must differ</Badge> : null}
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <BooleanSwitchField
+                              label="Enabled"
+                              value={spec.enabled}
+                              onChange={(value) =>
+                                onChange((current) => ({
+                                  ...current,
+                                  consensus_specs: current.consensus_specs.map((item) =>
+                                    item.id === spec.id ? { ...item, enabled: value } : item,
+                                  ),
+                                }))
+                              }
+                            />
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              onClick={() =>
+                                onChange((current) => ({
+                                  ...current,
+                                  consensus_specs: current.consensus_specs.filter((item) => item.id !== spec.id),
+                                }))
+                              }
+                            >
+                              Remove
+                            </Button>
+                          </div>
+                        </div>
+                        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                          <FormSelect
+                            label="Primary Recipe"
+                            value={spec.primary_recipe}
+                            description={describe("consensus_recipe_specs")}
+                            options={consensusRecipeOptions}
+                            onChange={(value) =>
+                              onChange((current) => ({
+                                ...current,
+                                consensus_specs: current.consensus_specs.map((item) =>
+                                  item.id === spec.id ? { ...item, primary_recipe: value } : item,
+                                ),
+                              }))
+                            }
+                          />
+                          <FormSelect
+                            label="Filter Recipe"
+                            value={spec.filter_recipe}
+                            description={describe("consensus_recipe_specs")}
+                            options={consensusRecipeOptions}
+                            onChange={(value) =>
+                              onChange((current) => ({
+                                ...current,
+                                consensus_specs: current.consensus_specs.map((item) =>
+                                  item.id === spec.id ? { ...item, filter_recipe: value } : item,
+                                ),
+                              }))
+                            }
+                          />
+                          <FormField label="Filter TopN" description={describe("consensus_recipe_specs")}>
+                            <Input
+                              value={spec.filter_topn}
+                              onChange={(event) =>
+                                onChange((current) => ({
+                                  ...current,
+                                  consensus_specs: current.consensus_specs.map((item) =>
+                                    item.id === spec.id ? { ...item, filter_topn: event.target.value } : item,
+                                  ),
+                                }))
+                              }
+                              placeholder={consensusDefaultFilterTopN(form)}
+                            />
+                          </FormField>
+                          <ReadonlyPathField
+                            label="Derived Recipe Name"
+                            value={derivedName}
+                            description="默认名称会随 primary、filter 和 TopN 自动更新。"
+                            hint={`Effective TopN: ${filterTopNValue}`}
+                          />
+                        </div>
+                        <div className="mt-3 grid gap-4 md:grid-cols-2">
+                          <BooleanSwitchField
+                            label="Custom Name"
+                            value={spec.use_custom_name}
+                            onChange={(value) =>
+                              onChange((current) => ({
+                                ...current,
+                                consensus_specs: current.consensus_specs.map((item) =>
+                                  item.id === spec.id
+                                    ? { ...item, use_custom_name: value, name: value ? item.name : "" }
+                                    : item,
+                                ),
+                              }))
+                            }
+                          />
+                          {spec.use_custom_name ? (
+                            <FormField label="Custom Derived Name">
+                              <Input
+                                value={spec.name}
+                                onChange={(event) =>
+                                  onChange((current) => ({
+                                    ...current,
+                                    consensus_specs: current.consensus_specs.map((item) =>
+                                      item.id === spec.id ? { ...item, name: event.target.value } : item,
+                                    ),
+                                  }))
+                                }
+                                placeholder={buildConsensusRecipeName({ ...spec, use_custom_name: false, name: "" }, form)}
+                              />
+                            </FormField>
+                          ) : (
+                            <div className="text-sm text-muted-foreground">
+                              关闭自定义名称时，派生 recipe 名称会按默认规则自动生成。
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div className="text-sm text-muted-foreground">
+                    没有配置共识过滤器时，只运行上面勾选的基础 recipe。
+                  </div>
+                )}
+              </CardContent>
+            </Card>
           </div>
           {hasBaselineRecipe ? (
             <div className="md:col-span-2">
@@ -1566,7 +1751,7 @@ function FormSelect({
       >
         {options.map((option) => (
           <option key={option} value={option}>
-            {option}
+            {option || "Select recipe"}
           </option>
         ))}
       </select>
@@ -1690,6 +1875,7 @@ function defaultWorkflowTaskForm(): WorkflowTaskFormState {
     validation_only_tradable: true,
     native_only_tradable: true,
     publish_model: false,
+    consensus_specs: [],
     advanced_overrides: "{}",
   });
 }
@@ -1718,6 +1904,80 @@ function parseListInput(value: string) {
     .filter(Boolean);
 }
 
+function nextConsensusSpecId() {
+  consensusSpecIdCounter += 1;
+  return `consensus-spec-${consensusSpecIdCounter}`;
+}
+
+function createConsensusSpecFormState(overrides: Partial<ConsensusSpecFormState> = {}): ConsensusSpecFormState {
+  return {
+    id: overrides.id ?? nextConsensusSpecId(),
+    enabled: overrides.enabled ?? true,
+    primary_recipe: overrides.primary_recipe ?? "",
+    filter_recipe: overrides.filter_recipe ?? "",
+    filter_topn: overrides.filter_topn ?? "",
+    name: overrides.name ?? "",
+    use_custom_name: overrides.use_custom_name ?? false,
+  };
+}
+
+function consensusDefaultFilterTopN(form: Pick<WorkflowTaskFormState, "topk" | "hold_buffer_rank">) {
+  const topk = Math.max(Number(form.topk || 10) || 10, 1);
+  const holdBufferRank = Number(form.hold_buffer_rank || 0) || 0;
+  return String(Math.max(topk, holdBufferRank > 0 ? holdBufferRank : topk));
+}
+
+function consensusFilterTopNValue(
+  spec: Pick<ConsensusSpecFormState, "filter_topn">,
+  form: Pick<WorkflowTaskFormState, "topk" | "hold_buffer_rank">,
+) {
+  const explicitValue = Number(spec.filter_topn || "");
+  if (Number.isFinite(explicitValue) && explicitValue > 0) {
+    return Math.floor(explicitValue);
+  }
+  return Number(consensusDefaultFilterTopN(form));
+}
+
+function buildConsensusRecipeName(
+  spec: Pick<ConsensusSpecFormState, "primary_recipe" | "filter_recipe" | "filter_topn" | "name" | "use_custom_name">,
+  form: Pick<WorkflowTaskFormState, "topk" | "hold_buffer_rank">,
+) {
+  if (spec.use_custom_name && spec.name.trim()) {
+    return spec.name.trim();
+  }
+  const primaryRecipe = spec.primary_recipe.trim();
+  const filterRecipe = spec.filter_recipe.trim();
+  if (!primaryRecipe || !filterRecipe) return "";
+  return `${primaryRecipe}__consensus__${filterRecipe}_top${consensusFilterTopNValue(spec, form)}`;
+}
+
+function activeConsensusSpecs(form: WorkflowTaskFormState) {
+  return form.consensus_specs
+    .filter((spec) => spec.enabled)
+    .filter((spec) => spec.primary_recipe.trim() && spec.filter_recipe.trim());
+}
+
+function getConsensusRequiredRecipeNames(consensusSpecs: ConsensusSpecFormState[]) {
+  const required = new Set<string>();
+  for (const spec of consensusSpecs) {
+    if (!spec.enabled) continue;
+    if (spec.primary_recipe.trim()) required.add(spec.primary_recipe.trim());
+    if (spec.filter_recipe.trim()) required.add(spec.filter_recipe.trim());
+  }
+  return Array.from(required);
+}
+
+function buildBaseWorkflowRecipeOptions(recipeNames: string, consensusSpecs: ConsensusSpecFormState[]) {
+  const current = parseListInput(recipeNames);
+  return Array.from(
+    new Set([
+      ...WORKFLOW_RECIPE_OPTIONS,
+      ...current,
+      ...consensusSpecs.flatMap((spec) => [spec.primary_recipe.trim(), spec.filter_recipe.trim()]).filter(Boolean),
+    ]),
+  );
+}
+
 function buildExportTaskPayload(form: ExportTaskFormState, sourceRef: TaskSourceRef) {
   const featureGroups = form.feature_mode === "custom" ? form.feature_groups : [];
   const includedFeatures = form.feature_mode === "custom" ? parseListInput(form.included_features) : [];
@@ -1741,7 +2001,14 @@ function buildExportTaskPayload(form: ExportTaskFormState, sourceRef: TaskSource
 }
 
 function buildWorkflowTaskPayload(form: WorkflowTaskFormState, sourceRef: TaskSourceRef) {
-  const recipeNames = parseListInput(form.recipe_names);
+  const consensusSpecs = activeConsensusSpecs(form).map((spec) => ({
+    name: buildConsensusRecipeName(spec, form),
+    primary_recipe: spec.primary_recipe.trim(),
+    filter_recipe: spec.filter_recipe.trim(),
+    filter_topn: consensusFilterTopNValue(spec, form),
+  }));
+  const requiredRecipeNames = getConsensusRequiredRecipeNames(form.consensus_specs);
+  const recipeNames = Array.from(new Set([...parseListInput(form.recipe_names), ...requiredRecipeNames]));
   const shouldCustomizeBaselineRecipe = form.customize_baseline_recipe && recipeNames.includes("baseline");
   let advancedOverrides: Record<string, unknown> = {};
   try {
@@ -1749,6 +2016,7 @@ function buildWorkflowTaskPayload(form: WorkflowTaskFormState, sourceRef: TaskSo
   } catch {
     advancedOverrides = {};
   }
+  delete advancedOverrides.consensus_recipe_specs;
   const configPayload: Record<string, unknown> = {
     panel_path: form.panel_path,
     output_dir: form.output_dir,
@@ -1791,6 +2059,9 @@ function buildWorkflowTaskPayload(form: WorkflowTaskFormState, sourceRef: TaskSo
     native_only_tradable: form.native_only_tradable,
     publish_model: form.publish_model,
   };
+  if (consensusSpecs.length) {
+    configPayload.consensus_recipe_specs = consensusSpecs;
+  }
   if (shouldCustomizeBaselineRecipe) {
     configPayload.signal_objective = form.signal_objective;
     configPayload.label_recipe = form.label_recipe;
@@ -1893,12 +2164,16 @@ function applyPresetToEditor(
     });
   } else if (preset.task_kind === "run_native_workflow") {
     const payload = preset.payload;
+    const nextForm = workflowFormFromConfigPayload(payload.config_payload);
+    const requiredRecipeNames = new Set(getConsensusRequiredRecipeNames(nextForm.consensus_specs));
     setters.setWorkflowForm({
-      ...workflowFormFromConfigPayload(payload.config_payload),
+      ...nextForm,
       display_name: String(payload.display_name ?? "Run Native Workflow"),
       description: String(payload.description ?? (payload.config_payload as Record<string, unknown> | undefined)?.task_description ?? ""),
       requested_by: String(payload.requested_by ?? "webapp"),
-      recipe_names: toStringArray(payload.recipe_names).join(", "),
+      recipe_names: toStringArray(payload.recipe_names)
+        .filter((recipeName) => !requiredRecipeNames.has(recipeName))
+        .join(", "),
     });
   } else {
     const payload = preset.payload;
@@ -1951,15 +2226,22 @@ function applyPrefillToEditor(
   }
   if (taskKind === "run_native_workflow") {
     setters.setWorkflowForm((current) => {
+      const prefillRecipeNames = toStringArray(prefillConfig.recipe_names);
       const nextBase = {
         ...current,
         display_name: String(prefillConfig.display_name ?? current.display_name),
         description: String(prefillConfig.description ?? current.description),
-        recipe_names: toStringArray(prefillConfig.recipe_names).join(", ") || current.recipe_names,
+        recipe_names: prefillRecipeNames.join(", ") || current.recipe_names,
       };
-      return Object.prototype.hasOwnProperty.call(prefillConfig, "config_payload")
-        ? workflowFormFromConfigPayload(prefillConfig.config_payload, nextBase)
-        : nextBase;
+      if (!Object.prototype.hasOwnProperty.call(prefillConfig, "config_payload")) {
+        return nextBase;
+      }
+      const nextForm = workflowFormFromConfigPayload(prefillConfig.config_payload, nextBase);
+      const requiredRecipeNames = new Set(getConsensusRequiredRecipeNames(nextForm.consensus_specs));
+      return {
+        ...nextForm,
+        recipe_names: prefillRecipeNames.filter((recipeName) => !requiredRecipeNames.has(recipeName)).join(", ") || nextForm.recipe_names,
+      };
     });
     return;
   }
@@ -2143,11 +2425,6 @@ function buildExecutionPanelPath(root: string, panelPath: string, universeProfil
   return joinPath(root, buildExecutionPanelFilename(panelPath, universeProfile));
 }
 
-function buildWorkflowRecipeOptions(recipeNames: string) {
-  const current = parseListInput(recipeNames);
-  return Array.from(new Set([...WORKFLOW_RECIPE_OPTIONS, ...current]));
-}
-
 function isBuiltinBenchmarkMode(value: string) {
   return BUILTIN_BENCHMARK_MODE_OPTIONS.includes(value as (typeof BUILTIN_BENCHMARK_MODE_OPTIONS)[number]);
 }
@@ -2283,6 +2560,7 @@ function workflowFormFromConfigPayload(value: unknown, baseForm?: WorkflowTaskFo
     "validation_only_tradable",
     "native_only_tradable",
     "publish_model",
+    "consensus_recipe_specs",
   ]);
   const base = baseForm ?? defaultWorkflowTaskForm();
   const has = (key: string) => Object.prototype.hasOwnProperty.call(payload, key);
@@ -2290,6 +2568,20 @@ function workflowFormFromConfigPayload(value: unknown, baseForm?: WorkflowTaskFo
   const boolValue = (key: string, fallback: boolean) => (has(key) ? toBoolean(payload[key], fallback) : fallback);
   const advancedOverrides = Object.fromEntries(Object.entries(payload).filter(([key]) => !knownKeys.has(key)));
   const existingAdvancedOverrides = parseJsonObject(base.advanced_overrides);
+  delete existingAdvancedOverrides.consensus_recipe_specs;
+  const consensusSpecs = Array.isArray(payload.consensus_recipe_specs)
+    ? payload.consensus_recipe_specs
+        .filter((item): item is Record<string, unknown> => isRecord(item))
+        .map((item) =>
+          createConsensusSpecFormState({
+            primary_recipe: String(item.primary_recipe ?? ""),
+            filter_recipe: String(item.filter_recipe ?? ""),
+            filter_topn: item.filter_topn == null ? "" : String(item.filter_topn),
+            name: String(item.name ?? ""),
+            use_custom_name: typeof item.name === "string" && item.name.trim().length > 0,
+          }),
+        )
+    : base.consensus_specs;
   const executionPanelPath = stringValue("execution_panel_path", base.execution_panel_path);
   const outputDir = stringValue("output_dir", base.output_dir);
   const signalObjective = stringValue("signal_objective", base.signal_objective);
@@ -2346,6 +2638,7 @@ function workflowFormFromConfigPayload(value: unknown, baseForm?: WorkflowTaskFo
     validation_only_tradable: boolValue("validation_only_tradable", base.validation_only_tradable),
     native_only_tradable: boolValue("native_only_tradable", base.native_only_tradable),
     publish_model: boolValue("publish_model", base.publish_model),
+    consensus_specs: consensusSpecs,
     advanced_overrides: JSON.stringify({ ...existingAdvancedOverrides, ...advancedOverrides }, null, 2),
   };
   return syncWorkflowDerivedFields(nextForm, {

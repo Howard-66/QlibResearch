@@ -239,6 +239,32 @@ def test_get_recipe_detail_reads_new_performance_metric_files(monkeypatch):
     assert detail.overview["walk_forward_calmar_ratio"] == pytest.approx(2.67)
 
 
+def test_resolve_recipe_registry_includes_derived_recipes():
+    derived_name = "rank_blended__consensus__mae_4w_top15"
+
+    registry = services._resolve_recipe_registry(
+        {
+            "recipe_registry": {
+                "baseline_recipe": {"name": "baseline"},
+                "candidate_recipes": {"rank_blended": {"name": "rank_blended"}},
+                "derived_recipes": {
+                    derived_name: {
+                        "name": derived_name,
+                        "recipe_kind": "consensus_filter",
+                        "primary_recipe": "rank_blended",
+                        "filter_recipe": "mae_4w",
+                        "filter_topn": 15,
+                    }
+                },
+            }
+        }
+    )
+
+    assert set(registry) == {"baseline", "rank_blended", derived_name}
+    assert registry[derived_name]["recipe_kind"] == "consensus_filter"
+    assert registry[derived_name]["filter_topn"] == 15
+
+
 def test_get_recipe_detail_reads_analysis_reports(monkeypatch, tmp_path):
     run_dir = tmp_path / "demo_run"
     recipe_dir = run_dir / "baseline"
@@ -1050,6 +1076,48 @@ def test_create_native_workflow_task_falls_back_to_source_run_execution_panel(mo
     assert task.config_payload["config_payload"]["execution_panel_path"] == str(execution_panel)
     assert "--execution-panel" in task.command
     assert str(execution_panel) in task.command
+
+
+def test_create_native_workflow_task_serializes_consensus_specs(monkeypatch, tmp_path):
+    monkeypatch.setattr(services, "TASKS_ROOT", tmp_path / "tasks")
+
+    request = services.RunNativeWorkflowTaskRequest(
+        display_name="consensus workflow",
+        requested_by="webapp",
+        recipe_names=["baseline", "rank_blended", "mae_4w"],
+        source_ref=services.TaskSourceRef(kind="run", source_id="demo_run", label="demo_run"),
+        config_payload={
+            "panel_path": "artifacts/panels/csi300_weekly_20260410.parquet",
+            "output_dir": "artifacts/native_workflow/target_run",
+            "consensus_recipe_specs": [
+                {
+                    "primary_recipe": "rank_blended",
+                    "filter_recipe": "mae_4w",
+                    "filter_topn": 15,
+                    "name": "rank_blended__consensus__mae_4w_top15",
+                }
+            ],
+        },
+    )
+
+    task = services.create_native_workflow_task(request)
+
+    assert "--consensus-spec-json" in task.command
+    consensus_index = task.command.index("--consensus-spec-json")
+    assert json.loads(task.command[consensus_index + 1]) == {
+        "primary_recipe": "rank_blended",
+        "filter_recipe": "mae_4w",
+        "filter_topn": 15,
+        "name": "rank_blended__consensus__mae_4w_top15",
+    }
+    assert task.config_payload["config_payload"]["consensus_recipe_specs"] == [
+        {
+            "primary_recipe": "rank_blended",
+            "filter_recipe": "mae_4w",
+            "filter_topn": 15,
+            "name": "rank_blended__consensus__mae_4w_top15",
+        }
+    ]
 
 
 def test_create_research_analysis_task_uses_analysis_script(monkeypatch, tmp_path):

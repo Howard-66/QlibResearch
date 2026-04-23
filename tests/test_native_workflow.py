@@ -4,15 +4,19 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import qlib_research.core.qlib_native_workflow as native_workflow
 from scripts.evaluate_native_weekly import parse_args
-from qlib_research.core.notebook_workflow import load_native_workflow_artifacts, run_native_notebook_workflow
+from qlib_research.core.notebook_workflow import build_native_workflow_cli_command, load_native_workflow_artifacts, run_native_notebook_workflow
 from qlib_research.core.qlib_native_workflow import (
+    ConsensusRecipeSpec,
     NativeRecipeArtifacts,
     NativeResearchRecipe,
     NativeWorkflowConfig,
+    _apply_consensus_filter,
     _build_native_workflow_summary_payload,
     _build_recipe_experiment_scorecard,
     _build_parallel_recipe_heartbeat,
+    _normalize_consensus_recipe_specs,
     _prime_parallel_workflow_inputs,
     build_execution_diff_summary,
     build_native_performance_metrics_frame,
@@ -22,8 +26,35 @@ from qlib_research.core.qlib_native_workflow import (
     build_native_recipe_registry,
     build_regime_gate_diagnostics,
     build_validation_signal_matrix,
+    run_native_research_workflow,
     select_evaluation_dates_for_label,
 )
+
+
+def _stub_native_recipe_artifacts(recipe_name: str, recipe_dir: Path) -> NativeRecipeArtifacts:
+    recipe_dir.mkdir(parents=True, exist_ok=True)
+    return NativeRecipeArtifacts(
+        recipe=NativeResearchRecipe(name=recipe_name),
+        latest_score_frame=pd.DataFrame(),
+        prediction_bundles={
+            "rolling": {"summary": pd.DataFrame()},
+            "walk_forward": {"summary": pd.DataFrame()},
+        },
+        native_results={},
+        validation_results={},
+        executor_comparison_summary=pd.DataFrame(),
+        signal_diagnostics=pd.DataFrame(),
+        portfolio_diagnostics=pd.DataFrame(),
+        slice_regime_summary=pd.DataFrame(),
+        feature_prefilter_stats=pd.DataFrame(),
+        feature_corr_candidates=pd.DataFrame(),
+        feature_redundancy=pd.DataFrame(),
+        feature_outlier_audit=pd.DataFrame(),
+        used_feature_columns=[],
+        native_provider_dir=recipe_dir,
+        benchmark_frames={},
+        native_summary=pd.DataFrame(),
+    )
 
 
 def test_build_native_recipe_registry_propagates_feature_matchers():
@@ -49,6 +80,66 @@ def test_native_workflow_config_defaults_to_parquet_panel():
     assert str(config.panel_path).endswith(".parquet")
 
 
+def test_native_workflow_config_normalizes_consensus_recipe_specs():
+    config = NativeWorkflowConfig(
+        consensus_recipe_specs=(
+            {
+                "primary_recipe": "rank_blended",
+                "filter_recipe": "mae_4w",
+                "filter_topn": 15,
+                "name": "rank_blended__consensus__mae_4w_top15",
+            },
+        ),
+    )
+
+    assert config.consensus_recipe_specs == (
+        ConsensusRecipeSpec(
+            primary_recipe="rank_blended",
+            filter_recipe="mae_4w",
+            filter_topn=15,
+            name="rank_blended__consensus__mae_4w_top15",
+        ),
+    )
+
+
+def test_normalize_consensus_recipe_specs_applies_default_topn_and_name():
+    config = NativeWorkflowConfig(
+        topk=10,
+        hold_buffer_rank=15,
+        consensus_recipe_specs=(
+            {
+                "primary_recipe": "rank_blended",
+                "filter_recipe": "mae_4w",
+            },
+        ),
+    )
+
+    specs = _normalize_consensus_recipe_specs(config, build_native_recipe_registry(config))
+
+    assert specs == (
+        ConsensusRecipeSpec(
+            primary_recipe="rank_blended",
+            filter_recipe="mae_4w",
+            filter_topn=15,
+            name="rank_blended__consensus__mae_4w_top15",
+        ),
+    )
+
+
+def test_normalize_consensus_recipe_specs_rejects_invalid_pairs():
+    config = NativeWorkflowConfig(
+        consensus_recipe_specs=(
+            {
+                "primary_recipe": "rank_blended",
+                "filter_recipe": "rank_blended",
+            },
+        ),
+    )
+
+    with pytest.raises(ValueError, match="cannot reuse the same recipe twice"):
+        _normalize_consensus_recipe_specs(config, build_native_recipe_registry(config))
+
+
 def test_evaluate_native_weekly_parse_args_accepts_feature_matchers(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",
@@ -72,6 +163,21 @@ def test_evaluate_native_weekly_parse_args_accepts_feature_matchers(monkeypatch)
     assert args.feature_spec.endswith("feature_spec.json")
     assert args.panel.endswith(".parquet")
     assert args.rolling_recent_weeks == 52
+
+
+def test_evaluate_native_weekly_parse_args_accepts_consensus_specs(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "evaluate_native_weekly.py",
+            "--consensus-spec-json",
+            '{"primary_recipe":"rank_blended","filter_recipe":"mae_4w","filter_topn":15}',
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.consensus_spec_json == ['{"primary_recipe":"rank_blended","filter_recipe":"mae_4w","filter_topn":15}']
 
 
 def test_build_native_recipe_registry_uses_feature_spec(tmp_path):
@@ -171,7 +277,7 @@ def test_build_native_workflow_summary_payload_collects_recipe_overview(tmp_path
 
     overview = payload["overview_lookup"]["baseline"]
 
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["promotion_gate_summary"] == {}
     assert overview["requested_feature_count"] == 5
     assert overview["used_feature_count"] == 3
@@ -185,6 +291,92 @@ def test_build_native_workflow_summary_payload_collects_recipe_overview(tmp_path
     assert overview["walk_forward_max_drawdown"] == pytest.approx(-0.05)
     assert overview["walk_forward_annualized_return"] == pytest.approx(0.11)
     assert overview["walk_forward_calmar_ratio"] == pytest.approx(2.2)
+
+
+def test_apply_consensus_filter_preserves_primary_ranking_without_backfill():
+    primary = pd.DataFrame(
+        [
+            {"feature_date": "2026-01-02", "instrument": "CCC", "score": 0.9},
+            {"feature_date": "2026-01-02", "instrument": "BBB", "score": 0.8},
+            {"feature_date": "2026-01-02", "instrument": "AAA", "score": 0.7},
+        ]
+    )
+    filter_frame = pd.DataFrame(
+        [
+            {"feature_date": "2026-01-02", "instrument": "BBB", "score": 1.0},
+            {"feature_date": "2026-01-02", "instrument": "CCC", "score": 0.5},
+            {"feature_date": "2026-01-02", "instrument": "AAA", "score": 0.1},
+        ]
+    )
+
+    filtered = _apply_consensus_filter(primary, filter_frame, filter_topn=2)
+
+    assert filtered["instrument"].tolist() == ["CCC", "BBB"]
+    assert filtered["score"].tolist() == [pytest.approx(0.9), pytest.approx(0.8)]
+    assert filtered["filter_rank"].tolist() == [2, 1]
+    assert filtered["consensus_passed"].tolist() == [True, True]
+
+
+def test_run_native_research_workflow_auto_adds_consensus_dependencies(monkeypatch, tmp_path):
+    executed_recipe_names: list[str] = []
+    execution_panel = pd.DataFrame(
+        [
+            {"datetime": "2026-01-02", "instrument": "AAA"},
+            {"datetime": "2026-01-02", "instrument": "BBB"},
+        ]
+    )
+
+    def fake_run_native_recipe_job(config: NativeWorkflowConfig, recipe: NativeResearchRecipe) -> tuple[str, NativeRecipeArtifacts]:
+        executed_recipe_names.append(recipe.name)
+        return recipe.name, _stub_native_recipe_artifacts(recipe.name, Path(config.output_dir) / recipe.name)
+
+    def fake_build_consensus_recipe_artifacts(**kwargs: object) -> tuple[str, NativeRecipeArtifacts]:
+        spec = kwargs["spec"]
+        assert isinstance(spec, ConsensusRecipeSpec)
+        return str(spec.name), _stub_native_recipe_artifacts(str(spec.name), tmp_path / str(spec.name))
+
+    monkeypatch.setattr(native_workflow, "_run_native_recipe_job", fake_run_native_recipe_job)
+    monkeypatch.setattr(native_workflow, "_build_consensus_recipe_artifacts", fake_build_consensus_recipe_artifacts)
+    monkeypatch.setattr(native_workflow, "_prepare_execution_panel", lambda config, execution_path: (execution_panel.copy(), Path(config.output_dir) / "execution.parquet"))
+    monkeypatch.setattr(
+        native_workflow,
+        "_build_recipe_experiment_scorecard",
+        lambda **kwargs: {"recipe_name": kwargs["recipe_name"], "verdict": "monitor"},
+    )
+    monkeypatch.setattr(native_workflow, "_build_run_experiment_scorecard", lambda **kwargs: {"headline": "ok"})
+    monkeypatch.setattr(native_workflow, "passes_native_promotion_gate", lambda baseline, candidate: {"promotion_gate_passed": True})
+    monkeypatch.setattr(
+        native_workflow,
+        "_build_native_workflow_summary_payload",
+        lambda **kwargs: {
+            "schema_version": 3,
+            "recipe_registry": kwargs["registry_payload"],
+            "promotion_gate_summary": kwargs["promotion_gate"],
+            "overview_lookup": {},
+        },
+    )
+
+    result = run_native_research_workflow(
+        NativeWorkflowConfig(
+            output_dir=tmp_path,
+            consensus_recipe_specs=(
+                {
+                    "primary_recipe": "rank_blended",
+                    "filter_recipe": "mae_4w",
+                    "filter_topn": 15,
+                },
+            ),
+        ),
+        recipe_names=["baseline"],
+    )
+
+    derived_recipe_name = "rank_blended__consensus__mae_4w_top15"
+    assert executed_recipe_names == ["baseline", "rank_blended", "mae_4w"]
+    assert result["recipe_registry"]["requested_recipes"] == ["baseline"]
+    assert result["recipe_registry"]["executed_recipes"] == ["baseline", "rank_blended", "mae_4w", derived_recipe_name]
+    assert result["recipe_registry"]["derived_recipes"][derived_recipe_name]["recipe_kind"] == "consensus_filter"
+    assert result["recipe_registry"]["derived_recipes"][derived_recipe_name]["primary_recipe"] == "rank_blended"
+    assert result["recipe_registry"]["derived_recipes"][derived_recipe_name]["filter_recipe"] == "mae_4w"
 
 
 def test_build_native_performance_metrics_frame_computes_weekly_metrics():

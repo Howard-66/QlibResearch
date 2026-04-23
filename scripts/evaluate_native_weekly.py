@@ -158,13 +158,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--publish-model", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--run-export", choices=["always", "auto_if_missing", "never"], default="auto_if_missing")
     parser.add_argument("--recipe", action="append", default=None, help="Recipe name from the registry; repeat to run multiple recipes.")
+    parser.add_argument(
+        "--consensus-spec-json",
+        action="append",
+        default=None,
+        help="JSON encoded consensus recipe spec. Repeat to add multiple derived consensus recipes.",
+    )
     return parser.parse_args()
+
+
+def _parse_consensus_spec_args(raw_values: list[str] | None) -> list[dict[str, object]]:
+    specs: list[dict[str, object]] = []
+    for raw_value in raw_values or []:
+        payload = json.loads(raw_value)
+        if isinstance(payload, list):
+            for item in payload:
+                if not isinstance(item, dict):
+                    raise ValueError("Consensus recipe spec list items must be objects")
+                specs.append(item)
+            continue
+        if not isinstance(payload, dict):
+            raise ValueError("Consensus recipe spec must be a JSON object")
+        specs.append(payload)
+    return specs
 
 
 def main() -> None:
     overall_start = time.perf_counter()
     _emit_stage("1/4 Parse Args", "Parsing CLI arguments and building workflow config")
     args = parse_args()
+    consensus_recipe_specs = _parse_consensus_spec_args(args.consensus_spec_json)
     config = NativeWorkflowConfig(
         universe_profile=args.universe_profile,
         panel_path=args.panel,
@@ -213,6 +236,7 @@ def main() -> None:
         excluded_features=tuple(args.exclude_feature or ()),
         publish_model=args.publish_model,
         run_export=args.run_export,
+        consensus_recipe_specs=tuple(consensus_recipe_specs),
     )
     selected_recipes = list(args.recipe) if args.recipe else ["baseline"]
     _emit_stage(

@@ -1714,6 +1714,11 @@ def _resolve_recipe_registry(summary_payload: dict[str, Any]) -> dict[str, dict[
         for recipe_name, recipe_config in candidate_recipes.items():
             if isinstance(recipe_config, dict):
                 result[str(recipe_name)] = recipe_config
+    derived_recipes = registry.get("derived_recipes", {})
+    if isinstance(derived_recipes, dict):
+        for recipe_name, recipe_config in derived_recipes.items():
+            if isinstance(recipe_config, dict):
+                result[str(recipe_name)] = recipe_config
     return result
 
 
