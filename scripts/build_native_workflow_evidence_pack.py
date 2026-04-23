@@ -877,6 +877,39 @@ def _ranking_rationale(row: dict[str, Any]) -> str:
     return "有局部亮点，但尚未形成比主线更完整的收益解释。"
 
 
+def _markdown_cell(value: Any) -> str:
+    return str(value if value is not None else "").replace("\n", " ").replace("|", "\\|")
+
+
+def recipe_ranking_table_lines(pack: dict[str, Any]) -> list[str]:
+    rows = sorted(
+        pack.get("recipe_matrix", []),
+        key=lambda row: _safe_int(row.get("rank")) or 999,
+    )
+    lines = [
+        "| 排名 | recipe | 角色 | 总收益 | 最大回撤 | TopK 超额 | 分数区分度 | 研究判断 |",
+        "| ---: | --- | --- | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for row in rows:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _markdown_cell(row.get("rank")),
+                    _markdown_cell(row.get("recipe")),
+                    _markdown_cell(_role_label(row.get("role"))),
+                    _markdown_cell(_fmt_pct(row.get("walk_forward_net_total_return"))),
+                    _markdown_cell(_fmt_pct(row.get("walk_forward_max_drawdown"))),
+                    _markdown_cell(_fmt_pct(row.get("walk_forward_topk_mean_excess_return_4w"), 2)),
+                    _markdown_cell(_fmt_pct(row.get("signal_unique_mean"))),
+                    _markdown_cell(_ranking_rationale(row)),
+                ]
+            )
+            + " |"
+        )
+    return lines
+
+
 def _experiment_label(name: Any) -> str:
     labels = {
         "rebuild_scorecard_from_raw_artifacts": "重建结构化摘要",
@@ -1005,20 +1038,7 @@ def build_system_report_from_evidence_pack(pack: dict[str, Any]) -> dict[str, An
         "## Recipe Ranking & Roles",
     ]
     markdown.extend(
-        [
-            "| 排名 | Recipe | 角色 | 收益 | 最大回撤 | TopK 超额 | 研究判断 |",
-            "| --- | --- | --- | ---: | ---: | ---: | --- |",
-            *[
-                (
-                    f"| {row.get('rank')} | {row.get('recipe')} | {_role_label(row.get('role'))} | "
-                    f"{_fmt_pct(row.get('walk_forward_net_total_return'))} | "
-                    f"{_fmt_pct(row.get('walk_forward_max_drawdown'))} | "
-                    f"{_fmt_pct(row.get('walk_forward_topk_mean_excess_return_4w'), 2)} | "
-                    f"{_ranking_rationale(row)} |"
-                )
-                for row in pack.get("recipe_matrix", [])
-            ],
-        ]
+        recipe_ranking_table_lines(pack)
     )
     markdown.extend(
         [

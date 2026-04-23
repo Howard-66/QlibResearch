@@ -10,6 +10,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { getPanelDetail } from "@/lib/api";
 import { formatBytes, formatCompactDate, formatInteger } from "@/lib/format";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export default async function PanelDetailPage({ params }: { params: Promise<{ panelId: string }> }) {
   const { panelId } = await params;
   const panel = await getPanelDetail(panelId);

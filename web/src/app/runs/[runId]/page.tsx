@@ -75,7 +75,7 @@ export default async function RunDetailPage({ params }: { params: Promise<{ runI
             </div>
             {latestSummaryMarkdown ? (
               <MarkdownPreviewDialog
-                title={`${detail.run_id} · Research Summary`}
+                title="Research Diagnosis Details"
                 content={latestSummaryMarkdown}
                 triggerLabel="查看详情"
               />

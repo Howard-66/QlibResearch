@@ -129,7 +129,7 @@ type ResearchAnalysisTaskFormState = {
   recipe_name: string;
   compare_items_json: string;
   analysis_template: "investment_report" | "experiment_review" | "ui_insight" | "anomaly_diagnosis" | "native_workflow_system_report";
-  analysis_engine: "auto" | "codex_cli" | "claude_cli";
+  analysis_engine: "auto" | "codex_cli" | "claude_cli" | "gemini_cli";
   skills: string;
   output_dir: string;
 };
@@ -170,6 +170,7 @@ export function TasksPageClient() {
     queryFn: getPanels,
   });
   const [selectedTaskId, setSelectedTaskId] = React.useState<string | null>(null);
+  const [selectedHistoryTaskId, setSelectedHistoryTaskId] = React.useState<string | null>(null);
   const [historyFilter, setHistoryFilter] = React.useState<HistoryFilter>("all");
   const [editorOpen, setEditorOpen] = React.useState(false);
   const [editorTaskKind, setEditorTaskKind] = React.useState<EditorTaskKind>("export_panel");
@@ -181,38 +182,68 @@ export function TasksPageClient() {
   const appliedPresetKeyRef = React.useRef<string | null>(null);
 
   const board = tasksQuery.data;
-  const selectedTaskSummary = React.useMemo(
-    () => findTaskSummary(board, selectedTaskId),
-    [board, selectedTaskId],
+  const runningTask = board?.running_task ?? null;
+  const queuedTasks = board?.queued_tasks ?? [];
+  const historyTasks = React.useMemo(
+    () =>
+      (board?.history_tasks ?? []).filter((task) => {
+        if (historyFilter === "all") return true;
+        return task.status === historyFilter;
+      }),
+    [board?.history_tasks, historyFilter],
   );
+  const selectedTaskSummary = React.useMemo(
+    () => findTaskSummary(board, selectedHistoryTaskId),
+    [board, selectedHistoryTaskId],
+  );
+  const selectedTaskRefreshId = selectedTaskSummary?.task_id;
+  const selectedTaskRefreshToken = selectedTaskSummary
+    ? [
+        selectedTaskSummary.status,
+        selectedTaskSummary.started_at ?? "",
+        selectedTaskSummary.finished_at ?? "",
+      ].join("|")
+    : "";
 
   React.useEffect(() => {
     if (!board) return;
     const allTaskIds = [
       board.running_task?.task_id,
       ...board.queued_tasks.map((task) => task.task_id),
-      ...board.history_tasks.map((task) => task.task_id),
     ].filter(Boolean) as string[];
     if (selectedTaskId && allTaskIds.includes(selectedTaskId)) {
       return;
     }
-    const nextTaskId = board.running_task?.task_id ?? board.queued_tasks[0]?.task_id ?? board.history_tasks[0]?.task_id ?? null;
+    const nextTaskId = board.running_task?.task_id ?? board.queued_tasks[0]?.task_id ?? null;
     setSelectedTaskId(nextTaskId);
   }, [board, selectedTaskId]);
 
+  React.useEffect(() => {
+    if (selectedHistoryTaskId && historyTasks.some((task) => task.task_id === selectedHistoryTaskId)) {
+      return;
+    }
+    setSelectedHistoryTaskId(historyTasks[0]?.task_id ?? null);
+  }, [historyTasks, selectedHistoryTaskId]);
+
   const taskDetailQuery = useQuery<ResearchTaskDetail>({
-    queryKey: ["task-detail", selectedTaskId],
-    queryFn: () => getTask(selectedTaskId as string),
-    enabled: Boolean(selectedTaskId),
+    queryKey: ["task-detail", selectedHistoryTaskId],
+    queryFn: () => getTask(selectedHistoryTaskId as string),
+    enabled: Boolean(selectedHistoryTaskId),
     refetchInterval: selectedTaskSummary && ["running", "stopping"].includes(selectedTaskSummary.status) ? 4_000 : false,
   });
 
   const logsQuery = useQuery<TaskLogResponse>({
-    queryKey: ["task-logs", selectedTaskId],
-    queryFn: () => getTaskLogs(selectedTaskId as string),
-    enabled: Boolean(selectedTaskId),
+    queryKey: ["task-logs", selectedHistoryTaskId],
+    queryFn: () => getTaskLogs(selectedHistoryTaskId as string),
+    enabled: Boolean(selectedHistoryTaskId),
     refetchInterval: selectedTaskSummary && ["running", "stopping"].includes(selectedTaskSummary.status) ? 4_000 : false,
   });
+
+  React.useEffect(() => {
+    if (!selectedTaskRefreshId) return;
+    void queryClient.invalidateQueries({ queryKey: ["task-detail", selectedTaskRefreshId] });
+    void queryClient.invalidateQueries({ queryKey: ["task-logs", selectedTaskRefreshId] });
+  }, [queryClient, selectedTaskRefreshId, selectedTaskRefreshToken]);
 
   const presetTaskKind = normalizeTaskKind(searchParams.get("create"));
   const presetSourceType = searchParams.get("sourceType");
@@ -372,17 +403,6 @@ export function TasksPageClient() {
     },
   });
 
-  const runningTask = board?.running_task ?? null;
-  const queuedTasks = board?.queued_tasks ?? [];
-  const historyTasks = React.useMemo(
-    () =>
-      (board?.history_tasks ?? []).filter((task) => {
-        if (historyFilter === "all") return true;
-        return task.status === historyFilter;
-      }),
-    [board?.history_tasks, historyFilter],
-  );
-
   const handleMoveTask = (taskId: string, direction: "up" | "down") => {
     const ids = [...queuedTasks.map((task) => task.task_id)];
     const index = ids.indexOf(taskId);
@@ -432,128 +452,132 @@ export function TasksPageClient() {
         {board?.queue_state.updated_at ? <Badge variant="outline">Updated {formatDateTime(board.queue_state.updated_at)}</Badge> : null}
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-[1.1fr,0.9fr]">
-        <div className="space-y-6">
-          <Card className="glass-card">
-            <CardHeader>
-              <CardTitle className="text-base">Running</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {runningTask ? (
+      <div className="grid items-start gap-6 lg:grid-cols-[minmax(22rem,0.95fr)_minmax(0,1.05fr)]">
+        <Card className="glass-card">
+          <CardHeader>
+            <CardTitle className="text-base">Running</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {runningTask ? (
+              <TaskListItem
+                task={runningTask}
+                selected={selectedTaskId === runningTask.task_id}
+                onSelect={() => setSelectedTaskId(runningTask.task_id)}
+                actions={
+                  <Button size="sm" variant="outline" onClick={() => stopCurrentMutation.mutate()} disabled={stopCurrentMutation.isPending}>
+                    <Square className="h-4 w-4" />
+                    Stop
+                  </Button>
+                }
+              />
+            ) : (
+              <EmptyCard message="当前没有运行中的任务。先 Add Task，再点击 Run Queue 启动串行调度。" />
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="glass-card min-w-0">
+          <CardHeader>
+            <CardTitle className="text-base">Queued</CardTitle>
+          </CardHeader>
+          <CardContent className="max-h-[360px] space-y-3 overflow-y-auto">
+            {queuedTasks.length ? (
+              queuedTasks.map((task) => (
                 <TaskListItem
-                  task={runningTask}
-                  selected={selectedTaskId === runningTask.task_id}
-                  onSelect={() => setSelectedTaskId(runningTask.task_id)}
+                  key={task.task_id}
+                  task={task}
+                  selected={selectedTaskId === task.task_id}
+                  onSelect={() => setSelectedTaskId(task.task_id)}
                   actions={
-                    <Button size="sm" variant="outline" onClick={() => stopCurrentMutation.mutate()} disabled={stopCurrentMutation.isPending}>
-                      <Square className="h-4 w-4" />
-                      Stop
-                    </Button>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          handleMoveTask(task.task_id, "up");
+                        }}
+                        disabled={reorderMutation.isPending || task.queue_position === 1}
+                      >
+                        <ArrowUp className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          handleMoveTask(task.task_id, "down");
+                        }}
+                        disabled={reorderMutation.isPending || task.queue_position === queuedTasks.length}
+                      >
+                        <ArrowDown className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          removeMutation.mutate(task.task_id);
+                        }}
+                        disabled={removeMutation.isPending}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
                   }
                 />
-              ) : (
-                <EmptyCard message="当前没有运行中的任务。先 Add Task，再点击 Run Queue 启动串行调度。" />
-              )}
-            </CardContent>
-          </Card>
+              ))
+            ) : (
+              <EmptyCard message="队列当前为空。Add Task 会先把任务放入 queued，等待你统一启动。" />
+            )}
+          </CardContent>
+        </Card>
+      </div>
 
-          <Card className="glass-card">
-            <CardHeader>
-              <CardTitle className="text-base">Queued</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {queuedTasks.length ? (
-                queuedTasks.map((task) => (
-                  <TaskListItem
-                    key={task.task_id}
-                    task={task}
-                    selected={selectedTaskId === task.task_id}
-                    onSelect={() => setSelectedTaskId(task.task_id)}
-                    actions={
-                      <div className="flex flex-wrap gap-2">
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            handleMoveTask(task.task_id, "up");
-                          }}
-                          disabled={reorderMutation.isPending || task.queue_position === 1}
-                        >
-                          <ArrowUp className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            handleMoveTask(task.task_id, "down");
-                          }}
-                          disabled={reorderMutation.isPending || task.queue_position === queuedTasks.length}
-                        >
-                          <ArrowDown className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            removeMutation.mutate(task.task_id);
-                          }}
-                          disabled={removeMutation.isPending}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    }
-                  />
-                ))
-              ) : (
-                <EmptyCard message="队列当前为空。Add Task 会先把任务放入 queued，等待你统一启动。" />
-              )}
-            </CardContent>
-          </Card>
+      <div role="separator" aria-orientation="horizontal" className="h-px bg-border/70" />
 
-          <Card className="glass-card">
-            <CardHeader className="gap-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <CardTitle className="text-base">History</CardTitle>
-                <div className="flex flex-wrap gap-2">
-                  {(["all", "succeeded", "failed", "cancelled"] as const).map((filter) => (
-                    <Button
-                      key={filter}
-                      size="sm"
-                      variant={historyFilter === filter ? "default" : "outline"}
-                      onClick={() => setHistoryFilter(filter)}
-                    >
-                      {filter}
-                    </Button>
-                  ))}
-                </div>
+      <div className="grid items-start gap-6 lg:grid-cols-[minmax(22rem,0.95fr)_minmax(0,1.05fr)]">
+        <Card className="glass-card">
+          <CardHeader className="gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <CardTitle className="text-base">History</CardTitle>
+              <div className="flex flex-wrap gap-2">
+                {(["all", "succeeded", "failed", "cancelled"] as const).map((filter) => (
+                  <Button
+                    key={filter}
+                    size="sm"
+                    variant={historyFilter === filter ? "default" : "outline"}
+                    onClick={() => setHistoryFilter(filter)}
+                  >
+                    {filter}
+                  </Button>
+                ))}
               </div>
-            </CardHeader>
-            <CardContent className="space-y-3 max-h-[400px] overflow-y-auto">
-              {historyTasks.length ? (
-                historyTasks.map((task) => (
-                  <TaskListItem
-                    key={task.task_id}
-                    task={task}
-                    selected={selectedTaskId === task.task_id}
-                    onSelect={() => setSelectedTaskId(task.task_id)}
-                  />
-                ))
-              ) : (
-                <EmptyCard message="历史任务会在这里按状态归档，支持随时回看配置、日志和结果摘要。" />
-              )}
-            </CardContent>
-          </Card>
-        </div>
+            </div>
+          </CardHeader>
+          <CardContent className="max-h-[680px] space-y-3 overflow-y-auto">
+            {historyTasks.length ? (
+              historyTasks.map((task) => (
+                <TaskListItem
+                  key={task.task_id}
+                  task={task}
+                  selected={selectedHistoryTaskId === task.task_id}
+                  onSelect={() => setSelectedHistoryTaskId(task.task_id)}
+                />
+              ))
+            ) : (
+              <EmptyCard message="历史任务会在这里按状态归档，支持随时回看配置、日志和结果摘要。" />
+            )}
+          </CardContent>
+        </Card>
 
-        <TaskDetailPanel
-          task={taskDetailQuery.data}
-          logs={logsQuery.data}
-          isLoading={taskDetailQuery.isLoading}
-        />
+        <div className="min-w-0">
+          <TaskDetailPanel
+            task={taskDetailQuery.data}
+            logs={logsQuery.data}
+            isLoading={taskDetailQuery.isLoading}
+          />
+        </div>
       </div>
 
       <Dialog open={editorOpen} onOpenChange={handleEditorOpenChange}>
@@ -1294,6 +1318,7 @@ function ResearchAnalysisTaskEditor({
             <option value="auto">auto</option>
             <option value="codex_cli">codex_cli</option>
             <option value="claude_cli">claude_cli</option>
+            <option value="gemini_cli">gemini_cli</option>
           </select>
         </FormField>
         <FormField label="Output Dir">
@@ -1680,7 +1705,7 @@ function defaultResearchAnalysisTaskForm(): ResearchAnalysisTaskFormState {
     recipe_name: "",
     compare_items_json: "[]",
     analysis_template: "native_workflow_system_report",
-    analysis_engine: "auto",
+    analysis_engine: "codex_cli",
     skills: "",
     output_dir: "artifacts/analysis",
   };
@@ -1888,9 +1913,9 @@ function applyPresetToEditor(
       compare_items_json: JSON.stringify(payload.compare_items ?? [], null, 2),
       analysis_template: isAnalysisTemplate(payload.analysis_template) ? payload.analysis_template : "investment_report",
       analysis_engine:
-        payload.analysis_engine === "codex_cli" || payload.analysis_engine === "claude_cli"
+        payload.analysis_engine === "codex_cli" || payload.analysis_engine === "claude_cli" || payload.analysis_engine === "gemini_cli"
           ? payload.analysis_engine
-          : "auto",
+          : "codex_cli",
       skills: toStringArray(payload.skills).join(", "),
       output_dir: String(payload.output_dir ?? "artifacts/analysis"),
     });

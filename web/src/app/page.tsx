@@ -5,6 +5,9 @@ import { DataTable } from "@/components/data/data-table";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { getOverview } from "@/lib/api";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export default async function OverviewPage() {
   const overview = await getOverview();
   const recentRows = overview.recent_runs.map((item) => ({

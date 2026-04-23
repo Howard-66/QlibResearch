@@ -76,6 +76,7 @@ def test_build_cli_prompt_requires_native_workflow_json_contract():
     assert "新旧 run summary 比较" in prompt
     assert "四舍五入" in prompt
     assert "markdown" in prompt
+    assert "排名、recipe、角色、总收益、最大回撤、TopK 超额、分数区分度、研究判断" in prompt
 
 
 def test_native_workflow_skill_path_prefers_repo_copy():
@@ -111,6 +112,7 @@ def test_native_workflow_report_uses_readable_chinese_summary():
     assert "## Executive Verdict" in markdown
     assert "rank_blended 暂时最适合作为下一轮主线" in markdown
     assert "67.5%" in markdown
+    assert "| 排名 | recipe | 角色 | 总收益 | 最大回撤 | TopK 超额 | 分数区分度 | 研究判断 |" in markdown
     assert "0.6745489921187544" not in markdown
     assert "walk_forward_performance_metrics.csv" not in markdown
     assert "新旧 run summary" not in markdown
@@ -128,14 +130,41 @@ def test_evidence_pack_detects_csi500_investigate_fixture():
     assert any(row["walk_forward_max_drawdown"] <= -0.30 for row in pack["recipe_matrix"])
 
 
+def test_prepare_native_workflow_payload_omits_large_analysis_reports(tmp_path):
+    payload = {
+        "source_kind": "run",
+        "run_id": "csi300_2016_20260410_a1",
+        "analysis_reports": [{"content_preview": "x" * 1_100_000}],
+    }
+
+    prepared, manifest = run_research_analysis._prepare_native_workflow_payload(
+        payload,
+        cwd=Path("artifacts/native_workflow/csi300_2016_20260410_a1"),
+        output_dir=tmp_path,
+    )
+    prompt = run_research_analysis._build_cli_prompt(
+        prepared,
+        template="native_workflow_system_report",
+        skills=["native-workflow-artifact-analysis"],
+    )
+
+    assert "analysis_reports" not in prepared
+    assert manifest["analysis_reports_omitted"] == "analysis_reports"
+    assert prepared["evidence_pack"]
+    assert Path(manifest["evidence_pack_path"]).exists()
+    assert len(prompt.encode("utf-8")) < 1_048_576
+
+
 def test_invoke_codex_cli_runs_subprocess(monkeypatch):
     calls: list[list[str]] = []
+    stdin_prompts: list[str | None] = []
 
     def fake_which(name: str) -> str | None:
         return f"/usr/local/bin/{name}"
 
     def fake_run(command, input=None, text=None, capture_output=None, cwd=None, check=None):
         calls.append(command)
+        stdin_prompts.append(input)
         return subprocess.CompletedProcess(command, 0, stdout="codex output", stderr="")
 
     monkeypatch.setattr(run_research_analysis.shutil, "which", fake_which)
@@ -152,16 +181,22 @@ def test_invoke_codex_cli_runs_subprocess(monkeypatch):
     assert calls
     assert calls[0][0].endswith("codex")
     assert "exec" in calls[0]
+    assert calls[0][-1] == "-"
+    assert stdin_prompts[0]
+    assert "Demo" in stdin_prompts[0]
+    assert "Demo" not in calls[0]
 
 
 def test_invoke_claude_cli_runs_subprocess(monkeypatch):
     calls: list[list[str]] = []
+    stdin_prompts: list[str | None] = []
 
     def fake_which(name: str) -> str | None:
         return f"/usr/local/bin/{name}"
 
     def fake_run(command, input=None, text=None, capture_output=None, cwd=None, check=None):
         calls.append(command)
+        stdin_prompts.append(input)
         return subprocess.CompletedProcess(command, 0, stdout="claude output", stderr="")
 
     monkeypatch.setattr(run_research_analysis.shutil, "which", fake_which)
@@ -178,6 +213,41 @@ def test_invoke_claude_cli_runs_subprocess(monkeypatch):
     assert calls
     assert calls[0][0].endswith("claude")
     assert "-p" in calls[0]
+    assert stdin_prompts[0]
+    assert "Demo" in stdin_prompts[0]
+    assert "Demo" not in calls[0]
+
+
+def test_invoke_gemini_cli_runs_subprocess(monkeypatch):
+    calls: list[list[str]] = []
+    stdin_prompts: list[str | None] = []
+
+    def fake_which(name: str) -> str | None:
+        return f"/usr/local/bin/{name}"
+
+    def fake_run(command, input=None, text=None, capture_output=None, cwd=None, check=None):
+        calls.append(command)
+        stdin_prompts.append(input)
+        return subprocess.CompletedProcess(command, 0, stdout="gemini output", stderr="")
+
+    monkeypatch.setattr(run_research_analysis.shutil, "which", fake_which)
+    monkeypatch.setattr(run_research_analysis.subprocess, "run", fake_run)
+
+    result = run_research_analysis._invoke_gemini_cli(
+        {"headline": "Demo"},
+        template="investment_report",
+        skills=[],
+        cwd=Path("/tmp"),
+    )
+
+    assert result["engine"] == "gemini_cli"
+    assert calls
+    assert calls[0][0].endswith("gemini")
+    assert "--prompt" in calls[0]
+    assert "--approval-mode" in calls[0]
+    assert stdin_prompts[0]
+    assert "Demo" in stdin_prompts[0]
+    assert "Demo" not in calls[0]
 
 
 def test_run_single_native_workflow_analysis_falls_back_on_invalid_cli_json(monkeypatch, tmp_path):
@@ -246,7 +316,9 @@ def test_run_single_native_workflow_analysis_falls_back_on_invalid_cli_json(monk
     assert result["engine_used"] == "codex_cli"
     assert summary["lead_recipe"] == "rank_blended"
     assert summary["validation_warnings"]
-    assert "# demo_run 系统诊断报告" in (tmp_path / "latest_summary.md").read_text(encoding="utf-8")
+    markdown = (tmp_path / "latest_summary.md").read_text(encoding="utf-8")
+    assert "# demo_run 系统诊断报告" in markdown
+    assert "| 排名 | recipe | 角色 | 总收益 | 最大回撤 | TopK 超额 | 分数区分度 | 研究判断 |" in markdown
 
 
 def test_run_single_native_workflow_analysis_writes_valid_json_report(monkeypatch, tmp_path):
@@ -259,13 +331,34 @@ def test_run_single_native_workflow_analysis_writes_valid_json_report(monkeypatc
         "live_feasibility": {"status": "caution", "summary": "summary", "checks": []},
         "next_experiments": [],
         "evidence_refs": [],
-        "markdown": "# demo_run 系统诊断报告\n\n## Executive Verdict\n- verdict: investigate\n",
+        "markdown": (
+            "# demo_run 系统诊断报告\n\n"
+            "## Executive Verdict\n"
+            "- verdict: investigate\n\n"
+            "## Recipe Ranking & Roles\n"
+            "| recipe | role |\n"
+            "| --- | --- |\n"
+            "| stale | stale |\n"
+        ),
     }
 
     def fake_prepare(payload, *, cwd, output_dir):
         return {
             **payload,
-            "evidence_pack": {"run_id": "demo_run", "recipe_matrix": []},
+            "evidence_pack": {
+                "run_id": "demo_run",
+                "recipe_matrix": [
+                    {
+                        "rank": 1,
+                        "recipe": "rank_blended",
+                        "role": "lead",
+                        "walk_forward_net_total_return": 0.2,
+                        "walk_forward_max_drawdown": -0.1,
+                        "walk_forward_topk_mean_excess_return_4w": -0.01,
+                        "signal_unique_mean": 0.9,
+                    }
+                ],
+            },
             "evidence_pack_path": str(output_dir / "evidence_pack.json"),
             "recipe_matrix_path": str(output_dir / "recipe_matrix.csv"),
         }, {}
@@ -289,7 +382,10 @@ def test_run_single_native_workflow_analysis_writes_valid_json_report(monkeypatc
     summary = json.loads((tmp_path / "latest_summary.json").read_text(encoding="utf-8"))
     assert summary["headline"] == "Demo headline"
     assert summary["lead_recipe"] == "rank_blended"
-    assert (tmp_path / "latest_summary.md").read_text(encoding="utf-8").startswith("# demo_run")
+    markdown = (tmp_path / "latest_summary.md").read_text(encoding="utf-8")
+    assert markdown.startswith("# demo_run")
+    assert "| 排名 | recipe | 角色 | 总收益 | 最大回撤 | TopK 超额 | 分数区分度 | 研究判断 |" in markdown
+    assert "| stale | stale |" not in markdown
 
 
 def test_run_batch_analysis_runs_run_and_all_recipes(monkeypatch, tmp_path):

@@ -369,7 +369,7 @@ class RunResearchAnalysisTaskRequest(BaseModel):
         "anomaly_diagnosis",
         "native_workflow_system_report",
     ] = "investment_report"
-    analysis_engine: Literal["auto", "codex_cli", "claude_cli"] = "codex_cli"
+    analysis_engine: Literal["auto", "codex_cli", "claude_cli", "gemini_cli"] = "codex_cli"
     skills: list[str] | None = None
     output_dir: str | None = None
 

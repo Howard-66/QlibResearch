@@ -1,6 +1,7 @@
 "use client";
 
-import { Moon, PanelLeft, Sun } from "lucide-react";
+import Link from "next/link";
+import { ArrowLeft, Moon, PanelLeftClose, PanelLeftOpen, Sun } from "lucide-react";
 import { usePathname } from "next/navigation";
 import { useTheme } from "next-themes";
 import * as React from "react";
@@ -70,6 +71,14 @@ function buildBreadcrumbs(pathname: string): BreadcrumbEntry[] {
   return [];
 }
 
+function resolveParentHref(breadcrumbs: BreadcrumbEntry[]): string | null {
+  for (let index = breadcrumbs.length - 1; index >= 0; index -= 1) {
+    const href = breadcrumbs[index]?.href;
+    if (href) return href;
+  }
+  return null;
+}
+
 function resolveHeaderMeta(pathname: string): HeaderMeta {
   const direct = titleMap[pathname];
   if (direct) return direct;
@@ -91,6 +100,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   const [sidebarOpen, setSidebarOpen] = React.useState(true);
   const headerMeta = resolveHeaderMeta(pathname);
   const breadcrumbs = buildBreadcrumbs(pathname);
+  const parentHref = resolveParentHref(breadcrumbs);
 
   return (
     <div className="flex h-screen overflow-hidden bg-background text-foreground">
@@ -101,15 +111,19 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="surface-floating sticky top-0 z-20 flex h-16 shrink-0 items-center justify-between gap-4 border-b border-border/55 px-4 lg:px-6 rounded-none">
           <div className="flex min-w-0 flex-1 items-start gap-3">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setSidebarOpen((value) => !value)}
-              className="hidden h-9 w-9 p-0 lg:inline-flex"
-              aria-label={sidebarOpen ? "收起侧边栏" : "展开侧边栏"}
-            >
-              <PanelLeft className={cn("h-4 w-4 transition-transform", !sidebarOpen && "rotate-180")} />
-            </Button>
+            {parentHref ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                asChild
+                className="h-9 shrink-0 px-2 text-muted-foreground hover:text-foreground"
+              >
+                <Link href={parentHref} aria-label="返回上一级页面" title="返回上一级页面">
+                  <ArrowLeft className="h-4 w-4" />
+                  <span className="hidden sm:inline">返回</span>
+                </Link>
+              </Button>
+            ) : null}
             <div className="min-w-0 flex-1 space-y-1.5">
               <div className="flex min-w-0 items-center gap-3 overflow-hidden">
                 <p className="shrink-0 text-sm font-semibold">{headerMeta.title}</p>
@@ -138,6 +152,15 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setSidebarOpen((value) => !value)}
+              className="hidden h-9 w-9 p-0 lg:inline-flex"
+              aria-label={sidebarOpen ? "收起侧边栏" : "展开侧边栏"}
+            >
+              {sidebarOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeftOpen className="h-4 w-4" />}
+            </Button>
             <Button
               variant="ghost"
               size="sm"

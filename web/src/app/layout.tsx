@@ -8,7 +8,7 @@ import "./ui-enhancements.css";
 
 export const metadata: Metadata = {
   title: "QlibResearch Workbench",
-  description: "Artifact-first web workbench for native workflow review and comparison.",
+  description: "Qlib research workbench for native workflow review and comparison.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

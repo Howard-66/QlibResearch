@@ -209,6 +209,12 @@ class NativeRecipeArtifacts:
     experiment_scorecard: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ValidationSignalMatrixResult:
+    signal_matrix: pd.DataFrame
+    diagnostics: pd.DataFrame
+
+
 def apply_research_seed(seed: int) -> None:
     random.seed(int(seed))
     np.random.seed(int(seed))
@@ -922,7 +928,47 @@ def collect_prediction_bundle(
     }
 
 
-def build_buffered_signal_matrix(
+def _build_validation_volume_frame(panel: pd.DataFrame, eval_dates: Sequence[pd.Timestamp]) -> pd.DataFrame:
+    if panel.empty or "volume" not in panel.columns:
+        return pd.DataFrame()
+    frame = panel.loc[panel["datetime"].isin(eval_dates), ["datetime", "instrument", "volume"]].copy()
+    if frame.empty:
+        return pd.DataFrame()
+    volume_frame = frame.pivot(index="datetime", columns="instrument", values="volume").sort_index()
+    return volume_frame.apply(pd.to_numeric, errors="coerce")
+
+
+def _mask_untradable_execution_prices(
+    execution_price_frame: pd.DataFrame,
+    volume_frame: pd.DataFrame | None,
+) -> pd.DataFrame:
+    masked = execution_price_frame.copy()
+    if masked.empty:
+        return masked
+    masked = masked.where(pd.to_numeric(masked, errors="coerce") > 0)
+    if volume_frame is not None and not volume_frame.empty:
+        aligned_volume = volume_frame.reindex(index=masked.index, columns=masked.columns)
+        masked = masked.where(pd.to_numeric(aligned_volume, errors="coerce") > 0)
+    return masked
+
+
+def _validation_tradability_sets(
+    execution_price_frame: pd.DataFrame,
+    execution_date: pd.Timestamp,
+    volume_frame: pd.DataFrame | None = None,
+) -> tuple[set[str], set[str]]:
+    if execution_price_frame.empty or execution_date not in execution_price_frame.index:
+        return set(), set()
+    price_row = pd.to_numeric(execution_price_frame.loc[execution_date], errors="coerce")
+    tradable = set(price_row[price_row.notna() & (price_row > 0)].index.astype(str).tolist())
+    if volume_frame is not None and not volume_frame.empty and execution_date in volume_frame.index:
+        volume_row = pd.to_numeric(volume_frame.reindex(columns=execution_price_frame.columns).loc[execution_date], errors="coerce")
+        volume_tradable = set(volume_row[volume_row.notna() & (volume_row > 0)].index.astype(str).tolist())
+        tradable &= volume_tradable
+    return tradable, tradable
+
+
+def build_validation_signal_matrix(
     predictions: pd.DataFrame,
     execution_price_frame: pd.DataFrame,
     *,
@@ -933,10 +979,15 @@ def build_buffered_signal_matrix(
     min_score_spread: float = 0.0,
     industry_max_weight: float | None = None,
     execution_lag_steps: int = 0,
-) -> pd.DataFrame:
+    only_tradable: bool = True,
+    risk_degree: float = 1.0,
+    enforce_locked_residual_slot_budget: bool = True,
+    volume_frame: pd.DataFrame | None = None,
+) -> ValidationSignalMatrixResult:
     signal = pd.DataFrame(0.0, index=execution_price_frame.index, columns=execution_price_frame.columns)
+    diagnostics_rows: list[dict[str, Any]] = []
     if predictions.empty or execution_price_frame.empty:
-        return signal
+        return ValidationSignalMatrixResult(signal_matrix=signal, diagnostics=pd.DataFrame())
     price_index = pd.Index(pd.to_datetime(execution_price_frame.index))
     current_holdings: list[str] = []
     previous_weights: dict[str, float] = {}
@@ -951,26 +1002,97 @@ def build_buffered_signal_matrix(
         if execution_position < 0 or execution_position >= len(price_index):
             continue
         execution_date = price_index[execution_position]
-        tradable_series = execution_price_frame.loc[execution_date]
-        buyable_codes = tradable_series[tradable_series.notna()].index.astype(str).tolist()
+        buyable_codes, sellable_codes = _validation_tradability_sets(
+            execution_price_frame,
+            pd.Timestamp(execution_date),
+            volume_frame=volume_frame,
+        )
+        locked_residual_codes: list[str] = []
+        selected_active: list[str] = []
         if step % max(int(rebalance_interval_weeks), 1) == 0 or not current_holdings:
+            locked_residual_codes = (
+                sorted(code for code in current_holdings if code not in sellable_codes)
+                if only_tradable and enforce_locked_residual_slot_budget
+                else []
+            )
+            active_current_holdings = [code for code in current_holdings if code not in set(locked_residual_codes)]
+            target_topk = (
+                max(int(topk) - len(locked_residual_codes), 0)
+                if enforce_locked_residual_slot_budget
+                else int(topk)
+            )
             selected = select_topk_with_buffer(
                 frame.set_index("instrument"),
-                current_holdings=current_holdings,
-                topk=topk,
+                current_holdings=active_current_holdings,
+                topk=max(target_topk, 1),
                 hold_buffer_rank=hold_buffer_rank,
                 min_liquidity_filter=min_liquidity_filter,
                 min_score_spread=min_score_spread,
                 industry_max_weight=industry_max_weight,
-                buyable_codes=buyable_codes,
+                buyable_codes=buyable_codes if only_tradable else None,
+            ) if target_topk > 0 else []
+            selected_active = selected
+            current_holdings = sorted(set(locked_residual_codes).union(selected_active))
+            gross_weight = max(float(risk_degree), 0.0)
+            previous_weights = (
+                {code: gross_weight / len(current_holdings) for code in current_holdings}
+                if current_holdings and gross_weight > 0
+                else {}
             )
-            current_holdings = selected
-            previous_weights = {code: 1.0 / len(selected) for code in selected} if selected else {}
         if previous_weights:
             for code, weight in previous_weights.items():
                 if code in signal.columns:
                     signal.loc[execution_date, code] = weight
-    return signal
+        diagnostics_rows.append(
+            {
+                "feature_date": feature_date,
+                "execution_date": pd.Timestamp(execution_date),
+                "rebalance_step": int(step),
+                "target_hold_count": int(len([code for code, weight in previous_weights.items() if weight > 0])),
+                "locked_residual_count": int(len(locked_residual_codes)),
+                "selected_active_count": int(len(selected_active)),
+                "buyable_count": int(len(buyable_codes)),
+                "sellable_count": int(len(sellable_codes)),
+                "risk_degree": float(risk_degree),
+                "only_tradable": bool(only_tradable),
+                "enforce_locked_residual_slot_budget": bool(enforce_locked_residual_slot_budget),
+            }
+        )
+    diagnostics = pd.DataFrame(diagnostics_rows)
+    return ValidationSignalMatrixResult(signal_matrix=signal, diagnostics=diagnostics)
+
+
+def build_buffered_signal_matrix(
+    predictions: pd.DataFrame,
+    execution_price_frame: pd.DataFrame,
+    *,
+    topk: int,
+    hold_buffer_rank: int | None = None,
+    rebalance_interval_weeks: int = 1,
+    min_liquidity_filter: float = 0.0,
+    min_score_spread: float = 0.0,
+    industry_max_weight: float | None = None,
+    execution_lag_steps: int = 0,
+    only_tradable: bool = True,
+    risk_degree: float = 1.0,
+    enforce_locked_residual_slot_budget: bool = True,
+    volume_frame: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    return build_validation_signal_matrix(
+        predictions,
+        execution_price_frame,
+        topk=topk,
+        hold_buffer_rank=hold_buffer_rank,
+        rebalance_interval_weeks=rebalance_interval_weeks,
+        min_liquidity_filter=min_liquidity_filter,
+        min_score_spread=min_score_spread,
+        industry_max_weight=industry_max_weight,
+        execution_lag_steps=execution_lag_steps,
+        only_tradable=only_tradable,
+        risk_degree=risk_degree,
+        enforce_locked_residual_slot_budget=enforce_locked_residual_slot_budget,
+        volume_frame=volume_frame,
+    ).signal_matrix
 
 
 def _build_native_report_frame(report_normal: pd.DataFrame, initial_capital: float) -> pd.DataFrame:

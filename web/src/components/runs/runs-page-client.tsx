@@ -154,7 +154,7 @@ function renderQuickJudgeContent(selected: RunListItem) {
                 display_name: `Diagnose ${selected.run_id}`,
                 description: "Generate a run-level native workflow system diagnosis",
                 analysis_template: "native_workflow_system_report",
-                analysis_engine: "auto",
+                analysis_engine: "codex_cli",
                 batch_mode: "run_only",
                 include_all_recipes: false,
                 skills: ["native-workflow-artifact-analysis"],

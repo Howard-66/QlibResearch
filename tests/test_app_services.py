@@ -1150,5 +1150,5 @@ def test_get_run_analysis_task_preset_defaults_to_batch_mode(monkeypatch):
     assert preset.payload["batch_mode"] == "run_only"
     assert preset.payload["include_all_recipes"] is False
     assert preset.payload["analysis_template"] == "native_workflow_system_report"
-    assert preset.payload["analysis_engine"] == "auto"
+    assert preset.payload["analysis_engine"] == "codex_cli"
     assert preset.payload["skills"] == ["native-workflow-artifact-analysis"]

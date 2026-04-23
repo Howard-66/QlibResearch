@@ -14,12 +14,14 @@ try:
     from scripts.build_native_workflow_evidence_pack import (
         build_evidence_pack,
         build_system_report_from_evidence_pack,
+        recipe_ranking_table_lines,
         write_evidence_outputs,
     )
 except ModuleNotFoundError:  # pragma: no cover - supports direct `python scripts/run_research_analysis.py`.
     from build_native_workflow_evidence_pack import (
         build_evidence_pack,
         build_system_report_from_evidence_pack,
+        recipe_ranking_table_lines,
         write_evidence_outputs,
     )
 
@@ -228,7 +230,8 @@ def _build_cli_prompt(payload: dict[str, Any], *, template: str, skills: list[st
             "8. 正文面向研究用户：使用自然中文，术语可保留英文；不要写“promote 到 live”这类中英文混排表达，改写成“进入实盘”。\n"
             "9. 正文数字必须四舍五入：收益/回撤/超额用百分比，普通比率保留 2 位，持仓数取整数；不要把文件名和完整小数塞进结论句。\n"
             "10. 表格只做横向比较，正文必须解释这些数字对研究决策的含义，不能只堆指标。\n"
-            "11. 文件名、metric 名和完整 evidence_refs 放在 JSON 的 evidence_refs 或 Evidence Gaps 中；正文优先用中文指标名。\n\n"
+            "11. `Recipe Ranking & Roles` 表格固定使用列：排名、recipe、角色、总收益、最大回撤、TopK 超额、分数区分度、研究判断。\n"
+            "12. 文件名、metric 名和完整 evidence_refs 放在 JSON 的 evidence_refs 或 Evidence Gaps 中；正文优先用中文指标名。\n\n"
             f"{json.dumps(prompt_payload, ensure_ascii=False, indent=2)}"
         )
     source_kind = str(payload.get("source_kind") or "")
@@ -296,9 +299,9 @@ def _invoke_codex_cli(payload: dict[str, Any], *, template: str, skills: list[st
         "read-only",
         "--cd",
         str(cwd),
-        prompt,
+        "-",
     ]
-    content = _run_subprocess(command, prompt=None, cwd=cwd)
+    content = _run_subprocess(command, prompt=prompt, cwd=cwd)
     return {
         "engine": "codex_cli",
         "command": command,
@@ -318,11 +321,32 @@ def _invoke_claude_cli(payload: dict[str, Any], *, template: str, skills: list[s
         "text",
         "--permission-mode",
         "default",
-        prompt,
     ]
-    content = _run_subprocess(command, prompt=None, cwd=cwd)
+    content = _run_subprocess(command, prompt=prompt, cwd=cwd)
     return {
         "engine": "claude_cli",
+        "command": command,
+        "content": content,
+    }
+
+
+def _invoke_gemini_cli(payload: dict[str, Any], *, template: str, skills: list[str], cwd: Path) -> dict[str, Any]:
+    executable = shutil.which("gemini")
+    if not executable:
+        raise RuntimeError("gemini executable not found")
+    prompt = _build_cli_prompt(payload, template=template, skills=skills)
+    command = [
+        executable,
+        "--prompt",
+        "",
+        "--output-format",
+        "text",
+        "--approval-mode",
+        "plan",
+    ]
+    content = _run_subprocess(command, prompt=prompt, cwd=cwd)
+    return {
+        "engine": "gemini_cli",
         "command": command,
         "content": content,
     }
@@ -376,6 +400,13 @@ def _generate_analysis_content(
             "cli_invoked": True,
             "cli_command": cli_result["command"],
         }
+    if analysis_engine == "gemini_cli":
+        cli_result = _invoke_gemini_cli(payload, template=analysis_template, skills=skills, cwd=cwd.resolve())
+        return str(cli_result["content"]), {
+            "engine_used": "gemini_cli",
+            "cli_invoked": True,
+            "cli_command": cli_result["command"],
+        }
     raise SystemExit(f"Unsupported analysis engine: {analysis_engine}")
 
 
@@ -388,8 +419,13 @@ def _prepare_native_workflow_payload(
     run_dir = cwd.expanduser().resolve()
     evidence_pack = build_evidence_pack(run_dir)
     evidence_paths = write_evidence_outputs(evidence_pack, output_dir)
+    prompt_payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"analysis_reports"}
+    }
     prepared = {
-        **payload,
+        **prompt_payload,
         "native_workflow_system_report": True,
         "run_artifact_dir": str(run_dir),
         "skill_name": NATIVE_WORKFLOW_ANALYSIS_SKILL_NAME,
@@ -404,6 +440,7 @@ def _prepare_native_workflow_payload(
         "skill_path": str(NATIVE_WORKFLOW_ANALYSIS_SKILL_PATH),
         "evidence_pack_path": evidence_paths["evidence_pack"],
         "recipe_matrix_path": evidence_paths["recipe_matrix"],
+        "analysis_reports_omitted": "analysis_reports",
     }
     return prepared, manifest
 
@@ -435,6 +472,47 @@ def _parse_json_object(content: str) -> dict[str, Any]:
     return payload
 
 
+def _replace_markdown_section(markdown: str, heading: str, replacement_lines: list[str]) -> str:
+    lines = markdown.rstrip().splitlines()
+    heading_line = f"## {heading}"
+    try:
+        start = next(index for index, line in enumerate(lines) if line.strip() == heading_line)
+    except StopIteration:
+        insert_at = len(lines)
+        executive_index = next((index for index, line in enumerate(lines) if line.strip() == "## Executive Verdict"), None)
+        if executive_index is not None:
+            insert_at = len(lines)
+            for index in range(executive_index + 1, len(lines)):
+                if lines[index].startswith("## "):
+                    insert_at = index
+                    break
+        else:
+            first_section_index = next((index for index, line in enumerate(lines) if line.startswith("## ")), None)
+            if first_section_index is not None:
+                insert_at = first_section_index
+        next_lines = lines[:insert_at] + ["", heading_line, *replacement_lines] + lines[insert_at:]
+        return "\n".join(next_lines).strip() + "\n"
+
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if lines[index].startswith("## "):
+            end = index
+            break
+    next_lines = lines[: start + 1] + replacement_lines + [""] + lines[end:]
+    return "\n".join(next_lines).strip() + "\n"
+
+
+def _enforce_native_workflow_markdown_contract(markdown: str, payload: dict[str, Any]) -> str:
+    evidence_pack = payload.get("evidence_pack")
+    if not isinstance(evidence_pack, dict):
+        return markdown
+    return _replace_markdown_section(
+        markdown,
+        "Recipe Ranking & Roles",
+        recipe_ranking_table_lines(evidence_pack),
+    )
+
+
 def _normalize_native_workflow_report(content: str, payload: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     warnings: list[str] = []
     try:
@@ -446,6 +524,7 @@ def _normalize_native_workflow_report(content: str, payload: dict[str, Any]) -> 
         warnings.append("JSON output omitted markdown; generated markdown from evidence pack")
         fallback = _native_workflow_local_report(payload)
         report["markdown"] = fallback["markdown"]
+    report["markdown"] = _enforce_native_workflow_markdown_contract(str(report["markdown"]), payload)
     fallback = _native_workflow_local_report(payload)
     required_defaults = {
         "headline": fallback.get("headline"),

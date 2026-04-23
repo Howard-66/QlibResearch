@@ -10,6 +10,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { getPanels } from "@/lib/api";
 import { formatBytes, formatCompactDate, formatInteger, formatPathName } from "@/lib/format";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export default async function PanelsPage() {
   const panels = await getPanels();
 

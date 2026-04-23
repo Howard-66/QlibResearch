@@ -2,11 +2,11 @@
 
 import * as React from "react";
 
-import { DataTable } from "@/components/data/data-table";
+import { MarkdownContent } from "@/components/common/markdown-preview-dialog";
 import { parseLatestSummaryMarkdown, type LatestSummarySection } from "@/lib/latest-summary";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
-function SummaryList({ title, items }: { title: string; items: string[] }) {
+function SummaryList({ title, items, markdown }: { title: string; items: string[]; markdown?: string }) {
   return (
     <Card className="border border-border/60 bg-surface-2/40">
       <CardHeader>
@@ -21,6 +21,8 @@ function SummaryList({ title, items }: { title: string; items: string[] }) {
               </li>
             ))}
           </ul>
+        ) : markdown ? (
+          <MarkdownContent content={markdown} />
         ) : (
           <div className="text-sm text-muted-foreground">暂无内容</div>
         )}
@@ -50,7 +52,9 @@ function ExtraSectionCard({ section }: { section: LatestSummarySection }) {
         <CardTitle className="text-sm">{section.title}</CardTitle>
       </CardHeader>
       <CardContent>
-        {combined.length ? (
+        {section.markdown ? (
+          <MarkdownContent content={section.markdown} />
+        ) : combined.length ? (
           <div className="space-y-2 text-sm">
             {combined.map((item, index) => (
               <div key={`${item}-${index}`} className="rounded-lg border border-border/50 px-3 py-2">
@@ -78,11 +82,17 @@ export function LatestSummaryLayout({
   const keyFindings = parsed.keyFindings;
   const risks = parsed.risks;
   const nextActions = parsed.nextActions;
+  const keyFindingsMarkdown = parsed.keyFindingsMarkdown;
+  const risksMarkdown = parsed.risksMarkdown;
+  const nextActionsMarkdown = parsed.nextActionsMarkdown;
   const extraSections = isCompact ? [] : parsed.extraSections;
   const hasCoreContent =
     keyFindings.length > 0 ||
+    Boolean(keyFindingsMarkdown) ||
     risks.length > 0 ||
+    Boolean(risksMarkdown) ||
     nextActions.length > 0 ||
+    Boolean(nextActionsMarkdown) ||
     Boolean(parsed.currentProblem) ||
     Boolean(parsed.recommendedAction);
 
@@ -92,31 +102,27 @@ export function LatestSummaryLayout({
         <>
           {isCompact ? (
             <div className="grid gap-4 xl:grid-cols-2">
-              <SummaryList title="Key Findings" items={keyFindings} />
-              <SummaryList title="Next Actions" items={nextActions} />
+              <SummaryList title="Key Findings" items={keyFindings} markdown={keyFindingsMarkdown} />
+              <SummaryList title="Next Actions" items={nextActions} markdown={nextActionsMarkdown} />
             </div>
           ) : (
             <>
               <div className="grid gap-4 xl:grid-cols-2">
-                <SummaryList title="Key Findings" items={keyFindings} />
-                <SummaryList title="Risks" items={risks} />
+                <SummaryList title="Key Findings" items={keyFindings} markdown={keyFindingsMarkdown} />
+                <SummaryList title="Risks" items={risks} markdown={risksMarkdown} />
               </div>
               <div className="grid gap-4 xl:grid-cols-2">
                 <MetricCard title="Current Problem" value={parsed.currentProblem ?? "—"} />
                 <MetricCard title="Recommended Action" value={parsed.recommendedAction ?? "—"} />
               </div>
-              {nextActions.length ? (
-              <DataTable
-                table={{
-                  columns: ["next_action"],
-                  rows: nextActions.map((item) => ({ next_action: item })),
-                }}
-                maxRows={8}
-              />
+              {nextActions.length || nextActionsMarkdown ? (
+                <SummaryList title="Next Actions" items={nextActions} markdown={nextActionsMarkdown} />
               ) : null}
             </>
           )}
         </>
+      ) : isCompact && content.trim() ? (
+        <SummaryList title="Summary" items={[]} markdown={content} />
       ) : null}
       {extraSections.length ? (
         <div className="grid gap-4 xl:grid-cols-2">
