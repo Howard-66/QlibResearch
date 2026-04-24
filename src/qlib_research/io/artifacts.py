@@ -191,6 +191,7 @@ def build_portfolio_targets(
     model_id: str,
     feature_date: str,
     topk: int = 10,
+    selected_codes: list[str] | None = None,
 ) -> pd.DataFrame:
     if score_frame.empty:
         return pd.DataFrame(columns=["trade_date", "model_id", "feature_date", "code", "target_weight", "score", "rank"])
@@ -199,7 +200,17 @@ def build_portfolio_targets(
     score_col = "qlib_score" if "qlib_score" in frame.columns else ("score" if "score" in frame.columns else frame.columns[-1])
     frame = frame.rename(columns={code_col: "code", score_col: "score"})
     frame = frame[["code", "score"]].copy()
-    frame = frame.sort_values("score", ascending=False).head(max(int(topk), 1)).reset_index(drop=True)
+    if selected_codes:
+        order = {str(code): idx for idx, code in enumerate(selected_codes)}
+        frame["selection_order"] = frame["code"].astype(str).map(order)
+        frame = (
+            frame.loc[frame["selection_order"].notna()]
+            .sort_values(["selection_order", "code"], ascending=[True, True])
+            .drop(columns=["selection_order"])
+            .reset_index(drop=True)
+        )
+    else:
+        frame = frame.sort_values("score", ascending=False).head(max(int(topk), 1)).reset_index(drop=True)
     frame["rank"] = frame.index + 1
     frame["trade_date"] = feature_date
     frame["model_id"] = model_id

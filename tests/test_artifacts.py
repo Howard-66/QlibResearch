@@ -27,6 +27,20 @@ def test_build_portfolio_targets_uses_equal_weights_for_topk():
     assert list(targets['rank']) == [1, 2]
 
 
+def test_build_portfolio_targets_respects_selected_code_order():
+    frame = pd.DataFrame({"code": ["AAA.SH", "BBB.SZ", "CCC.SH"], "qlib_score": [0.5, 0.9, 0.1]})
+    targets = build_portfolio_targets(
+        frame,
+        model_id='demo',
+        feature_date='2026-04-01',
+        topk=2,
+        selected_codes=['AAA.SH', 'CCC.SH'],
+    )
+    assert list(targets['code']) == ['AAA.SH', 'CCC.SH']
+    assert targets['target_weight'].tolist() == [0.5, 0.5]
+    assert list(targets['rank']) == [1, 2]
+
+
 def test_publish_portfolio_targets_and_load_snapshot_contract(tmp_path):
     frame = pd.DataFrame({"code": ["AAA.SH", "BBB.SZ"], "qlib_score": [0.3, 0.7], "pred_return_4w": [0.02, 0.05]})
     publish_score_snapshot(frame, model_id='demo', feature_date='2026-04-01', artifacts_dir=tmp_path)

@@ -18,6 +18,7 @@ from qlib_research.core.qlib_native_workflow import (
     _build_parallel_recipe_heartbeat,
     _normalize_consensus_recipe_specs,
     _prime_parallel_workflow_inputs,
+    build_sector_exposure_history,
     build_execution_diff_summary,
     build_native_performance_metrics_frame,
     build_annual_return_heatmap_frame,
@@ -206,6 +207,32 @@ def test_build_native_recipe_registry_uses_feature_spec(tmp_path):
     assert baseline.excluded_features == ("macro_industry_match",)
     assert baseline.industry_normalization == "none"
     assert baseline.model_params["num_boost_round"] == 123
+
+
+def test_build_sector_exposure_history_falls_back_to_global_sector_map():
+    predictions = pd.DataFrame(
+        [
+            {"feature_date": "2026-01-03", "instrument": "AAA.SH", "l1_name": "银行"},
+            {"feature_date": "2026-01-03", "instrument": "BBB.SH", "l1_name": "电子"},
+            {"feature_date": "2026-01-10", "instrument": "BBB.SH", "l1_name": "电子"},
+        ]
+    )
+    audit = pd.DataFrame(
+        [
+            {
+                "signal_date": "2026-01-10",
+                "trade_date": "2026-01-17",
+                "post_trade_holdings": "AAA.SH,BBB.SH",
+            }
+        ]
+    )
+
+    history = build_sector_exposure_history(predictions, audit)
+
+    assert len(history) == 1
+    assert history.loc[0, "sector_weight__银行"] == pytest.approx(0.5)
+    assert history.loc[0, "sector_weight__电子"] == pytest.approx(0.5)
+    assert history.loc[0, "top1_sector_weight"] == pytest.approx(0.5)
 
 
 def test_build_native_workflow_summary_payload_collects_recipe_overview(tmp_path):

@@ -1700,6 +1700,14 @@ def build_sector_exposure_history(
             if value and value != "nan"
         }
     )
+    global_sector_map = (
+        frame[["instrument", "l1_name"]]
+        .dropna(subset=["instrument"])
+        .assign(instrument=lambda data: data["instrument"].astype(str), l1_name=lambda data: data["l1_name"].fillna("未知").astype(str))
+        .drop_duplicates(subset=["instrument"], keep="last")
+        .set_index("instrument")["l1_name"]
+        .to_dict()
+    )
     finance_sectors = {"银行", "非银金融"}
     rows: list[dict[str, Any]] = []
 
@@ -1722,7 +1730,7 @@ def build_sector_exposure_history(
         if actual_holdings:
             equal_weight = 1.0 / len(actual_holdings)
             for code in actual_holdings:
-                sector = str(sector_map.get(str(code), "未知"))
+                sector = str(sector_map.get(str(code)) or global_sector_map.get(str(code), "未知"))
                 sector_weights[sector] = sector_weights.get(sector, 0.0) + equal_weight
         sorted_weights = sorted(sector_weights.items(), key=lambda item: item[1], reverse=True)
         row: dict[str, Any] = {
@@ -2459,11 +2467,22 @@ def _materialize_recipe_artifacts(
     recipe_dir.mkdir(parents=True, exist_ok=True)
     latest_score_frame.to_csv(recipe_dir / "latest_score_frame.csv", index=False)
     latest_feature_date_str = str(_resolve_latest_feature_date(latest_score_frame, resolved_bundles).date())
+    latest_selected_codes = select_topk_with_buffer(
+        latest_score_frame,
+        current_holdings=[],
+        topk=config.topk,
+        hold_buffer_rank=config.hold_buffer_rank,
+        min_liquidity_filter=config.min_liquidity_filter,
+        min_score_spread=config.min_score_spread,
+        industry_max_weight=config.industry_max_weight,
+        score_column="score",
+    )
     portfolio_targets = build_portfolio_targets(
         latest_score_frame,
         model_id=f"{config.universe_profile}-{recipe.name}-qlib-native",
         feature_date=latest_feature_date_str,
         topk=config.topk,
+        selected_codes=latest_selected_codes,
     )
     publish_portfolio_targets(portfolio_targets, model_id=f"{config.universe_profile}-{recipe.name}-qlib-native")
     portfolio_targets.to_csv(recipe_dir / "portfolio_targets.csv", index=False)

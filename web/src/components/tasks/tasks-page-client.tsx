@@ -122,12 +122,11 @@ type WorkflowTaskFormState = {
 
 type ConsensusSpecFormState = {
   id: string;
-  enabled: boolean;
   primary_recipe: string;
   filter_recipe: string;
   filter_topn: string;
   name: string;
-  use_custom_name: boolean;
+  name_manually_edited: boolean;
 };
 
 type ResearchAnalysisTaskFormState = {
@@ -1092,7 +1091,6 @@ function WorkflowTaskEditor({
                         onChange={() => toggleRecipeName(recipeName)}
                       />
                       <span>{recipeName}</span>
-                      {locked ? <Badge variant="info">required by consensus</Badge> : null}
                     </label>
                   );
                 })}
@@ -1120,43 +1118,32 @@ function WorkflowTaskEditor({
               <CardContent className="space-y-4">
                 {form.consensus_specs.length ? (
                   form.consensus_specs.map((spec, index) => {
-                    const derivedName = buildConsensusRecipeName(spec, form);
+                    const derivedName = resolveConsensusRecipeName(spec);
+                    const autoDerivedName = buildConsensusRecipeAutoName(spec);
                     const filterTopNValue = spec.filter_topn || consensusDefaultFilterTopN(form);
                     const usesInvalidPair = !!spec.primary_recipe && spec.primary_recipe === spec.filter_recipe;
                     return (
                       <div key={spec.id} className="rounded-lg border border-border/60 bg-surface-1/40 p-4">
                         <div className="mb-3 flex items-center justify-between gap-3">
                           <div className="flex items-center gap-2">
-                            <Badge variant={spec.enabled ? "success" : "outline"}>{`Spec ${index + 1}`}</Badge>
+                            <Badge variant="outline">{`Spec ${index + 1}`}</Badge>
                             {usesInvalidPair ? <Badge variant="destructive">primary/filter must differ</Badge> : null}
                           </div>
-                          <div className="flex items-center gap-3">
-                            <BooleanSwitchField
-                              label="Enabled"
-                              value={spec.enabled}
-                              onChange={(value) =>
-                                onChange((current) => ({
-                                  ...current,
-                                  consensus_specs: current.consensus_specs.map((item) =>
-                                    item.id === spec.id ? { ...item, enabled: value } : item,
-                                  ),
-                                }))
-                              }
-                            />
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              onClick={() =>
-                                onChange((current) => ({
-                                  ...current,
-                                  consensus_specs: current.consensus_specs.filter((item) => item.id !== spec.id),
-                                }))
-                              }
-                            >
-                              Remove
-                            </Button>
-                          </div>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 w-8 p-0"
+                            onClick={() =>
+                              onChange((current) => ({
+                                ...current,
+                                consensus_specs: current.consensus_specs.filter((item) => item.id !== spec.id),
+                              }))
+                            }
+                          >
+                            <Trash2 className="h-4 w-4" />
+                            <span className="sr-only">Remove consensus spec</span>
+                          </Button>
                         </div>
                         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                           <FormSelect
@@ -1168,7 +1155,7 @@ function WorkflowTaskEditor({
                               onChange((current) => ({
                                 ...current,
                                 consensus_specs: current.consensus_specs.map((item) =>
-                                  item.id === spec.id ? { ...item, primary_recipe: value } : item,
+                                  item.id === spec.id ? updateConsensusSpecDerivedName(item, { primary_recipe: value }) : item,
                                 ),
                               }))
                             }
@@ -1182,7 +1169,7 @@ function WorkflowTaskEditor({
                               onChange((current) => ({
                                 ...current,
                                 consensus_specs: current.consensus_specs.map((item) =>
-                                  item.id === spec.id ? { ...item, filter_recipe: value } : item,
+                                  item.id === spec.id ? updateConsensusSpecDerivedName(item, { filter_recipe: value }) : item,
                                 ),
                               }))
                             }
@@ -1201,48 +1188,23 @@ function WorkflowTaskEditor({
                               placeholder={consensusDefaultFilterTopN(form)}
                             />
                           </FormField>
-                          <ReadonlyPathField
+                          <FormField
                             label="Derived Recipe Name"
-                            value={derivedName}
-                            description="默认名称会随 primary、filter 和 TopN 自动更新。"
-                            hint={`Effective TopN: ${filterTopNValue}`}
-                          />
-                        </div>
-                        <div className="mt-3 grid gap-4 md:grid-cols-2">
-                          <BooleanSwitchField
-                            label="Custom Name"
-                            value={spec.use_custom_name}
-                            onChange={(value) =>
-                              onChange((current) => ({
-                                ...current,
-                                consensus_specs: current.consensus_specs.map((item) =>
-                                  item.id === spec.id
-                                    ? { ...item, use_custom_name: value, name: value ? item.name : "" }
-                                    : item,
-                                ),
-                              }))
-                            }
-                          />
-                          {spec.use_custom_name ? (
-                            <FormField label="Custom Derived Name">
-                              <Input
-                                value={spec.name}
-                                onChange={(event) =>
-                                  onChange((current) => ({
-                                    ...current,
-                                    consensus_specs: current.consensus_specs.map((item) =>
-                                      item.id === spec.id ? { ...item, name: event.target.value } : item,
-                                    ),
-                                  }))
-                                }
-                                placeholder={buildConsensusRecipeName({ ...spec, use_custom_name: false, name: "" }, form)}
-                              />
-                            </FormField>
-                          ) : (
-                            <div className="text-sm text-muted-foreground">
-                              关闭自定义名称时，派生 recipe 名称会按默认规则自动生成。
-                            </div>
-                          )}
+                            description="默认按 `PrimaryRecipe__FilterRecipe` 自动生成；留空时会继续跟随 primary/filter 更新。"
+                          >
+                            <Input
+                              value={derivedName}
+                              onChange={(event) =>
+                                onChange((current) => ({
+                                  ...current,
+                                  consensus_specs: current.consensus_specs.map((item) =>
+                                    item.id === spec.id ? setConsensusSpecDerivedName(item, event.target.value) : item,
+                                  ),
+                                }))
+                              }
+                              placeholder={autoDerivedName}
+                            />
+                          </FormField>
                         </div>
                       </div>
                     );
@@ -1720,7 +1682,7 @@ function ReadonlyPathField({
   return (
     <div className="space-y-2">
       <FieldLabel label={label} description={description} />
-      <div className="rounded-lg border border-dashed border-border/70 bg-surface-2/50 px-3 py-2 text-sm text-foreground/90">
+      <div className="rounded-lg border border-dashed border-border/70 bg-surface-2/50 px-3 py-2 text-sm text-foreground/90 break-all">
         {value || "—"}
       </div>
       {hint ? <div className="text-xs text-muted-foreground">{hint}</div> : null}
@@ -1912,12 +1874,11 @@ function nextConsensusSpecId() {
 function createConsensusSpecFormState(overrides: Partial<ConsensusSpecFormState> = {}): ConsensusSpecFormState {
   return {
     id: overrides.id ?? nextConsensusSpecId(),
-    enabled: overrides.enabled ?? true,
     primary_recipe: overrides.primary_recipe ?? "",
     filter_recipe: overrides.filter_recipe ?? "",
     filter_topn: overrides.filter_topn ?? "",
     name: overrides.name ?? "",
-    use_custom_name: overrides.use_custom_name ?? false,
+    name_manually_edited: overrides.name_manually_edited ?? false,
   };
 }
 
@@ -1938,29 +1899,44 @@ function consensusFilterTopNValue(
   return Number(consensusDefaultFilterTopN(form));
 }
 
-function buildConsensusRecipeName(
-  spec: Pick<ConsensusSpecFormState, "primary_recipe" | "filter_recipe" | "filter_topn" | "name" | "use_custom_name">,
-  form: Pick<WorkflowTaskFormState, "topk" | "hold_buffer_rank">,
-) {
-  if (spec.use_custom_name && spec.name.trim()) {
-    return spec.name.trim();
-  }
+function buildConsensusRecipeAutoName(spec: Pick<ConsensusSpecFormState, "primary_recipe" | "filter_recipe">) {
   const primaryRecipe = spec.primary_recipe.trim();
   const filterRecipe = spec.filter_recipe.trim();
   if (!primaryRecipe || !filterRecipe) return "";
-  return `${primaryRecipe}__consensus__${filterRecipe}_top${consensusFilterTopNValue(spec, form)}`;
+  return `${primaryRecipe}__${filterRecipe}`;
+}
+
+function resolveConsensusRecipeName(spec: Pick<ConsensusSpecFormState, "primary_recipe" | "filter_recipe" | "name">) {
+  return spec.name.trim() || buildConsensusRecipeAutoName(spec);
+}
+
+function setConsensusSpecDerivedName(spec: ConsensusSpecFormState, value: string): ConsensusSpecFormState {
+  const nextName = value.trim();
+  const autoName = buildConsensusRecipeAutoName(spec);
+  if (!nextName || nextName === autoName) {
+    return { ...spec, name: "", name_manually_edited: false };
+  }
+  return { ...spec, name: value, name_manually_edited: true };
+}
+
+function updateConsensusSpecDerivedName(
+  spec: ConsensusSpecFormState,
+  updates: Partial<Pick<ConsensusSpecFormState, "primary_recipe" | "filter_recipe">>,
+) {
+  const nextSpec = { ...spec, ...updates };
+  if (!spec.name_manually_edited) {
+    return { ...nextSpec, name: "", name_manually_edited: false };
+  }
+  return nextSpec;
 }
 
 function activeConsensusSpecs(form: WorkflowTaskFormState) {
-  return form.consensus_specs
-    .filter((spec) => spec.enabled)
-    .filter((spec) => spec.primary_recipe.trim() && spec.filter_recipe.trim());
+  return form.consensus_specs.filter((spec) => spec.primary_recipe.trim() && spec.filter_recipe.trim());
 }
 
 function getConsensusRequiredRecipeNames(consensusSpecs: ConsensusSpecFormState[]) {
   const required = new Set<string>();
   for (const spec of consensusSpecs) {
-    if (!spec.enabled) continue;
     if (spec.primary_recipe.trim()) required.add(spec.primary_recipe.trim());
     if (spec.filter_recipe.trim()) required.add(spec.filter_recipe.trim());
   }
@@ -2002,7 +1978,7 @@ function buildExportTaskPayload(form: ExportTaskFormState, sourceRef: TaskSource
 
 function buildWorkflowTaskPayload(form: WorkflowTaskFormState, sourceRef: TaskSourceRef) {
   const consensusSpecs = activeConsensusSpecs(form).map((spec) => ({
-    name: buildConsensusRecipeName(spec, form),
+    name: resolveConsensusRecipeName(spec),
     primary_recipe: spec.primary_recipe.trim(),
     filter_recipe: spec.filter_recipe.trim(),
     filter_topn: consensusFilterTopNValue(spec, form),
@@ -2578,7 +2554,7 @@ function workflowFormFromConfigPayload(value: unknown, baseForm?: WorkflowTaskFo
             filter_recipe: String(item.filter_recipe ?? ""),
             filter_topn: item.filter_topn == null ? "" : String(item.filter_topn),
             name: String(item.name ?? ""),
-            use_custom_name: typeof item.name === "string" && item.name.trim().length > 0,
+            name_manually_edited: typeof item.name === "string" && item.name.trim().length > 0,
           }),
         )
     : base.consensus_specs;
