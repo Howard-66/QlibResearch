@@ -41,6 +41,19 @@ def test_build_portfolio_targets_respects_selected_code_order():
     assert list(targets['rank']) == [1, 2]
 
 
+def test_build_portfolio_targets_returns_empty_when_selected_codes_have_no_matches():
+    frame = pd.DataFrame({"code": ["AAA.SH", "BBB.SZ"], "qlib_score": [0.5, 0.9]})
+    targets = build_portfolio_targets(
+        frame,
+        model_id='demo',
+        feature_date='2026-04-01',
+        topk=2,
+        selected_codes=['CCC.SH'],
+    )
+    assert list(targets.columns) == ["trade_date", "model_id", "feature_date", "code", "target_weight", "score", "rank"]
+    assert targets.empty
+
+
 def test_publish_portfolio_targets_and_load_snapshot_contract(tmp_path):
     frame = pd.DataFrame({"code": ["AAA.SH", "BBB.SZ"], "qlib_score": [0.3, 0.7], "pred_return_4w": [0.02, 0.05]})
     publish_score_snapshot(frame, model_id='demo', feature_date='2026-04-01', artifacts_dir=tmp_path)

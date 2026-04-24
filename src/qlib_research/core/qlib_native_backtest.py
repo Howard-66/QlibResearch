@@ -10,6 +10,7 @@ from copy import deepcopy
 from functools import partial
 import io
 from pathlib import Path
+import random
 from typing import Any, Sequence
 import warnings
 
@@ -292,8 +293,26 @@ def _score_frame_to_series_and_meta(
             score_frame = score_frame.rename(columns={first_column: score_column})
     else:
         score_frame = pd.Series(score).to_frame(score_column)
-    numeric_scores = pd.to_numeric(score_frame[score_column], errors="coerce").dropna().sort_values(ascending=False)
-    meta = score_frame.reindex(numeric_scores.index).copy()
+    if "instrument" in score_frame.columns:
+        score_frame = score_frame.copy()
+        score_frame["instrument"] = score_frame["instrument"].astype(str)
+        score_frame = score_frame.set_index("instrument", drop=True)
+    score_frame[score_column] = pd.to_numeric(score_frame[score_column], errors="coerce")
+    score_frame = score_frame.dropna(subset=[score_column]).copy()
+    if score_frame.empty:
+        return pd.Series(dtype=float), pd.DataFrame()
+    amount_series = score_frame["amount"] if "amount" in score_frame.columns else pd.Series(float("-inf"), index=score_frame.index)
+    volume_series = score_frame["volume"] if "volume" in score_frame.columns else pd.Series(float("-inf"), index=score_frame.index)
+    score_frame["__selection_amount"] = pd.to_numeric(amount_series, errors="coerce").fillna(float("-inf"))
+    score_frame["__selection_volume"] = pd.to_numeric(volume_series, errors="coerce").fillna(float("-inf"))
+    score_frame["__selection_code"] = score_frame.index.astype(str)
+    score_frame = score_frame.sort_values(
+        [score_column, "__selection_amount", "__selection_volume", "__selection_code"],
+        ascending=[False, False, False, True],
+        kind="mergesort",
+    )
+    numeric_scores = score_frame[score_column].copy()
+    meta = score_frame.drop(columns=["__selection_amount", "__selection_volume", "__selection_code"]).copy()
     meta[score_column] = numeric_scores
     meta.index = meta.index.astype(str)
     numeric_scores.index = numeric_scores.index.astype(str)
@@ -350,7 +369,7 @@ def _sell_block_reason_from_row(row: pd.Series | None) -> str:
         return "limit"
     if float(volume) <= 0:
         return "volume"
-    return "volume"
+    return "tradable"
 
 
 def _buyable_code_set_for_day(day_quote: pd.DataFrame) -> set[str]:
@@ -450,11 +469,10 @@ def select_topk_with_buffer(
     def _accept(code: str) -> bool:
         if code in selected:
             return False
-        if buyable_code_set is not None and code not in holdings and code not in buyable_code_set:
+        is_current_holding = code in holdings
+        if buyable_code_set is not None and not is_current_holding and code not in buyable_code_set:
             return False
-        if code in holdings:
-            return True
-        if not _passes_liquidity(code):
+        if not is_current_holding and not _passes_liquidity(code):
             return False
         if industry_cap_count is None:
             return True
@@ -474,7 +492,7 @@ def select_topk_with_buffer(
         for code in holdings
         if code in rank_map and rank_map[code] <= buffer_rank
     ]
-    retained_current = sorted(retained_current, key=lambda code: (-scores.loc[code], code))
+    retained_current = sorted(retained_current, key=lambda code: rank_map[code])
     for code in retained_current:
         if _accept(code):
             _append(code)
@@ -486,7 +504,7 @@ def select_topk_with_buffer(
         for code in holdings
         if code in rank_map and code not in selected
     ]
-    displaced_current = sorted(displaced_current, key=lambda code: (-scores.loc[code], code))
+    displaced_current = sorted(displaced_current, key=lambda code: rank_map[code])
 
     for code in scores.index.astype(str).tolist():
         if len(selected) >= topk:
@@ -502,6 +520,29 @@ def select_topk_with_buffer(
         _append(code)
 
     return selected[:topk]
+
+
+def _build_target_weight_dict(
+    selected_codes: Sequence[str],
+    current_weights: dict[str, float],
+    locked_residual_codes: Sequence[str],
+) -> dict[str, float]:
+    locked_codes = [str(code) for code in locked_residual_codes if str(code)]
+    locked_weight_budget = float(sum(float(current_weights.get(code, 0.0)) for code in locked_codes))
+    remaining_weight_budget = max(1.0 - locked_weight_budget, 0.0)
+    selected_list = [str(code) for code in selected_codes if str(code)]
+    selected_weight = remaining_weight_budget / len(selected_list) if selected_list else 0.0
+    target_weights: dict[str, float] = {}
+    for code in locked_codes:
+        weight = float(current_weights.get(code, 0.0))
+        if weight > 0:
+            target_weights[code] = weight
+    for code in selected_list:
+        target_weights[code] = selected_weight
+    for code in current_weights:
+        if code not in target_weights:
+            target_weights[str(code)] = 0.0
+    return target_weights
 
 
 class StaticQuoteExchange(Exchange):
@@ -651,6 +692,103 @@ class AShareQuoteExchange(StaticQuoteExchange):
         return trade_price, trade_val, trade_cost
 
 
+class DirectionalOrderGenWInteract(OrderGenWInteract):
+    """
+    Order generator that checks tradability by order direction.
+
+    qlib's default interactive generator calls `is_stock_tradable(..., direction=None)`
+    before it knows whether the order will be a buy or a sell. For A-shares this is too
+    strict: a limit-up stock is typically sellable but not buyable, while a limit-down
+    stock is buyable but not sellable. Using the direction-aware check avoids silently
+    dropping valid liquidation orders and the resulting holding drift.
+    """
+
+    def generate_order_list_from_target_weight_position(
+        self,
+        current,
+        trade_exchange,
+        target_weight_position: dict,
+        risk_degree: float,
+        pred_start_time: pd.Timestamp,
+        pred_end_time: pd.Timestamp,
+        trade_start_time: pd.Timestamp,
+        trade_end_time: pd.Timestamp,
+    ) -> list:
+        if target_weight_position is None:
+            return []
+
+        current_amount_dict = current.get_stock_amount_dict()
+        current_total_value = trade_exchange.calculate_amount_position_value(
+            amount_dict=current_amount_dict,
+            start_time=trade_start_time,
+            end_time=trade_end_time,
+            only_tradable=False,
+        )
+        current_tradable_value = trade_exchange.calculate_amount_position_value(
+            amount_dict=current_amount_dict,
+            start_time=trade_start_time,
+            end_time=trade_end_time,
+            only_tradable=True,
+        )
+        current_tradable_value += current.get_cash()
+
+        reserved_cash = (1.0 - risk_degree) * (current_total_value + current.get_cash())
+        current_tradable_value -= reserved_cash
+
+        if current_tradable_value < 0:
+            target_amount_dict = dict(current_amount_dict)
+            for stock_id in list(target_amount_dict.keys()):
+                if trade_exchange.is_stock_tradable(
+                    stock_id,
+                    start_time=trade_start_time,
+                    end_time=trade_end_time,
+                    direction=Order.SELL,
+                ):
+                    del target_amount_dict[stock_id]
+        else:
+            current_tradable_value /= 1 + max(trade_exchange.close_cost, trade_exchange.open_cost)
+            target_amount_dict = trade_exchange.generate_amount_position_from_weight_position(
+                weight_position=target_weight_position,
+                cash=current_tradable_value,
+                start_time=trade_start_time,
+                end_time=trade_end_time,
+            )
+
+        buy_order_list = []
+        sell_order_list = []
+        sorted_ids = sorted(set(list(current_amount_dict.keys()) + list(target_amount_dict.keys())))
+        random.seed(0)
+        random.shuffle(sorted_ids)
+        for stock_id in sorted_ids:
+            target_amount = target_amount_dict.get(stock_id, 0)
+            current_amount = current_amount_dict.get(stock_id, 0)
+            factor = trade_exchange.get_factor(stock_id, start_time=trade_start_time, end_time=trade_end_time)
+            deal_amount = trade_exchange.get_real_deal_amount(current_amount, target_amount, factor)
+            if deal_amount == 0:
+                continue
+            direction = Order.BUY if deal_amount > 0 else Order.SELL
+            if not trade_exchange.is_stock_tradable(
+                stock_id=stock_id,
+                start_time=trade_start_time,
+                end_time=trade_end_time,
+                direction=direction,
+            ):
+                continue
+            order = Order(
+                stock_id=stock_id,
+                amount=abs(deal_amount),
+                direction=direction,
+                start_time=trade_start_time,
+                end_time=trade_end_time,
+                factor=factor,
+            )
+            if direction == Order.BUY:
+                buy_order_list.append(order)
+            else:
+                sell_order_list.append(order)
+        return sell_order_list + buy_order_list
+
+
 class WeeklyTopKEqualWeightStrategy(WeightStrategyBase):
     """
     Thin qlib-native strategy adapter for weekly equal-weight TopK rebalancing.
@@ -672,7 +810,7 @@ class WeeklyTopKEqualWeightStrategy(WeightStrategyBase):
         **kwargs: Any,
     ):
         super().__init__(
-            order_generator_cls_or_obj=OrderGenWInteract(),
+            order_generator_cls_or_obj=DirectionalOrderGenWInteract(),
             risk_degree=risk_degree,
             **kwargs,
         )
@@ -761,7 +899,8 @@ class WeeklyTopKEqualWeightStrategy(WeightStrategyBase):
         score_frame = score.copy() if isinstance(score, pd.DataFrame) else pd.Series(score).to_frame(self.score_column)
 
         if configurable_slots <= 0:
-            return {}
+            current_weights = _current_position_weight_dict(current)
+            return _build_target_weight_dict([], current_weights, locked_residual_codes)
         selected = select_topk_with_buffer(
             score_frame,
             current_holdings=active_current_holdings,
@@ -776,8 +915,8 @@ class WeeklyTopKEqualWeightStrategy(WeightStrategyBase):
         if not selected:
             current_weights = _current_position_weight_dict(current)
             return current_weights if current_weights else {}
-        weight = 1.0 / len(selected)
-        return {str(code): weight for code in selected}
+        current_weights = _current_position_weight_dict(current)
+        return _build_target_weight_dict(selected, current_weights, locked_residual_codes)
 
 
 @dataclass(frozen=True)

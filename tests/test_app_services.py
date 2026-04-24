@@ -1120,6 +1120,72 @@ def test_create_native_workflow_task_serializes_consensus_specs(monkeypatch, tmp
     ]
 
 
+def test_get_run_task_preset_ignores_derived_recipe_names(monkeypatch):
+    monkeypatch.setattr(
+        services,
+        "get_run_detail",
+        lambda run_id: services.RunDetail(
+            run_id=run_id,
+            output_dir="artifacts/native_workflow/demo_run",
+            quick_summary=RunQuickSummary(
+                run_id=run_id,
+                output_dir="artifacts/native_workflow/demo_run",
+                recipe_names=["baseline", "rank_blended", "mae_4w", "rank_blended__consensus__mae_4w_top15"],
+                artifact_status="ready",
+            ),
+            config={
+                "panel_path": "artifacts/panels/csi300_weekly_20260410.parquet",
+                "output_dir": "artifacts/native_workflow/demo_run",
+                "consensus_recipe_specs": [
+                    {
+                        "primary_recipe": "rank_blended",
+                        "filter_recipe": "mae_4w",
+                        "filter_topn": 15,
+                        "name": "rank_blended__consensus__mae_4w_top15",
+                    }
+                ],
+            },
+            recipe_registry={
+                "baseline_recipe": {"name": "baseline"},
+                "candidate_recipes": {
+                    "rank_blended": {"name": "rank_blended"},
+                    "mae_4w": {"name": "mae_4w"},
+                },
+                "derived_recipes": {
+                    "rank_blended__consensus__mae_4w_top15": {
+                        "name": "rank_blended__consensus__mae_4w_top15",
+                        "recipe_kind": "consensus_filter",
+                        "primary_recipe": "rank_blended",
+                        "filter_recipe": "mae_4w",
+                        "filter_topn": 15,
+                    }
+                },
+            },
+            promotion_gate={},
+            recipes=[
+                services.RecipeSummary(run_id=run_id, recipe_name="baseline"),
+                services.RecipeSummary(run_id=run_id, recipe_name="rank_blended"),
+                services.RecipeSummary(run_id=run_id, recipe_name="mae_4w"),
+                services.RecipeSummary(run_id=run_id, recipe_name="rank_blended__consensus__mae_4w_top15"),
+            ],
+            nodes=[],
+            artifact_inventory=[],
+        ),
+    )
+
+    preset = services.get_run_task_preset("demo_run")
+
+    assert preset.payload["recipe_names"] == ["baseline", "rank_blended", "mae_4w"]
+    assert preset.payload["config_payload"]["consensus_recipe_specs"] == [
+        {
+            "primary_recipe": "rank_blended",
+            "filter_recipe": "mae_4w",
+            "filter_topn": 15,
+            "name": "rank_blended__consensus__mae_4w_top15",
+        }
+    ]
+
+
 def test_create_research_analysis_task_uses_analysis_script(monkeypatch, tmp_path):
     monkeypatch.setattr(services, "TASKS_ROOT", tmp_path / "tasks")
     monkeypatch.setattr(services, "_resolve_artifact_path", lambda value, base_dir=services.PROJECT_ROOT: Path(value) if value else None)

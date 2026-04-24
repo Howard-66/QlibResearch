@@ -193,8 +193,9 @@ def build_portfolio_targets(
     topk: int = 10,
     selected_codes: list[str] | None = None,
 ) -> pd.DataFrame:
+    empty_targets = pd.DataFrame(columns=["trade_date", "model_id", "feature_date", "code", "target_weight", "score", "rank"])
     if score_frame.empty:
-        return pd.DataFrame(columns=["trade_date", "model_id", "feature_date", "code", "target_weight", "score", "rank"])
+        return empty_targets
     frame = score_frame.copy()
     code_col = "code" if "code" in frame.columns else "instrument"
     score_col = "qlib_score" if "qlib_score" in frame.columns else ("score" if "score" in frame.columns else frame.columns[-1])
@@ -211,6 +212,8 @@ def build_portfolio_targets(
         )
     else:
         frame = frame.sort_values("score", ascending=False).head(max(int(topk), 1)).reset_index(drop=True)
+    if frame.empty:
+        return empty_targets
     frame["rank"] = frame.index + 1
     frame["trade_date"] = feature_date
     frame["model_id"] = model_id

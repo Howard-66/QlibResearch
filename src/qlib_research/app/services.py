@@ -1722,6 +1722,20 @@ def _resolve_recipe_registry(summary_payload: dict[str, Any]) -> dict[str, dict[
     return result
 
 
+def _resolve_base_recipe_names_from_registry(registry: dict[str, Any]) -> list[str]:
+    names: list[str] = []
+    baseline_recipe = registry.get("baseline_recipe")
+    if isinstance(baseline_recipe, dict) and baseline_recipe.get("name"):
+        names.append(str(baseline_recipe["name"]))
+    candidate_recipes = registry.get("candidate_recipes", {})
+    if isinstance(candidate_recipes, dict):
+        for recipe_name, recipe_config in candidate_recipes.items():
+            if isinstance(recipe_config, dict):
+                names.append(str(recipe_config.get("name") or recipe_name))
+    # Keep stable order while dropping duplicates.
+    return list(dict.fromkeys(names))
+
+
 def _get_recipe_config(summary_payload: dict[str, Any], recipe_name: str) -> dict[str, Any]:
     return _resolve_recipe_registry(summary_payload).get(recipe_name, {})
 
@@ -3146,6 +3160,7 @@ def get_run_task_preset(run_id: str) -> TaskPresetResponse:
     detail = get_run_detail(run_id)
     payload = deepcopy(detail.config)
     payload["output_dir"] = _suggest_rerun_output_dir(payload.get("output_dir"), detail.run_id)
+    base_recipe_names = _resolve_base_recipe_names_from_registry(detail.recipe_registry)
     return TaskPresetResponse(
         task_kind="run_native_workflow",
         display_name=f"Rerun {detail.run_id}",
@@ -3156,7 +3171,7 @@ def get_run_task_preset(run_id: str) -> TaskPresetResponse:
             "requested_by": "webapp",
             "source_ref": {"kind": "run", "source_id": detail.run_id, "label": detail.run_id, "path": detail.output_dir},
             "config_payload": payload,
-            "recipe_names": [recipe.recipe_name for recipe in detail.recipes],
+            "recipe_names": base_recipe_names or [recipe.recipe_name for recipe in detail.recipes],
         },
     )
 

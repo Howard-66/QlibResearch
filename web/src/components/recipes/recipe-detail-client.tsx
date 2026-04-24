@@ -14,6 +14,7 @@ import { TrendChart } from "@/components/charts/trend-chart";
 import { StatCard } from "@/components/common/stat-card";
 import { DataTable } from "@/components/data/data-table";
 import { NodeCard } from "@/components/diagnostics/node-card";
+import { ValidationComparisonPanel } from "@/components/diagnostics/validation-comparison-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -226,8 +227,8 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
           <SectionCard title="Slice Stability">
             <DataTable table={rollingSliceStability} maxRows={16} />
           </SectionCard>
-          <SectionCard title="Execution Gap">
-            <DataTable table={rollingExecutionGap} maxRows={6} />
+          <SectionCard title="Validation Comparison">
+            <ValidationComparisonPanel table={rollingExecutionGap} />
           </SectionCard>
         </TabsContent>
 
@@ -271,8 +272,8 @@ export function RecipeDetailClient({ detail }: { detail: RecipeDetail }) {
           <SectionCard title="Slice Stability">
             <DataTable table={walkSliceStability} maxRows={16} />
           </SectionCard>
-          <SectionCard title="Execution Gap">
-            <DataTable table={walkExecutionGap} maxRows={6} />
+          <SectionCard title="Validation Comparison">
+            <ValidationComparisonPanel table={walkExecutionGap} />
           </SectionCard>
         </TabsContent>
 

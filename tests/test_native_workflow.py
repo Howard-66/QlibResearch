@@ -7,6 +7,13 @@ import pytest
 import qlib_research.core.qlib_native_workflow as native_workflow
 from scripts.evaluate_native_weekly import parse_args
 from qlib_research.core.notebook_workflow import build_native_workflow_cli_command, load_native_workflow_artifacts, run_native_notebook_workflow
+from qlib_research.core.qlib_native_backtest import (
+    DirectionalOrderGenWInteract,
+    _build_target_weight_dict,
+    build_native_quote_frame,
+    build_rebalance_audit,
+    select_topk_with_buffer,
+)
 from qlib_research.core.qlib_native_workflow import (
     ConsensusRecipeSpec,
     NativeRecipeArtifacts,
@@ -14,8 +21,11 @@ from qlib_research.core.qlib_native_workflow import (
     NativeWorkflowConfig,
     _apply_consensus_filter,
     _build_native_workflow_summary_payload,
+    _decorate_latest_snapshot_frame,
     _build_recipe_experiment_scorecard,
     _build_parallel_recipe_heartbeat,
+    _mask_untradable_execution_prices,
+    _prediction_bundle_rebalance_steps,
     _normalize_consensus_recipe_specs,
     _prime_parallel_workflow_inputs,
     build_sector_exposure_history,
@@ -233,6 +243,205 @@ def test_build_sector_exposure_history_falls_back_to_global_sector_map():
     assert history.loc[0, "sector_weight__银行"] == pytest.approx(0.5)
     assert history.loc[0, "sector_weight__电子"] == pytest.approx(0.5)
     assert history.loc[0, "top1_sector_weight"] == pytest.approx(0.5)
+
+
+def test_build_rebalance_audit_does_not_lock_sellable_positions():
+    class _Position:
+        def __init__(self, codes):
+            self._codes = list(codes)
+
+        def get_stock_list(self):
+            return list(self._codes)
+
+    dates = pd.to_datetime(["2026-01-02", "2026-01-09", "2026-01-16"])
+    signal = pd.DataFrame(
+        [
+            {"feature_date": dates[0], "instrument": "AAA.SH", "score": 0.9},
+            {"feature_date": dates[0], "instrument": "BBB.SH", "score": 0.1},
+            {"feature_date": dates[1], "instrument": "AAA.SH", "score": 0.1},
+            {"feature_date": dates[1], "instrument": "BBB.SH", "score": 0.9},
+            {"feature_date": dates[2], "instrument": "AAA.SH", "score": 0.1},
+            {"feature_date": dates[2], "instrument": "BBB.SH", "score": 0.9},
+        ]
+    )
+    quote_panel = pd.DataFrame(
+        [
+            {"datetime": date, "instrument": code, "open": 10.0, "close": 10.0, "volume": 1000.0}
+            for date in dates
+            for code in ("AAA.SH", "BBB.SH")
+        ]
+    )
+    quote_frame = build_native_quote_frame(quote_panel)
+    positions = {
+        dates[1]: _Position(["AAA.SH"]),
+        dates[2]: _Position(["BBB.SH"]),
+    }
+
+    audit = build_rebalance_audit(signal, quote_frame, positions, topk=1)
+
+    assert len(audit) == 2
+    assert int(audit.loc[1, "locked_residual_count"]) == 0
+    assert int(audit.loc[1, "sell_blocked_total_count"]) == 0
+    assert int(audit.loc[1, "target_hold_count"]) == 1
+    assert audit.loc[1, "target_holdings"] == "BBB.SH"
+
+
+def test_select_topk_with_buffer_applies_industry_cap_to_retained_holdings():
+    score = pd.DataFrame(
+        [
+            {"instrument": "AAA.SH", "score": 0.90, "l1_name": "银行", "amount": 90.0},
+            {"instrument": "BBB.SH", "score": 0.89, "l1_name": "银行", "amount": 80.0},
+            {"instrument": "CCC.SH", "score": 0.88, "l1_name": "电子", "amount": 70.0},
+        ]
+    )
+
+    selected = select_topk_with_buffer(
+        score,
+        current_holdings=["AAA.SH", "BBB.SH"],
+        topk=2,
+        industry_max_weight=0.5,
+        score_column="score",
+    )
+
+    assert selected == ["AAA.SH", "CCC.SH"]
+
+
+def test_select_topk_with_buffer_uses_liquidity_tie_break_for_equal_scores():
+    score = pd.DataFrame(
+        [
+            {"instrument": "AAA.SH", "score": 0.50, "amount": 100.0, "volume": 1000.0},
+            {"instrument": "BBB.SH", "score": 0.50, "amount": 300.0, "volume": 900.0},
+            {"instrument": "CCC.SH", "score": 0.50, "amount": 200.0, "volume": 800.0},
+        ]
+    )
+
+    selected = select_topk_with_buffer(score, topk=2, score_column="score")
+
+    assert selected == ["BBB.SH", "CCC.SH"]
+
+
+def test_decorate_latest_snapshot_frame_prioritizes_selected_codes():
+    frame = pd.DataFrame(
+        [
+            {"instrument": "AAA.SH", "score": 0.50, "amount": 100.0, "volume": 1000.0},
+            {"instrument": "BBB.SH", "score": 0.50, "amount": 300.0, "volume": 900.0},
+            {"instrument": "CCC.SH", "score": 0.49, "amount": 200.0, "volume": 800.0},
+        ]
+    )
+
+    decorated = _decorate_latest_snapshot_frame(frame, selected_codes=["CCC.SH", "BBB.SH"])
+
+    assert list(decorated["instrument"])[:2] == ["CCC.SH", "BBB.SH"]
+    assert list(decorated["target_selection_rank"])[:2] == [1, 2]
+    assert decorated.loc[0, "selected_for_target"]
+    assert "selection_priority" in decorated.columns
+
+
+def test_build_target_weight_dict_reserves_budget_for_locked_residuals():
+    weights = _build_target_weight_dict(
+        selected_codes=["BBB.SH", "CCC.SH"],
+        current_weights={"AAA.SH": 0.4, "DDD.SH": 0.6},
+        locked_residual_codes=["AAA.SH"],
+    )
+
+    assert weights["AAA.SH"] == pytest.approx(0.4)
+    assert weights["BBB.SH"] == pytest.approx(0.3)
+    assert weights["CCC.SH"] == pytest.approx(0.3)
+    assert weights["DDD.SH"] == pytest.approx(0.0)
+
+
+def test_prediction_bundle_rebalance_steps_does_not_double_throttle_sparse_predictions():
+    predictions = pd.DataFrame(
+        [
+            {"feature_date": "2026-01-02", "instrument": "AAA.SH", "score": 0.9},
+            {"feature_date": "2026-01-30", "instrument": "AAA.SH", "score": 0.8},
+            {"feature_date": "2026-02-27", "instrument": "AAA.SH", "score": 0.7},
+        ]
+    )
+
+    assert _prediction_bundle_rebalance_steps(predictions) == 1
+
+
+def test_mask_untradable_execution_prices_accepts_dataframe_inputs():
+    dates = pd.to_datetime(["2026-01-02", "2026-01-09"])
+    execution_price = pd.DataFrame(
+        {
+            "A": ["10.0", "0"],
+            "B": [12.0, 13.0],
+        },
+        index=dates,
+    )
+    volume = pd.DataFrame(
+        {
+            "A": [1000.0, 1000.0],
+            "B": [0.0, 2000.0],
+        },
+        index=dates,
+    )
+
+    masked = _mask_untradable_execution_prices(execution_price, volume)
+
+    assert masked.loc[dates[0], "A"] == "10.0"
+    assert pd.isna(masked.loc[dates[1], "A"])
+    assert pd.isna(masked.loc[dates[0], "B"])
+    assert masked.loc[dates[1], "B"] == 13.0
+
+
+def test_directional_order_generator_allows_sell_when_buy_is_limited():
+    from qlib.backtest.decision import Order
+
+    class _Position:
+        def get_stock_amount_dict(self):
+            return {"LIMITUP.SH": 100.0, "NORMAL.SH": 100.0}
+
+        def get_cash(self):
+            return 0.0
+
+    class _Exchange:
+        open_cost = 0.0
+        close_cost = 0.0
+
+        def calculate_amount_position_value(self, amount_dict, start_time, end_time, only_tradable=False):
+            if not only_tradable:
+                return float(sum(amount_dict.values()))
+            return float(sum(value for code, value in amount_dict.items() if code != "LIMITUP.SH"))
+
+        def generate_amount_position_from_weight_position(self, weight_position, cash, start_time, end_time):
+            return {}
+
+        def get_factor(self, stock_id, start_time, end_time):
+            return 1.0
+
+        def get_real_deal_amount(self, current_amount, target_amount, factor=None):
+            if current_amount == target_amount:
+                return 0.0
+            if current_amount < target_amount:
+                return target_amount - current_amount
+            return -(current_amount - target_amount)
+
+        def is_stock_tradable(self, stock_id, start_time, end_time, direction=None):
+            if stock_id != "LIMITUP.SH":
+                return True
+            if direction == Order.SELL:
+                return True
+            return False
+
+    generator = DirectionalOrderGenWInteract()
+    orders = generator.generate_order_list_from_target_weight_position(
+        current=_Position(),
+        trade_exchange=_Exchange(),
+        target_weight_position={},
+        risk_degree=1.0,
+        pred_start_time=pd.Timestamp("2026-01-02"),
+        pred_end_time=pd.Timestamp("2026-01-02"),
+        trade_start_time=pd.Timestamp("2026-01-09"),
+        trade_end_time=pd.Timestamp("2026-01-09"),
+    )
+
+    assert {(order.stock_id, order.direction, order.amount) for order in orders} == {
+        ("LIMITUP.SH", Order.SELL, 100.0),
+        ("NORMAL.SH", Order.SELL, 100.0),
+    }
 
 
 def test_build_native_workflow_summary_payload_collects_recipe_overview(tmp_path):

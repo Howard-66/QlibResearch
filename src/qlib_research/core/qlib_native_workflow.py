@@ -932,6 +932,43 @@ def attach_prediction_metadata(
     return merged
 
 
+def _decorate_latest_snapshot_frame(
+    score_frame: pd.DataFrame,
+    *,
+    selected_codes: Sequence[str] | None = None,
+    score_column: str = "score",
+) -> pd.DataFrame:
+    if score_frame.empty:
+        return score_frame.copy()
+    frame = score_frame.copy()
+    if score_column not in frame.columns:
+        return frame.reset_index(drop=True)
+    frame[score_column] = pd.to_numeric(frame[score_column], errors="coerce")
+    frame["__selection_amount"] = pd.to_numeric(frame.get("amount"), errors="coerce").fillna(float("-inf"))
+    frame["__selection_volume"] = pd.to_numeric(frame.get("volume"), errors="coerce").fillna(float("-inf"))
+    frame["__selection_code"] = frame["instrument"].astype(str)
+    frame = frame.sort_values(
+        [score_column, "__selection_amount", "__selection_volume", "__selection_code"],
+        ascending=[False, False, False, True],
+        kind="mergesort",
+    ).reset_index(drop=True)
+    frame["selection_rank"] = frame.index + 1
+    # Keep the raw model score intact while surfacing a deterministic live-order priority.
+    frame["selection_priority"] = frame[score_column].fillna(float("-inf")) + (
+        (len(frame) - frame["selection_rank"]).astype(float) * 1e-12
+    )
+    target_rank_map = {str(code): idx + 1 for idx, code in enumerate(selected_codes or [])}
+    frame["target_selection_rank"] = frame["instrument"].astype(str).map(target_rank_map)
+    frame["selected_for_target"] = frame["target_selection_rank"].notna()
+    frame = frame.sort_values(
+        ["selected_for_target", "target_selection_rank", "selection_rank"],
+        ascending=[False, True, True],
+        na_position="last",
+        kind="mergesort",
+    ).reset_index(drop=True)
+    return frame.drop(columns=["__selection_amount", "__selection_volume", "__selection_code"])
+
+
 def evaluate_prediction_frame_extended(prediction_frame: pd.DataFrame, topk: int) -> dict[str, float]:
     result = prediction_frame.dropna(subset=["score"]).copy()
     if result.empty:
@@ -1140,6 +1177,12 @@ def _build_validation_volume_frame(panel: pd.DataFrame, eval_dates: Sequence[pd.
     return volume_frame.apply(pd.to_numeric, errors="coerce")
 
 
+def _coerce_numeric_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame.copy()
+    return frame.apply(pd.to_numeric, errors="coerce")
+
+
 def _mask_untradable_execution_prices(
     execution_price_frame: pd.DataFrame,
     volume_frame: pd.DataFrame | None,
@@ -1147,10 +1190,10 @@ def _mask_untradable_execution_prices(
     masked = execution_price_frame.copy()
     if masked.empty:
         return masked
-    masked = masked.where(pd.to_numeric(masked, errors="coerce") > 0)
+    masked = masked.where(_coerce_numeric_frame(masked) > 0)
     if volume_frame is not None and not volume_frame.empty:
         aligned_volume = volume_frame.reindex(index=masked.index, columns=masked.columns)
-        masked = masked.where(pd.to_numeric(aligned_volume, errors="coerce") > 0)
+        masked = masked.where(_coerce_numeric_frame(aligned_volume) > 0)
     return masked
 
 
@@ -1297,6 +1340,21 @@ def build_buffered_signal_matrix(
     ).signal_matrix
 
 
+def _prediction_bundle_rebalance_steps(predictions: pd.DataFrame) -> int:
+    """
+    Prediction bundles are already sampled on rebalance dates.
+
+    Native workflow bundles only contain feature dates selected by the outer evaluation
+    schedule (for example every 4 weeks). Re-applying `rebalance_interval_weeks` inside
+    the execution layer would skip three out of every four bundle dates and effectively
+    stretch a 4-week schedule into 16 weeks. Each bundle row should therefore be treated
+    as one execution step.
+    """
+
+    _ = predictions
+    return 1
+
+
 def _build_native_report_frame(report_normal: pd.DataFrame, initial_capital: float) -> pd.DataFrame:
     frame = report_normal.copy().reset_index().rename(columns={"index": "datetime"})
     frame["datetime"] = pd.to_datetime(frame["datetime"])
@@ -1440,6 +1498,7 @@ def run_validation_backtest(
     panel: pd.DataFrame,
     config: NativeWorkflowConfig,
 ) -> dict[str, Any]:
+    bundle_rebalance_steps = _prediction_bundle_rebalance_steps(predictions)
     eval_dates = sorted(pd.to_datetime(predictions["feature_date"]).unique())
     frames = build_backtest_price_frames(panel=panel, eval_dates=eval_dates)
     volume_frame = _build_validation_volume_frame(panel, eval_dates)
@@ -1453,7 +1512,7 @@ def run_validation_backtest(
         execution_price_frame=validation_execution_price,
         topk=config.topk,
         hold_buffer_rank=config.hold_buffer_rank,
-        rebalance_interval_weeks=config.rebalance_interval_weeks,
+        rebalance_interval_weeks=bundle_rebalance_steps,
         min_liquidity_filter=config.min_liquidity_filter,
         min_score_spread=config.min_score_spread,
         industry_max_weight=config.industry_max_weight,
@@ -2316,6 +2375,7 @@ def _materialize_recipe_artifacts(
     native_summary_rows: list[dict[str, Any]] = []
 
     for bundle_name, bundle in resolved_bundles.items():
+        bundle_rebalance_steps = _prediction_bundle_rebalance_steps(bundle["predictions"])
         native_signal = build_native_signal_frame(bundle["predictions"])
         benchmark_frame = build_universe_benchmark_frame(
             bundle["eval_dates"],
@@ -2343,7 +2403,7 @@ def _materialize_recipe_artifacts(
             risk_degree=config.native_risk_degree,
             only_tradable=config.native_only_tradable,
             hold_buffer_rank=config.hold_buffer_rank,
-            rebalance_interval_steps=config.rebalance_interval_weeks,
+            rebalance_interval_steps=bundle_rebalance_steps,
             min_liquidity_filter=config.min_liquidity_filter,
             min_score_spread=config.min_score_spread,
             industry_max_weight=config.industry_max_weight,
@@ -2374,7 +2434,7 @@ def _materialize_recipe_artifacts(
                 native_result.artifacts.positions_normal,
                 topk=config.topk,
                 hold_buffer_rank=config.hold_buffer_rank,
-                rebalance_interval_steps=config.rebalance_interval_weeks,
+                rebalance_interval_steps=bundle_rebalance_steps,
                 only_tradable=config.native_only_tradable,
                 min_liquidity_filter=config.min_liquidity_filter,
                 min_score_spread=config.min_score_spread,
@@ -2393,7 +2453,7 @@ def _materialize_recipe_artifacts(
                 native_result.artifacts.positions_normal,
                 topk=config.topk,
                 hold_buffer_rank=config.hold_buffer_rank,
-                rebalance_interval_steps=config.rebalance_interval_weeks,
+                rebalance_interval_steps=bundle_rebalance_steps,
                 only_tradable=config.native_only_tradable,
                 min_liquidity_filter=config.min_liquidity_filter,
                 min_score_spread=config.min_score_spread,
@@ -2465,8 +2525,6 @@ def _materialize_recipe_artifacts(
 
     recipe_dir = output_dir / recipe.name
     recipe_dir.mkdir(parents=True, exist_ok=True)
-    latest_score_frame.to_csv(recipe_dir / "latest_score_frame.csv", index=False)
-    latest_feature_date_str = str(_resolve_latest_feature_date(latest_score_frame, resolved_bundles).date())
     latest_selected_codes = select_topk_with_buffer(
         latest_score_frame,
         current_holdings=[],
@@ -2477,6 +2535,9 @@ def _materialize_recipe_artifacts(
         industry_max_weight=config.industry_max_weight,
         score_column="score",
     )
+    latest_score_frame = _decorate_latest_snapshot_frame(latest_score_frame, selected_codes=latest_selected_codes, score_column="score")
+    latest_score_frame.to_csv(recipe_dir / "latest_score_frame.csv", index=False)
+    latest_feature_date_str = str(_resolve_latest_feature_date(latest_score_frame, resolved_bundles).date())
     portfolio_targets = build_portfolio_targets(
         latest_score_frame,
         model_id=f"{config.universe_profile}-{recipe.name}-qlib-native",
@@ -2712,7 +2773,7 @@ def run_native_recipe(
         train_weeks=config.train_weeks,
         valid_weeks=config.valid_weeks,
     )
-    latest_score_frame = attach_prediction_metadata(latest_score_frame, normalized_panel, latest_feature_date).sort_values("score", ascending=False).reset_index(drop=True)
+    latest_score_frame = attach_prediction_metadata(latest_score_frame, normalized_panel, latest_feature_date)
 
     rolling_bundle = collect_prediction_bundle(
         "rolling",

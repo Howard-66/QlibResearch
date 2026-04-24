@@ -7,6 +7,7 @@ import type { EChartsOption } from "echarts";
 import { ChartPayloadPanel } from "@/components/charts/chart-payload-panel";
 import { EChartsChart } from "@/components/charts/echarts-chart";
 import { DataTable } from "@/components/data/data-table";
+import { ValidationComparisonPanel } from "@/components/diagnostics/validation-comparison-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -124,8 +125,8 @@ export function ComparePageClient({
               ))}
             </div>
           ) : null}
-          <SectionCard title="Execution Gap">
-            <DataTable table={compareQuery.data.execution_gap} maxRows={12} />
+          <SectionCard title="Validation Comparison">
+            <ValidationComparisonPanel table={compareQuery.data.execution_gap} />
           </SectionCard>
           <div className="grid gap-6 xl:grid-cols-2">
             {Object.entries(compareQuery.data.signal_realization).map(([label, table]) => (
