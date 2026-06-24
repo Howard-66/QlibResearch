@@ -9,6 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from qlib_research.app.contracts import (
     ArtifactInventoryResponse,
+    BreakoutResearchDetail,
+    BreakoutResearchSummary,
     CompareItemRef,
     CompareResponse,
     ExportPanelTaskRequest,
@@ -34,6 +36,7 @@ from qlib_research.app.services import (
     create_export_panel_task,
     create_native_workflow_task,
     create_research_analysis_task,
+    get_breakout_research_detail,
     get_overview,
     get_panel_detail,
     get_recipe_detail,
@@ -47,6 +50,7 @@ from qlib_research.app.services import (
     get_panel_task_preset,
     get_run_task_preset,
     list_panels,
+    list_breakout_research_runs,
     list_run_recipes,
     list_runs,
     list_tasks,
@@ -82,6 +86,19 @@ def health() -> dict[str, str]:
 @app.get("/api/overview", response_model=OverviewResponse)
 def api_get_overview() -> OverviewResponse:
     return get_overview()
+
+
+@app.get("/api/breakout", response_model=list[BreakoutResearchSummary])
+def api_list_breakout_research() -> list[BreakoutResearchSummary]:
+    return list_breakout_research_runs()
+
+
+@app.get("/api/breakout/{model_id}", response_model=BreakoutResearchDetail)
+def api_get_breakout_research(model_id: str) -> BreakoutResearchDetail:
+    try:
+        return get_breakout_research_detail(model_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/api/runs", response_model=list[RunListItem])

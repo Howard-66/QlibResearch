@@ -24,6 +24,8 @@ from qlib_research.app.contracts import (
     AnalysisReportRef,
     ArtifactRef,
     ArtifactInventoryResponse,
+    BreakoutResearchDetail,
+    BreakoutResearchSummary,
     ChartAnnotationPayload,
     ChartPayload,
     ChartSeriesPayload,
@@ -278,6 +280,163 @@ def _frame_to_payload(frame: pd.DataFrame, *, sort_by: str | None = None, ascend
         result = result.sort_values(sort_by, ascending=ascending)
     rows = [{column: _normalize_value(value) for column, value in row.items()} for row in result.to_dict(orient="records")]
     return DataTablePayload(columns=[str(column) for column in result.columns], rows=rows)
+
+
+def _breakout_model_dirs() -> list[Path]:
+    if not ARTIFACTS_ROOT.exists():
+        return []
+    result: list[Path] = []
+    for manifest_path in ARTIFACTS_ROOT.glob("*/manifest.json"):
+        manifest = _safe_read_json(manifest_path, {})
+        if manifest.get("research_kind") == "breakout_event":
+            result.append(manifest_path.parent)
+    return sorted(result, key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
+
+
+def _breakout_artifact_inventory(model_dir: Path, manifest: dict[str, Any]) -> list[ArtifactRef]:
+    names = [
+        "manifest.json",
+        str(manifest.get("snapshot_path") or "scores.csv"),
+        str(manifest.get("signal_path") or "signals.csv"),
+        str(manifest.get("metrics_path") or "metrics.json"),
+        str(manifest.get("feature_panel_path") or "feature_panel.csv"),
+        "events_scored.csv",
+        str(manifest.get("model_path") or "model.pkl"),
+    ]
+    inventory: list[ArtifactRef] = []
+    for name in dict.fromkeys(names):
+        path = model_dir / name
+        exists = path.exists()
+        stat = path.stat() if exists else None
+        inventory.append(
+            ArtifactRef(
+                name=name,
+                path=str(path),
+                exists=exists,
+                size_bytes=stat.st_size if stat else None,
+                updated_at=datetime.fromtimestamp(stat.st_mtime).isoformat() if stat else None,
+            )
+        )
+    return inventory
+
+
+def _breakout_artifact_status(inventory: list[ArtifactRef], required: set[str]) -> str:
+    ready = {item.name for item in inventory if item.exists}
+    if required.issubset(ready):
+        return "ready"
+    if ready:
+        return "partial"
+    return "missing"
+
+
+def _breakout_summary_from_dir(model_dir: Path) -> BreakoutResearchSummary:
+    manifest = _safe_read_json(model_dir / "manifest.json", {})
+    metrics = _safe_read_json(model_dir / str(manifest.get("metrics_path") or "metrics.json"), {})
+    source_data = manifest.get("source_data") if isinstance(manifest.get("source_data"), dict) else {}
+    label_policy = manifest.get("label_policy") if isinstance(manifest.get("label_policy"), dict) else {}
+    feature_policy = manifest.get("feature_policy") if isinstance(manifest.get("feature_policy"), dict) else {}
+    feature_columns = feature_policy.get("feature_columns") if isinstance(feature_policy.get("feature_columns"), list) else []
+    inventory = _breakout_artifact_inventory(model_dir, manifest)
+    stat = (model_dir / "manifest.json").stat() if (model_dir / "manifest.json").exists() else None
+    return BreakoutResearchSummary(
+        model_id=str(manifest.get("model_id") or model_dir.name),
+        feature_date=manifest.get("feature_date"),
+        generated_at=manifest.get("generated_at"),
+        model_dir=str(model_dir),
+        universe_profile=source_data.get("universe_profile"),
+        universe_mode=source_data.get("universe_mode"),
+        symbol_count=source_data.get("symbol_count"),
+        event_count=metrics.get("event_count"),
+        evaluated_count=metrics.get("evaluated_count"),
+        rank_ic=metrics.get("rank_ic"),
+        top_quantile_mean_return=metrics.get("top_quantile_mean_return"),
+        top_quantile_hit_rate=metrics.get("top_quantile_hit_rate"),
+        label_target=label_policy.get("target"),
+        feature_count=len(feature_columns),
+        artifact_status=_breakout_artifact_status(inventory, {"manifest.json", "scores.csv", "signals.csv", "metrics.json"}),
+        updated_at=datetime.fromtimestamp(stat.st_mtime).isoformat() if stat else None,
+    )
+
+
+def list_breakout_research_runs() -> list[BreakoutResearchSummary]:
+    return [_breakout_summary_from_dir(model_dir) for model_dir in _breakout_model_dirs()]
+
+
+def get_breakout_research_detail(model_id: str) -> BreakoutResearchDetail:
+    model_dir = ARTIFACTS_ROOT / model_id
+    manifest_path = model_dir / "manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Breakout research manifest not found: {manifest_path}")
+    manifest = _safe_read_json(manifest_path, {})
+    if manifest.get("research_kind") != "breakout_event":
+        raise FileNotFoundError(f"Not a breakout research model: {model_id}")
+
+    summary = _breakout_summary_from_dir(model_dir)
+    metrics = _safe_read_json(model_dir / str(manifest.get("metrics_path") or "metrics.json"), {})
+    events = _safe_read_csv(model_dir / "events_scored.csv")
+    features = _safe_read_csv(model_dir / str(manifest.get("feature_panel_path") or "feature_panel.csv"))
+    signals = _safe_read_csv(model_dir / str(manifest.get("signal_path") or "signals.csv"))
+    scores = _safe_read_csv(model_dir / str(manifest.get("snapshot_path") or "scores.csv"))
+
+    label_columns = [column for column in features.columns if str(column).startswith("label_")]
+    return_columns = [column for column in features.columns if str(column).startswith("future_return_")]
+    feature_policy = manifest.get("feature_policy") if isinstance(manifest.get("feature_policy"), dict) else {}
+    feature_columns = feature_policy.get("feature_columns") if isinstance(feature_policy.get("feature_columns"), list) else []
+    signal_score = pd.to_numeric(signals.get("signal_score"), errors="coerce") if not signals.empty and "signal_score" in signals else pd.Series(dtype=float)
+    event_dates = pd.to_datetime(events.get("event_date"), errors="coerce") if not events.empty and "event_date" in events else pd.Series(dtype="datetime64[ns]")
+
+    top_signals = signals.sort_values("signal_score", ascending=False).head(50) if "signal_score" in signals else signals.head(50)
+    tables = {
+        "events_sample": _frame_to_payload(events.head(50)),
+        "labels_sample": _frame_to_payload(features[["event_id", "code", "event_date", *return_columns, *label_columns]].head(50)) if not features.empty else DataTablePayload(),
+        "features_sample": _frame_to_payload(features[["event_id", "code", "event_date", *feature_columns]].head(50)) if not features.empty and feature_columns else DataTablePayload(),
+        "top_signals": _frame_to_payload(top_signals),
+        "scores": _frame_to_payload(scores.head(50)),
+    }
+
+    return BreakoutResearchDetail(
+        **summary.model_dump(),
+        manifest=sanitize_for_json(manifest),
+        metrics=sanitize_for_json(metrics),
+        config_sections={
+            "source_data": sanitize_for_json(manifest.get("source_data", {})),
+            "label_policy": sanitize_for_json(manifest.get("label_policy", {})),
+            "feature_policy": sanitize_for_json(feature_policy),
+        },
+        artifact_inventory=_breakout_artifact_inventory(model_dir, manifest),
+        event_overview={
+            "event_count": int(len(events)),
+            "symbol_count": int(events["code"].nunique()) if "code" in events else None,
+            "start_date": str(event_dates.min().date()) if not event_dates.dropna().empty else None,
+            "end_date": str(event_dates.max().date()) if not event_dates.dropna().empty else None,
+            "candidate_rules": sorted(events["candidate_rule"].dropna().astype(str).unique().tolist()) if "candidate_rule" in events else [],
+        },
+        label_overview={
+            "label_columns": label_columns,
+            "return_columns": return_columns,
+            "success_rate": _normalize_value(pd.to_numeric(features[label_columns[0]], errors="coerce").mean()) if label_columns else None,
+        },
+        feature_overview={
+            "feature_count": len(feature_columns),
+            "feature_columns": feature_columns,
+            "missing_rate": _normalize_value(features[feature_columns].isna().mean().mean()) if feature_columns and not features.empty else None,
+        },
+        training_overview={
+            "model_type": "LightGBM native train",
+            "objective": "regression",
+            "target": manifest.get("label_policy", {}).get("target") if isinstance(manifest.get("label_policy"), dict) else None,
+        },
+        evaluation_overview=sanitize_for_json(metrics),
+        model_overview={
+            "model_path": manifest.get("model_path") or "model.pkl",
+            "score_snapshot": manifest.get("snapshot_path") or "scores.csv",
+            "signal_path": manifest.get("signal_path") or "signals.csv",
+            "score_min": _normalize_value(signal_score.min()) if not signal_score.empty else None,
+            "score_max": _normalize_value(signal_score.max()) if not signal_score.empty else None,
+            "score_mean": _normalize_value(signal_score.mean()) if not signal_score.empty else None,
+        },
+        tables=tables,
+    )
 
 
 def _format_metric(value: Any) -> str:

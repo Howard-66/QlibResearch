@@ -31,6 +31,7 @@ type BreadcrumbEntry = {
 const titleMap: Record<string, HeaderMeta> = {
   "/": { title: "Overview", description: "工作台总览、最近 runs 与任务状态" },
   "/runs": { title: "Runs", description: "按最近运行记录进入 quick judge 与深度复盘" },
+  "/breakout": { title: "Breakout", description: "股票突破事件研究：事件、标注、特征、训练、评估与模型产物" },
   "/compare": { title: "Compare", description: "按 recipe 粒度做跨 run 对比" },
   "/panels": { title: "Panels", description: "查看 panel 元信息、列摘要与关联 runs" },
   "/tasks": { title: "Tasks", description: "提交 panel 导出与 native workflow 调度任务" },
@@ -68,6 +69,13 @@ function buildBreadcrumbs(pathname: string): BreadcrumbEntry[] {
     ];
   }
 
+  if (segments[0] === "breakout" && segments.length === 2) {
+    return [
+      { href: "/breakout", label: "Breakout" },
+      { label: decodeSegment(segments[1]) },
+    ];
+  }
+
   return [];
 }
 
@@ -90,6 +98,9 @@ function resolveHeaderMeta(pathname: string): HeaderMeta {
   }
   if (pathname.startsWith("/panels/")) {
     return { title: "Panel Detail", description: "查看 panel 样本范围、列目录与样例数据" };
+  }
+  if (pathname.startsWith("/breakout/")) {
+    return { title: "Breakout Research", description: "审阅单个突破模型的事件、标注、特征、评估和配置" };
   }
   return { title: "QlibResearch", description: "研究工作台" };
 }

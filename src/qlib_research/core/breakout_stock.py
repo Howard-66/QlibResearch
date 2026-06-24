@@ -45,6 +45,7 @@ def normalize_stock_price_frame(price_frame: pd.DataFrame) -> pd.DataFrame:
         "symbol": "code",
         "instrument": "code",
         "datetime": "date",
+        "time": "date",
         "trade_date": "date",
         "vol": "volume",
     }
@@ -54,7 +55,7 @@ def normalize_stock_price_frame(price_frame: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"Stock price frame missing required columns: {sorted(missing)}")
 
     frame["code"] = frame["code"].astype(str).str.strip().str.upper()
-    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce", utc=True).dt.tz_localize(None).dt.normalize()
     frame = frame.dropna(subset=["code", "date"]).copy()
     for column in ("open", "high", "low", "close", *OPTIONAL_NUMERIC_COLUMNS):
         if column in frame.columns:
@@ -322,7 +323,7 @@ def train_lightgbm_stock_breakout_model(
 ):
     """Train a LightGBM regressor on an event feature frame."""
 
-    from lightgbm import LGBMRegressor
+    import lightgbm as lgb
 
     columns = list(feature_columns or stock_breakout_feature_columns(feature_frame))
     if not columns:
@@ -335,14 +336,20 @@ def train_lightgbm_stock_breakout_model(
     train = train.dropna(subset=[label_column])
     if train.empty:
         raise ValueError("No labeled stock breakout rows available for training")
-    model = LGBMRegressor(
-        objective="regression",
-        n_estimators=200,
-        learning_rate=0.05,
-        num_leaves=31,
-        random_state=random_state,
+    model_input = train[columns]
+    dataset = lgb.Dataset(model_input, label=train[label_column], feature_name=columns, free_raw_data=False)
+    model = lgb.train(
+        {
+            "objective": "regression",
+            "metric": "l2",
+            "learning_rate": 0.05,
+            "num_leaves": 31,
+            "seed": random_state,
+            "verbosity": -1,
+        },
+        dataset,
+        num_boost_round=200,
     )
-    model.fit(train[columns], train[label_column])
     return model, columns
 
 

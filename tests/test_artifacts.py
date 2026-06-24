@@ -4,9 +4,11 @@ import pandas as pd
 
 from qlib_research.io.artifacts import (
     QlibScoreStore,
+    StrategySignalStore,
     build_portfolio_targets,
     publish_portfolio_targets,
     publish_score_snapshot,
+    publish_strategy_signals,
 )
 
 
@@ -62,3 +64,36 @@ def test_publish_portfolio_targets_and_load_snapshot_contract(tmp_path):
     snapshot = QlibScoreStore(tmp_path).load_snapshot()
     assert target_path.exists()
     assert snapshot.records['BBB.SZ'].qlib_rank == 1
+
+
+def test_publish_strategy_signals_and_load_by_code(tmp_path):
+    signals = pd.DataFrame(
+        {
+            "event_id": ["stock_breakout:AAA.SH:2024-05-10", "stock_breakout:BBB.SZ:2024-05-10"],
+            "model_id": ["breakout-demo", "breakout-demo"],
+            "code": ["AAA.SH", "BBB.SZ"],
+            "signal_date": ["2024-05-10", "2024-05-10"],
+            "feature_date": ["2024-05-10", "2024-05-10"],
+            "signal_type": ["breakout", "breakout"],
+            "side": ["long", "long"],
+            "signal_score": [0.12, 0.08],
+            "pred_return_13d": [0.12, 0.08],
+            "entry_price": [10.5, 20.5],
+        }
+    )
+
+    publish_score_snapshot(
+        pd.DataFrame({"code": ["AAA.SH"], "qlib_score": [0.12]}),
+        model_id="breakout-demo",
+        feature_date="2024-05-10",
+        artifacts_dir=tmp_path,
+    )
+    signal_path = publish_strategy_signals(signals, model_id="breakout-demo", artifacts_dir=tmp_path)
+    loaded = StrategySignalStore(tmp_path).load_signals_for_code("aaa.sh", model_id="breakout-demo")
+    latest_loaded = StrategySignalStore(tmp_path).load_signals_for_code("AAA.SH")
+
+    assert signal_path.exists()
+    assert len(loaded) == 1
+    assert len(latest_loaded) == 1
+    assert loaded[0].event_id == "stock_breakout:AAA.SH:2024-05-10"
+    assert loaded[0].signal_score == 0.12

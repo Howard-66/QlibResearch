@@ -2,13 +2,14 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BarChart3, ClipboardList, FolderKanban, LayoutDashboard, PlayCircle, Settings2 } from "lucide-react";
+import { BarChart3, ClipboardList, FolderKanban, LayoutDashboard, PlayCircle, Settings2, TrendingUp } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
 const items = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
   { href: "/runs", label: "Runs", icon: FolderKanban },
+  { href: "/breakout", label: "Breakout", icon: TrendingUp },
   { href: "/compare", label: "Compare", icon: BarChart3 },
   { href: "/panels", label: "Panels", icon: ClipboardList },
   { href: "/tasks", label: "Tasks", icon: PlayCircle },

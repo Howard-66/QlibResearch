@@ -264,6 +264,39 @@ class PanelDetail(PanelSummary):
     sample_rows: DataTablePayload = Field(default_factory=DataTablePayload)
 
 
+class BreakoutResearchSummary(BaseModel):
+    model_id: str
+    feature_date: str | None = None
+    generated_at: str | None = None
+    model_dir: str
+    universe_profile: str | None = None
+    universe_mode: str | None = None
+    symbol_count: int | None = None
+    event_count: int | None = None
+    evaluated_count: int | None = None
+    rank_ic: float | None = None
+    top_quantile_mean_return: float | None = None
+    top_quantile_hit_rate: float | None = None
+    label_target: str | None = None
+    feature_count: int | None = None
+    artifact_status: Literal["ready", "partial", "missing"] = "missing"
+    updated_at: str | None = None
+
+
+class BreakoutResearchDetail(BreakoutResearchSummary):
+    manifest: dict[str, Any] = Field(default_factory=dict)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    config_sections: dict[str, Any] = Field(default_factory=dict)
+    artifact_inventory: list[ArtifactRef] = Field(default_factory=list)
+    event_overview: dict[str, Any] = Field(default_factory=dict)
+    label_overview: dict[str, Any] = Field(default_factory=dict)
+    feature_overview: dict[str, Any] = Field(default_factory=dict)
+    training_overview: dict[str, Any] = Field(default_factory=dict)
+    evaluation_overview: dict[str, Any] = Field(default_factory=dict)
+    model_overview: dict[str, Any] = Field(default_factory=dict)
+    tables: dict[str, DataTablePayload] = Field(default_factory=dict)
+
+
 class CompareItemRef(BaseModel):
     run_id: str
     recipe_name: str

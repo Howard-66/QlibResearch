@@ -16,6 +16,7 @@ LATEST_MANIFEST = "latest_model.json"
 MODEL_MANIFEST = "manifest.json"
 SCORE_SNAPSHOT = "scores.csv"
 PORTFOLIO_TARGETS = "portfolio_targets.csv"
+STRATEGY_SIGNALS = "signals.csv"
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,28 @@ class ScoreSnapshot:
     generated_at: Optional[str]
     snapshot_path: Path
     records: Dict[str, ScoreRecord]
+
+
+@dataclass(frozen=True)
+class StrategySignalRecord:
+    event_id: str
+    code: str
+    signal_date: str
+    signal_type: str
+    side: str
+    signal_score: Optional[float]
+    pred_return: Optional[float]
+    entry_price: Optional[float]
+    model_id: Optional[str]
+
+
+@dataclass(frozen=True)
+class StrategySignalSnapshot:
+    model_id: Optional[str]
+    feature_date: Optional[str]
+    generated_at: Optional[str]
+    signal_path: Path
+    records: list[StrategySignalRecord]
 
 
 class QlibScoreStore:
@@ -154,6 +177,75 @@ class QlibScoreStore:
         return updated
 
 
+class StrategySignalStore:
+    """Load published strategy signals from local qlib artifacts."""
+
+    def __init__(self, artifacts_dir: Optional[Path | str] = None):
+        self.artifacts_dir = Path(artifacts_dir or get_qlib_artifacts_dir()).resolve()
+
+    def resolve_manifest_path(self, model_id: Optional[str] = None) -> Path:
+        if model_id:
+            return self.artifacts_dir / model_id / MODEL_MANIFEST
+        return self.artifacts_dir / LATEST_MANIFEST
+
+    def load_snapshot(self, model_id: Optional[str] = None) -> StrategySignalSnapshot:
+        manifest_path = self.resolve_manifest_path(model_id)
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"Qlib manifest not found: {manifest_path}")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        default_signal_path = f"{manifest.get('model_id')}/{STRATEGY_SIGNALS}" if manifest_path.name == LATEST_MANIFEST and manifest.get("model_id") else STRATEGY_SIGNALS
+        signal_path = Path(manifest.get("signal_path") or manifest.get("signals_path") or default_signal_path).expanduser()
+        if not signal_path.is_absolute():
+            signal_path = (manifest_path.parent / signal_path).resolve()
+        if not signal_path.exists():
+            raise FileNotFoundError(f"Qlib strategy signals not found: {signal_path}")
+        frame = pd.read_csv(signal_path)
+        return StrategySignalSnapshot(
+            model_id=manifest.get("model_id"),
+            feature_date=manifest.get("feature_date"),
+            generated_at=manifest.get("generated_at"),
+            signal_path=signal_path,
+            records=self._build_records(frame, manifest),
+        )
+
+    def load_signals_for_code(self, code: str, model_id: Optional[str] = None) -> list[StrategySignalRecord]:
+        snapshot = self.load_snapshot(model_id=model_id)
+        normalized = str(code or "").strip().upper()
+        return [record for record in snapshot.records if record.code == normalized]
+
+    def _build_records(self, signal_frame: pd.DataFrame, manifest: dict) -> list[StrategySignalRecord]:
+        if signal_frame.empty:
+            return []
+        code_col = QlibScoreStore._pick_column(signal_frame, ("code", "symbol", "instrument"))
+        date_col = QlibScoreStore._pick_column(signal_frame, ("signal_date", "event_date", "feature_date", "date", "time"))
+        score_col = QlibScoreStore._pick_column(signal_frame, ("signal_score", "qlib_score", "score", "pred", "prediction"))
+        pred_col = QlibScoreStore._pick_column(signal_frame, ("pred_return_13d", "pred_return", "prediction_return", "pred_return_4w"))
+        if not pred_col:
+            pred_col = next((column for column in signal_frame.columns if str(column).startswith("pred_return_")), None)
+        if not code_col or not date_col:
+            raise ValueError("Qlib strategy signals must contain code/symbol and signal_date/event_date columns")
+        records: list[StrategySignalRecord] = []
+        for index, row in signal_frame.iterrows():
+            code = str(row.get(code_col, "")).strip().upper()
+            if not code:
+                continue
+            signal_date = str(pd.to_datetime(row.get(date_col)).date()) if pd.notna(row.get(date_col)) else ""
+            records.append(
+                StrategySignalRecord(
+                    event_id=str(row.get("event_id") or f"{code}:{signal_date}:{index}"),
+                    code=code,
+                    signal_date=signal_date,
+                    signal_type=str(row.get("signal_type") or "breakout"),
+                    side=str(row.get("side") or "long"),
+                    signal_score=safe_float(row.get(score_col)) if score_col else None,
+                    pred_return=safe_float(row.get(pred_col)) if pred_col else None,
+                    entry_price=safe_float(row.get("entry_price")),
+                    model_id=str(row.get("model_id") or manifest.get("model_id") or ""),
+                )
+            )
+        return records
+
+
 def publish_score_snapshot(
     score_frame: pd.DataFrame,
     model_id: str,
@@ -233,3 +325,37 @@ def publish_portfolio_targets(
     target_path = model_dir / PORTFOLIO_TARGETS
     target_frame.to_csv(target_path, index=False)
     return target_path
+
+
+def publish_strategy_signals(
+    signal_frame: pd.DataFrame,
+    model_id: str,
+    artifacts_dir: Optional[str | Path] = None,
+) -> Path:
+    root = Path(artifacts_dir or get_qlib_artifacts_dir()).expanduser().resolve()
+    model_dir = root / model_id
+    model_dir.mkdir(parents=True, exist_ok=True)
+    signal_path = model_dir / STRATEGY_SIGNALS
+    signal_frame.to_csv(signal_path, index=False)
+
+    manifest_path = model_dir / MODEL_MANIFEST
+    latest_path = root / LATEST_MANIFEST
+    manifest = {}
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(
+        {
+            "model_id": model_id,
+            "generated_at": manifest.get("generated_at") or pd.Timestamp.utcnow().isoformat(),
+            "signal_path": signal_path.name,
+        }
+    )
+    if "feature_date" not in manifest and "feature_date" in signal_frame.columns and not signal_frame.empty:
+        manifest["feature_date"] = str(signal_frame["feature_date"].iloc[-1])
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    if latest_path.exists():
+        latest = json.loads(latest_path.read_text(encoding="utf-8"))
+        if latest.get("model_id") == model_id:
+            latest.update({**manifest, "signal_path": str(signal_path.relative_to(root))})
+            latest_path.write_text(json.dumps(latest, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    return signal_path

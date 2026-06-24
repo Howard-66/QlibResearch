@@ -1,4 +1,26 @@
 ## 价格突破策略的机器学习解决方案
+
+> 当前落地状态：本文件是策略思路参考文档。QlibResearch 已先落地股票 v1 闭环，暂不包含期货和 BasisFlow。实际使用说明见 `docs/03-workflows/stock-breakout-research.md`；产物合约见 `docs/04-artifacts/score-snapshot.md` 中的 `signals.csv` 章节。
+
+### 当前 v1 集成方案
+
+股票突破模型复用 QlibResearch，不新建独立项目。当前职责边界如下：
+
+- `FinanceDataHub`：提供股票行情、复权行情、基础面和行业等数据源，不承载策略标签和模型结果。
+- `QlibResearch`：负责突破事件检测、自动标注、特征工程、LightGBM 训练、评估和 artifact 发布。
+- `ValueInvesting`：负责读取 `scores.csv` / `signals.csv`，用于智能选股排序、个股图表 marks 和后续回测接入。
+
+当前已实现的股票 v1 流程：
+
+`FinanceDataHub 股票日线 -> 突破事件 -> 13 日标签 -> 事件级特征 -> LightGBM 评分 -> scores.csv + signals.csv -> ValueInvesting 消费`
+
+当前暂不实现：
+
+- 期货数据、主力连续合约、基差库存等特征。
+- BasisFlow 期货信号展示和回测接入。
+- QlibResearch Workbench 中的突破事件任务队列。
+- ValueInvesting 中完整的 ML 突破回测策略参数面板。
+
 ### 为什么需要 ML
 **逻辑规则能告诉你"够不够"，ML 能告诉你"谁更好"**
 一个选股策略筛选完可能还剩 15 只候选。它们都是"合格"的——但哪几只更值得买？

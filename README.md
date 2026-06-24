@@ -34,12 +34,19 @@ uv run python scripts/train_publish_snapshot.py --panel artifacts/panels/watchli
 uv run python scripts/sync_to_valueinvesting.py --model-id watchlist-weekly-lgbm-v1 --set-latest --dry-run
 ```
 
+运行股票突破事件模型：
+
+```bash
+uv run python scripts/run_stock_breakout_research.py --universe-profile watchlist --start-date 2020-01-01 --model-id stock-breakout-lgbm-v1 --update-latest
+```
+
 ## Documentation
 
 - [Docs Index](docs/README.md)
 - [Project Positioning](docs/01-overview/project-positioning.md)
 - [CLI Quickstart](docs/02-getting-started/cli-quickstart.md)
 - [Native Workflow](docs/03-workflows/native-workflow.md)
+- [Stock Breakout Research](docs/03-workflows/stock-breakout-research.md)
 - [Score Snapshot Contract](docs/04-artifacts/score-snapshot.md)
 - [Future UI/API Plan](docs/06-ui-api-future/information-architecture.md)
 
