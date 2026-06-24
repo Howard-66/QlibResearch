@@ -873,6 +873,50 @@ def test_recipe_experiment_scorecard_rejects_low_uniqueness():
     assert scorecard["verdict"] == "rejected"
 
 
+def test_recipe_experiment_scorecard_rejects_invalid_native_execution_curve(tmp_path):
+    artifacts = _stub_native_recipe_artifacts("baseline", tmp_path / "baseline")
+    artifacts.prediction_bundles["walk_forward"]["summary"] = pd.DataFrame(
+        [{"bundle": "walk_forward", "rank_ic_ir": 0.5, "topk_mean_excess_return_4w": 0.01}]
+    )
+    artifacts.native_summary = pd.DataFrame(
+        [
+            {
+                "recipe": "baseline",
+                "bundle": "walk_forward",
+                "net_total_return": 1.0,
+                "annualized_return": 0.2,
+                "strategy_max_drawdown": -0.02,
+                "sharpe_ratio": 2.0,
+                "zero_net_return_ratio": 0.6,
+                "longest_zero_net_return_run": 12,
+            }
+        ]
+    )
+    artifacts.signal_diagnostics = pd.DataFrame(
+        [{"bundle": "walk_forward", "topk_unique_score_ratio": 1.0}]
+    )
+    artifacts.portfolio_diagnostics = pd.DataFrame(
+        [
+            {"bundle": "walk_forward", "actual_hold_count": 3, "locked_residual_count": 2}
+            for _ in range(12)
+        ]
+    )
+    artifacts.signal_realization_bridge = pd.DataFrame([{"bundle": "walk_forward"}])
+
+    scorecard = _build_recipe_experiment_scorecard(
+        run_id="demo_run",
+        recipe_name="baseline",
+        artifacts=artifacts,
+        baseline_artifacts=None,
+        promotion_gate=None,
+        topk=10,
+    )
+
+    assert scorecard["verdict"] == "rejected"
+    assert scorecard["metrics"]["native_execution_invalid"] is True
+    assert scorecard["metrics"]["score_value"] == pytest.approx(-100.0)
+
+
 def test_run_native_notebook_workflow_accepts_cli_style_overrides(tmp_path):
     workflow_run = run_native_notebook_workflow(
         config_overrides={
@@ -958,6 +1002,36 @@ def test_prime_parallel_workflow_inputs_auto_materializes_default_execution_pane
     assert calls[1][1] is False
     assert calls[1][2] == "auto_if_missing"
     assert str(primed.execution_panel_path).endswith("csi300_execution_panel.parquet")
+
+
+def test_prime_parallel_workflow_inputs_materializes_execution_panel_for_strict_membership(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_materialize(path, **kwargs):
+        calls.append((path, kwargs["filter_to_universe_membership"], kwargs["run_export"]))
+        return path
+
+    monkeypatch.setattr(
+        "qlib_research.core.qlib_native_workflow._materialize_panel_artifact",
+        fake_materialize,
+    )
+
+    config = NativeWorkflowConfig(
+        universe_profile="csi500",
+        panel_path=tmp_path / "panels" / "csi500_weekly.parquet",
+        output_dir=tmp_path / "native_workflow" / "csi500",
+        execution_panel_path=None,
+        universe_exit_policy="strict_membership_only",
+        run_export="never",
+    )
+
+    primed = _prime_parallel_workflow_inputs(config)
+
+    assert len(calls) == 2
+    assert calls[0][1] is True
+    assert calls[1][1] is False
+    assert calls[1][2] == "auto_if_missing"
+    assert str(primed.execution_panel_path).endswith("csi500_execution_panel.parquet")
 
 
 def test_build_parallel_recipe_heartbeat_summarizes_long_running_recipes():

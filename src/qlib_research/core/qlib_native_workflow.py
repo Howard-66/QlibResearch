@@ -617,16 +617,12 @@ def _materialize_panel_artifact(
 
 
 def _execution_panel_export_mode(config: NativeWorkflowConfig, execution_path: Path | None) -> RunExportMode:
-    if config.universe_exit_policy != "retain_quotes_for_existing_positions":
-        return config.run_export
     if execution_path is None and config.run_export == "never":
         return "auto_if_missing"
     return config.run_export
 
 
 def _prepare_execution_panel(config: NativeWorkflowConfig, execution_path: Path | None) -> tuple[pd.DataFrame, Path | None]:
-    if config.universe_exit_policy != "retain_quotes_for_existing_positions":
-        return pd.DataFrame(), execution_path
     if execution_path is None:
         execution_path = Path(config.output_dir).expanduser().resolve() / f"{config.universe_profile}_execution_panel.parquet"
     execution_panel = _ensure_panel(
@@ -663,20 +659,19 @@ def _prime_parallel_workflow_inputs(config: NativeWorkflowConfig) -> NativeWorkf
         enrichment_scope="research_full",
         task_description=config.task_description,
     )
-    if config.universe_exit_policy == "retain_quotes_for_existing_positions":
-        if execution_path is None:
-            execution_path = output_dir / f"{config.universe_profile}_execution_panel.parquet"
-        _materialize_panel_artifact(
-            execution_path,
-            universe_profile=config.universe_profile,
-            start_date=config.start_date,
-            end_date=config.end_date,
-            batch_size=config.batch_size,
-            run_export=_execution_panel_export_mode(config, None if config.execution_panel_path is None else execution_path),
-            filter_to_universe_membership=False,
-            enrichment_scope="none",
-            task_description=config.task_description,
-        )
+    if execution_path is None:
+        execution_path = output_dir / f"{config.universe_profile}_execution_panel.parquet"
+    _materialize_panel_artifact(
+        execution_path,
+        universe_profile=config.universe_profile,
+        start_date=config.start_date,
+        end_date=config.end_date,
+        batch_size=config.batch_size,
+        run_export=_execution_panel_export_mode(config, None if config.execution_panel_path is None else execution_path),
+        filter_to_universe_membership=False,
+        enrichment_scope="none",
+        task_description=config.task_description,
+    )
     return replace(
         config,
         panel_path=panel_path,
@@ -1914,6 +1909,7 @@ def _native_run_summary_row(
     final_net_value = float(report_frame["net_value"].iloc[-1]) if not report_frame.empty else np.nan
     benchmark_value = float(report_frame["benchmark_value"].iloc[-1]) if not report_frame.empty else np.nan
     performance_metrics = _compute_native_performance_metrics(report_frame, account=config.account)
+    zero_return_metrics = _native_zero_return_metrics(report_frame)
     return {
         "recipe": recipe_name,
         "bundle": bundle_name,
@@ -1932,6 +1928,39 @@ def _native_run_summary_row(
         "sharpe_ratio": performance_metrics["sharpe_ratio"],
         "win_rate": performance_metrics["win_rate"],
         "calmar_ratio": performance_metrics["calmar_ratio"],
+        **zero_return_metrics,
+    }
+
+
+def _longest_true_run(values: pd.Series) -> int:
+    longest = 0
+    current = 0
+    for value in values.fillna(False).astype(bool).tolist():
+        if value:
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return int(longest)
+
+
+def _native_zero_return_metrics(report_frame: pd.DataFrame) -> dict[str, Any]:
+    if report_frame.empty or "net_return" not in report_frame.columns:
+        return {
+            "zero_net_return_ratio": np.nan,
+            "longest_zero_net_return_run": 0,
+        }
+    net_return = pd.to_numeric(report_frame["net_return"], errors="coerce")
+    valid = net_return.notna()
+    if not valid.any():
+        return {
+            "zero_net_return_ratio": np.nan,
+            "longest_zero_net_return_run": 0,
+        }
+    zero_mask = net_return.abs() <= 1e-12
+    return {
+        "zero_net_return_ratio": float(zero_mask.loc[valid].mean()),
+        "longest_zero_net_return_run": _longest_true_run(zero_mask),
     }
 
 
@@ -1999,6 +2028,8 @@ def _build_recipe_overview_row_from_artifacts(recipe_name: str, artifacts: Nativ
         "rolling_excess_drawdown": rolling_native_row.get("strategy_excess_drawdown"),
         "rolling_cost_drag": rolling_native_row.get("cost_drag"),
         "rolling_turnover_mean": rolling_native_row.get("turnover_mean"),
+        "rolling_zero_net_return_ratio": rolling_native_row.get("zero_net_return_ratio"),
+        "rolling_longest_zero_net_return_run": rolling_native_row.get("longest_zero_net_return_run"),
         "rolling_annualized_return": rolling_native_row.get("annualized_return"),
         "rolling_annualized_volatility": rolling_native_row.get("annualized_volatility"),
         "rolling_sharpe_ratio": rolling_native_row.get("sharpe_ratio"),
@@ -2013,6 +2044,8 @@ def _build_recipe_overview_row_from_artifacts(recipe_name: str, artifacts: Nativ
         "walk_forward_excess_drawdown": walk_forward_native_row.get("strategy_excess_drawdown"),
         "walk_forward_cost_drag": walk_forward_native_row.get("cost_drag"),
         "walk_forward_turnover_mean": walk_forward_native_row.get("turnover_mean"),
+        "walk_forward_zero_net_return_ratio": walk_forward_native_row.get("zero_net_return_ratio"),
+        "walk_forward_longest_zero_net_return_run": walk_forward_native_row.get("longest_zero_net_return_run"),
         "walk_forward_annualized_return": walk_forward_native_row.get("annualized_return"),
         "walk_forward_annualized_volatility": walk_forward_native_row.get("annualized_volatility"),
         "walk_forward_sharpe_ratio": walk_forward_native_row.get("sharpe_ratio"),
@@ -2042,14 +2075,31 @@ def _recipe_score_inputs(
     sector_walk = sector_history.loc[sector_history["bundle"] == "walk_forward"].copy() if isinstance(sector_history, pd.DataFrame) and not sector_history.empty else pd.DataFrame()
     bridge_history = getattr(artifacts, "signal_realization_bridge", pd.DataFrame())
     bridge_walk = bridge_history.loc[bridge_history["bundle"] == "walk_forward"].copy() if isinstance(bridge_history, pd.DataFrame) and not bridge_history.empty else pd.DataFrame()
+    actual_hold_mean = _safe_float(portfolio_diag["actual_hold_count"].mean()) if not portfolio_diag.empty and "actual_hold_count" in portfolio_diag.columns else None
+    locked_residual_mean = _safe_float(portfolio_diag["locked_residual_count"].mean()) if not portfolio_diag.empty and "locked_residual_count" in portfolio_diag.columns else None
+    longest_zero_run = _safe_float(overview.get("walk_forward_longest_zero_net_return_run")) or 0.0
+    zero_return_ratio = _safe_float(overview.get("walk_forward_zero_net_return_ratio")) or 0.0
+    native_execution_invalid = bool(
+        locked_residual_mean is not None
+        and locked_residual_mean > 0
+        and actual_hold_mean is not None
+        and actual_hold_mean < float(topk) * 0.95
+        and (longest_zero_run >= 6 or zero_return_ratio >= 0.25)
+    )
     return {
         "walk_forward_annualized_return": _safe_float(overview.get("walk_forward_annualized_return")) or 0.0,
         "walk_forward_sharpe_ratio": _safe_float(overview.get("walk_forward_sharpe_ratio")) or 0.0,
         "walk_forward_max_drawdown": _safe_float(overview.get("walk_forward_max_drawdown")) or 0.0,
         "walk_forward_topk_excess": _safe_float(overview.get("walk_forward_topk_mean_excess_return_4w")),
         "signal_unique_mean": _safe_float(signal_diag["topk_unique_score_ratio"].mean()) if not signal_diag.empty and "topk_unique_score_ratio" in signal_diag.columns else None,
-        "actual_hold_mean": _safe_float(portfolio_diag["actual_hold_count"].mean()) if not portfolio_diag.empty and "actual_hold_count" in portfolio_diag.columns else None,
+        "actual_hold_mean": actual_hold_mean,
+        "actual_hold_min": _safe_float(portfolio_diag["actual_hold_count"].min()) if not portfolio_diag.empty and "actual_hold_count" in portfolio_diag.columns else None,
         "actual_hold_max": _safe_float(portfolio_diag["actual_hold_count"].max()) if not portfolio_diag.empty and "actual_hold_count" in portfolio_diag.columns else None,
+        "locked_residual_mean": locked_residual_mean,
+        "locked_residual_max": _safe_float(portfolio_diag["locked_residual_count"].max()) if not portfolio_diag.empty and "locked_residual_count" in portfolio_diag.columns else None,
+        "walk_forward_zero_net_return_ratio": zero_return_ratio,
+        "walk_forward_longest_zero_net_return_run": longest_zero_run,
+        "native_execution_invalid": native_execution_invalid,
         "top1_sector_weight_mean": _safe_float(sector_walk["top1_sector_weight"].mean()) if not sector_walk.empty and "top1_sector_weight" in sector_walk.columns else None,
         "bridge_complete": bool(not bridge_walk.empty),
         "topk": float(topk),
@@ -2057,6 +2107,8 @@ def _recipe_score_inputs(
 
 
 def _recipe_score_value(inputs: dict[str, Any]) -> float:
+    if bool(inputs.get("native_execution_invalid")):
+        return -100.0
     annualized_return = float(inputs.get("walk_forward_annualized_return") or 0.0)
     sharpe_ratio = float(inputs.get("walk_forward_sharpe_ratio") or 0.0)
     max_drawdown = abs(float(inputs.get("walk_forward_max_drawdown") or 0.0))
@@ -2088,12 +2140,21 @@ def _build_recipe_experiment_scorecard(
     baseline_score = _recipe_score_value(baseline_inputs) if baseline_artifacts is not None else None
     unique_mean = inputs.get("signal_unique_mean")
     hold_mean = inputs.get("actual_hold_mean")
+    hold_min = inputs.get("actual_hold_min")
     hold_max = inputs.get("actual_hold_max")
+    locked_mean = inputs.get("locked_residual_mean")
+    locked_max = inputs.get("locked_residual_max")
+    zero_return_ratio = inputs.get("walk_forward_zero_net_return_ratio")
+    longest_zero_run = inputs.get("walk_forward_longest_zero_net_return_run")
+    native_execution_invalid = bool(inputs.get("native_execution_invalid"))
     top1_sector = inputs.get("top1_sector_weight_mean")
     topk_excess = inputs.get("walk_forward_topk_excess")
     passed = bool((promotion_gate or {}).get("promotion_gate_passed")) if promotion_gate is not None else None
 
-    if not inputs["bridge_complete"]:
+    if native_execution_invalid:
+        verdict = "rejected"
+        current_problem = "native 回测执行行情疑似缺失，资金曲线存在长时间零收益或 locked residual 异常"
+    elif not inputs["bridge_complete"]:
         verdict = "needs_explanation"
         current_problem = "缺少 signal realization bridge，收益兑现路径不完整"
     elif unique_mean is not None and unique_mean < 0.6:
@@ -2116,18 +2177,28 @@ def _build_recipe_experiment_scorecard(
         current_problem = "当前结果可保留观察，但不足以直接晋升"
 
     risks: list[str] = []
+    if native_execution_invalid:
+        risks.append("native 回测产物疑似失效：实际持仓低于目标 TopK，同时 locked residual 与长零收益段并存")
     if unique_mean is not None and unique_mean < 0.85:
         risks.append("TopK 唯一分数占比偏低，存在信号离散度不足风险")
+    if hold_mean is not None and hold_mean < topk * 0.95:
+        risks.append("实际持仓长期低于目标 TopK，可能存在执行行情覆盖或可交易性判定问题")
     if hold_max is not None and hold_max > topk + 4:
         risks.append("实际持仓上限偏高，组合定义与名义 topk 不一致")
+    if longest_zero_run is not None and float(longest_zero_run) >= 6:
+        risks.append("资金曲线出现连续多个评估点零收益，需排查行情缺失或持仓锁定")
     if top1_sector is not None and top1_sector > 0.5:
         risks.append("单一行业权重过高，存在集中暴露风险")
     if topk_excess is not None and topk_excess < 0:
         risks.append("横截面 topk 超额为负，收益解释链仍不完整")
 
     recommendations: list[str] = []
+    if native_execution_invalid:
+        recommendations.append("使用完整 A 股执行行情重跑 native 回测，并在修复前排除该产物评分")
     if hold_mean is not None and hold_mean > topk + 2:
         recommendations.append("优先执行实验 A，收紧持仓定义与退出规则")
+    if hold_mean is not None and hold_mean < topk * 0.95:
+        recommendations.append("检查 execution_panel_path 是否为完整执行行情，而不是动态成分股研究面板")
     if top1_sector is not None and top1_sector > 0.35:
         recommendations.append("优先执行实验 B，增加行业权重上限")
     if unique_mean is not None and unique_mean < 0.85:
@@ -2169,7 +2240,13 @@ def _build_recipe_experiment_scorecard(
             **delta_metrics,
             "signal_unique_mean": unique_mean,
             "actual_hold_mean": hold_mean,
+            "actual_hold_min": hold_min,
             "actual_hold_max": hold_max,
+            "locked_residual_mean": locked_mean,
+            "locked_residual_max": locked_max,
+            "walk_forward_zero_net_return_ratio": zero_return_ratio,
+            "walk_forward_longest_zero_net_return_run": longest_zero_run,
+            "native_execution_invalid": native_execution_invalid,
             "top1_sector_weight_mean": top1_sector,
             "bridge_complete": inputs["bridge_complete"],
             "score_value": score_value,

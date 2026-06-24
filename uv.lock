@@ -21,7 +21,7 @@ wheels = [
 
 [[package]]
 name = "akshare"
-version = "1.18.53"
+version = "1.18.60"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "akracer", marker = "sys_platform == 'linux'" },
@@ -41,9 +41,9 @@ dependencies = [
     { name = "urllib3" },
     { name = "xlrd" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d3/cc/2e116f5917372793719dae0633420c25871451eb138027df2181c766b919/akshare-1.18.53.tar.gz", hash = "sha256:24b37e5882c97388af1a6df629c7bb4d2602abc396934d7bac58befad2cc1ef7", size = 866339, upload-time = "2026-04-07T07:39:55.244Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/96/cc/965a0162a0d5cfe4ad22f685e8467d99e9a9f653267e16afc537e6f2e4b8/akshare-1.18.60.tar.gz", hash = "sha256:959cb82dfcdd8c792e3304d4fe467d2fbff3ca31e469cf3ef0749bed01c1b158", size = 882023, upload-time = "2026-05-02T09:44:30.975Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/96/db/12e217f786288440e627a6b67ce03b2e6d05c264f4f2b6f509d2106136be/akshare-1.18.53-py3-none-any.whl", hash = "sha256:7232a534d8aaf138a7cd97e69d642b978b009b01d99e818e64dcda7a71c54b4d", size = 1090050, upload-time = "2026-04-07T07:39:53.564Z" },
+    { url = "https://files.pythonhosted.org/packages/64/2e/402d0c9f924dd293f1266291f2000e5b60ce61e2d21f44373df535d6aaa4/akshare-1.18.60-py3-none-any.whl", hash = "sha256:14e47cd2df694faf6efa6e7b1e4812061dbe76fd5f6ed04964b3119ee94a2c5f", size = 1105301, upload-time = "2026-05-02T09:44:29.305Z" },
 ]
 
 [[package]]
@@ -857,12 +857,15 @@ name = "finance-data-hub"
 version = "0.1.0"
 source = { editable = "../FinanceDataHub" }
 dependencies = [
+    { name = "akshare" },
     { name = "apscheduler" },
     { name = "asyncpg" },
     { name = "duckdb" },
     { name = "greenlet" },
     { name = "httpx" },
     { name = "ipykernel" },
+    { name = "ipywidgets" },
+    { name = "jupyter" },
     { name = "loguru" },
     { name = "pandas" },
     { name = "psycopg2-binary" },
@@ -880,6 +883,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "akshare", specifier = ">=1.18.59" },
     { name = "apscheduler", specifier = ">=3.11.2" },
     { name = "asyncpg", specifier = ">=0.29.0" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=23.12.0" },
@@ -889,7 +893,9 @@ requires-dist = [
     { name = "greenlet", specifier = ">=3.2.4" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "ipykernel", specifier = ">=7.1.0" },
+    { name = "ipywidgets", specifier = ">=8.1.8" },
     { name = "isort", marker = "extra == 'dev'", specifier = ">=5.13.0" },
+    { name = "jupyter", specifier = ">=1.1.1" },
     { name = "loguru", specifier = ">=0.7.0" },
     { name = "mkdocs", marker = "extra == 'docs'", specifier = ">=1.5.0" },
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.5.0" },

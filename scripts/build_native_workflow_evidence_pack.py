@@ -307,6 +307,46 @@ def _artifact_issues(statuses: dict[str, dict[str, Any]], recipe: str) -> list[d
     return issues
 
 
+def _longest_true_run(values: pd.Series) -> int:
+    longest = 0
+    current = 0
+    for value in values.fillna(False).astype(bool).tolist():
+        if value:
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return int(longest)
+
+
+def _zero_return_metrics(report_frame: pd.DataFrame) -> dict[str, Any]:
+    if report_frame.empty or "net_return" not in report_frame.columns:
+        return {"zero_net_return_ratio": None, "longest_zero_net_return_run": 0}
+    net_return = pd.to_numeric(report_frame["net_return"], errors="coerce")
+    valid = net_return.notna()
+    if not valid.any():
+        return {"zero_net_return_ratio": None, "longest_zero_net_return_run": 0}
+    zero_mask = net_return.abs() <= 1e-12
+    return {
+        "zero_net_return_ratio": float(zero_mask.loc[valid].mean()),
+        "longest_zero_net_return_run": _longest_true_run(zero_mask),
+    }
+
+
+def _native_execution_invalid(metrics: dict[str, Any], topk: int) -> bool:
+    actual_hold_mean = _safe_float(metrics.get("actual_hold_mean"))
+    locked_mean = _safe_float(metrics.get("locked_residual_mean"))
+    longest_zero = _safe_float(metrics.get("walk_forward_longest_zero_net_return_run")) or 0.0
+    zero_ratio = _safe_float(metrics.get("walk_forward_zero_net_return_ratio")) or 0.0
+    return bool(
+        locked_mean is not None
+        and locked_mean > 0
+        and actual_hold_mean is not None
+        and actual_hold_mean < float(topk) * 0.95
+        and (longest_zero >= 6 or zero_ratio >= 0.25)
+    )
+
+
 def _scorecard_conflicts(scorecard: dict[str, Any], metrics: dict[str, Any], statuses: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     conflicts: list[dict[str, Any]] = []
     score_metrics = scorecard.get("metrics", {}) if isinstance(scorecard.get("metrics"), dict) else {}
@@ -387,6 +427,8 @@ def _gate_warnings(recipe_name: str, metrics: dict[str, Any], promotion_gate: di
 
 
 def _recipe_score(metrics: dict[str, Any], latest: dict[str, Any], topk: int, execution_status: str) -> float:
+    if _native_execution_invalid(metrics, topk=topk):
+        return -100.0
     wf_net = _safe_float(metrics.get("walk_forward_net_total_return")) or 0.0
     wf_sharpe = _safe_float(metrics.get("walk_forward_sharpe_ratio")) or 0.0
     wf_icir = _safe_float(metrics.get("walk_forward_rank_ic_ir")) or 0.0
@@ -413,7 +455,9 @@ def _recipe_score(metrics: dict[str, Any], latest: dict[str, Any], topk: int, ex
     return float(score)
 
 
-def _initial_role(metrics: dict[str, Any], latest: dict[str, Any]) -> str:
+def _initial_role(metrics: dict[str, Any], latest: dict[str, Any], topk: int) -> str:
+    if _native_execution_invalid(metrics, topk=topk):
+        return "diagnose_only"
     wf_net = _safe_float(metrics.get("walk_forward_net_total_return"))
     wf_icir = _safe_float(metrics.get("walk_forward_rank_ic_ir"))
     wf_topk = _safe_float(metrics.get("walk_forward_topk_mean_excess_return_4w"))
@@ -446,6 +490,7 @@ def _build_metrics(frames: dict[str, pd.DataFrame]) -> dict[str, Any]:
     for bundle in BUNDLES:
         summary = _first_row(_bundle_frame(frames[f"{bundle}_summary"], bundle))
         performance = _first_row(_bundle_frame(frames[f"{bundle}_performance_metrics"], bundle))
+        zero_metrics = _zero_return_metrics(frames[f"{bundle}_native_report"])
         metrics[f"{bundle}_rank_ic_ir"] = _safe_float(summary.get("rank_ic_ir"))
         metrics[f"{bundle}_topk_mean_excess_return_4w"] = _safe_float(summary.get("topk_mean_excess_return_4w"))
         metrics[f"{bundle}_topk_hit_rate"] = _safe_float(summary.get("topk_hit_rate"))
@@ -455,6 +500,8 @@ def _build_metrics(frames: dict[str, pd.DataFrame]) -> dict[str, Any]:
         metrics[f"{bundle}_sharpe_ratio"] = _safe_float(performance.get("sharpe_ratio"))
         metrics[f"{bundle}_max_drawdown"] = _safe_float(performance.get("max_drawdown"))
         metrics[f"{bundle}_win_rate"] = _safe_float(performance.get("win_rate"))
+        metrics[f"{bundle}_zero_net_return_ratio"] = _safe_float(zero_metrics.get("zero_net_return_ratio"))
+        metrics[f"{bundle}_longest_zero_net_return_run"] = zero_metrics.get("longest_zero_net_return_run")
     signal_walk = _bundle_frame(frames["signal_diagnostics"], "walk_forward")
     hold_walk = _bundle_frame(frames["holding_count_drift"], "walk_forward")
     sector_walk = _bundle_frame(frames["sector_exposure_history"], "walk_forward")
@@ -518,12 +565,13 @@ def _build_recipe_dossier(
     scorecard = _safe_json(recipe_dir / "experiment_scorecard.json")
     manifest = _safe_json(recipe_dir / "native_workflow_manifest.json")
     metrics = _build_metrics(frames)
+    metrics["native_execution_invalid"] = _native_execution_invalid(metrics, topk=topk)
     latest = _latest_snapshot(frames["latest_score_frame"], frames["portfolio_targets"], topk=topk)
     slice_info = _slice_summary(frames["slice_regime_summary"])
     top_features = _top_features(frames["walk_forward_feature_importance"])
     execution_status = statuses.get("execution_diff_summary.csv", {}).get("status", "missing")
     score = _recipe_score(metrics, latest, topk=topk, execution_status=str(execution_status))
-    role = _initial_role(metrics, latest)
+    role = _initial_role(metrics, latest, topk=topk)
     evidence_refs = [
         _metric_ref(recipe=recipe_name, bundle="walk_forward", file="walk_forward_summary.csv", metric="rank_ic_ir", value=metrics.get("walk_forward_rank_ic_ir")),
         _metric_ref(recipe=recipe_name, bundle="walk_forward", file="walk_forward_summary.csv", metric="topk_mean_excess_return_4w", value=metrics.get("walk_forward_topk_mean_excess_return_4w")),
@@ -535,6 +583,19 @@ def _build_recipe_dossier(
         _metric_ref(recipe=recipe_name, bundle="latest", file="latest_score_frame.csv", metric="score_gap_10_20", value=latest.get("score_gap_10_20")),
     ]
     artifact_issues = _artifact_issues(statuses, recipe_name)
+    if _native_execution_invalid(metrics, topk=topk):
+        artifact_issues.append(
+            {
+                "recipe": recipe_name,
+                "file": "walk_forward_native_report.csv",
+                "severity": "danger",
+                "issue": "native_execution_invalid",
+                "detail": (
+                    "walk-forward native report has a long zero-return segment while "
+                    "actual holdings stay below TopK and locked residuals persist"
+                ),
+            }
+        )
     conflicts = _scorecard_conflicts(scorecard, metrics, statuses)
     warnings = _gate_warnings(recipe_name, metrics, promotion_gate, topk=topk)
     dossier = {
@@ -568,9 +629,14 @@ def _build_recipe_dossier(
         "walk_forward_net_total_return": metrics.get("walk_forward_net_total_return"),
         "walk_forward_max_drawdown": metrics.get("walk_forward_max_drawdown"),
         "walk_forward_sharpe_ratio": metrics.get("walk_forward_sharpe_ratio"),
+        "walk_forward_zero_net_return_ratio": metrics.get("walk_forward_zero_net_return_ratio"),
+        "walk_forward_longest_zero_net_return_run": metrics.get("walk_forward_longest_zero_net_return_run"),
         "signal_unique_mean": metrics.get("signal_unique_mean"),
         "actual_hold_mean": metrics.get("actual_hold_mean"),
         "actual_hold_max": metrics.get("actual_hold_max"),
+        "locked_residual_mean": metrics.get("locked_residual_mean"),
+        "locked_residual_max": metrics.get("locked_residual_max"),
+        "native_execution_invalid": _native_execution_invalid(metrics, topk=topk),
         "top1_sector_weight_mean": metrics.get("top1_sector_weight_mean"),
         "latest_top_industries": json.dumps(latest.get("top_industries", {}), ensure_ascii=False),
         "score_gap_10_20": latest.get("score_gap_10_20"),
@@ -594,7 +660,7 @@ def _select_lead_and_finalize_roles(matrix: list[dict[str, Any]], dossiers: dict
             break
     if lead is None:
         for row in ranked:
-            if row.get("role") not in {"reject"}:
+            if row.get("role") not in {"reject", "diagnose_only"}:
                 lead = str(row["recipe"])
                 break
     if lead:
@@ -643,6 +709,14 @@ def _run_findings(matrix: list[dict[str, Any]], dossiers: dict[str, dict[str, An
             gaps.append({"recipe": recipe, "type": "scorecard_conflict", **conflict})
         for warning in dossier.get("gate_warnings", []):
             gaps.append({"recipe": recipe, "type": "gate_warning", "message": warning})
+        if bool(dossier.get("metrics", {}).get("native_execution_invalid")):
+            gaps.append(
+                {
+                    "recipe": recipe,
+                    "type": "native_execution_invalid",
+                    "message": "native walk-forward execution appears invalid due to persistent locked residuals and long zero-return segments",
+                }
+            )
         execution_status = dossier.get("artifact_status", {}).get("execution_diff_summary.csv", {}).get("status")
         if execution_status == "empty":
             gaps.append(
