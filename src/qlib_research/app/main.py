@@ -29,6 +29,7 @@ from qlib_research.app.contracts import (
     TaskPresetResponse,
     TaskReorderRequest,
 )
+from qlib_research.app.breakout_router import router as breakout_router
 from qlib_research.app.services import (
     compare_recipe_items,
     create_export_panel_task,
@@ -72,6 +73,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(breakout_router)
 
 
 @app.get("/api/health")

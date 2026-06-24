@@ -35,6 +35,12 @@ const titleMap: Record<string, HeaderMeta> = {
   "/panels": { title: "Panels", description: "查看 panel 元信息、列摘要与关联 runs" },
   "/tasks": { title: "Tasks", description: "提交 panel 导出与 native workflow 调度任务" },
   "/settings": { title: "Settings", description: "启动命令、端口约定与环境约束" },
+  "/breakout": { title: "Breakout 概览", description: "研究仪表盘：模型状态、最新信号与快捷操作" },
+  "/breakout/train": { title: "Breakout 训练", description: "配置参数并触发模型训练，跟踪训练状态" },
+  "/breakout/evaluate": { title: "Breakout 评估", description: "评估列表、特征重要性与核心指标对比" },
+  "/breakout/events": { title: "Breakout 事件", description: "按日期与股票筛选浏览突破事件" },
+  "/breakout/models": { title: "Breakout 模型", description: "模型版本管理：激活、同步与指标查看" },
+  "/breakout/config": { title: "Breakout 配置", description: "检测/标注/训练参数的持久化配置" },
 };
 
 function decodeSegment(segment: string) {

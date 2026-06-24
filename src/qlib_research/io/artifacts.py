@@ -233,3 +233,43 @@ def publish_portfolio_targets(
     target_path = model_dir / PORTFOLIO_TARGETS
     target_frame.to_csv(target_path, index=False)
     return target_path
+
+
+# --- Breakout artifacts ---
+BREAKOUT_SIGNALS_FILE = "scores_breakout.csv"
+BREAKOUT_MANIFEST_FILE = "manifest_breakout.json"
+
+
+def get_breakout_artifacts_dir() -> Path:
+    """Get the breakout artifacts base directory (``<project>/artifacts/breakout``)."""
+    from qlib_research.config import get_project_root
+
+    return get_project_root() / "artifacts" / "breakout"
+
+
+def get_breakout_models_dir() -> Path:
+    """Get the breakout models directory."""
+    return get_breakout_artifacts_dir() / "models"
+
+
+def get_breakout_signals_dir() -> Path:
+    """Get the breakout signals directory."""
+    return get_breakout_artifacts_dir() / "signals"
+
+
+def get_latest_breakout_model() -> Optional[Path]:
+    """Find the latest breakout model file by modification time.
+
+    Returns the most recently modified ``*.pkl`` in
+    ``artifacts/breakout/models/`` or ``None`` if the directory is missing /
+    empty.
+    """
+    models_dir = get_breakout_models_dir()
+    if not models_dir.exists():
+        return None
+    pkl_files = sorted(
+        models_dir.glob("*.pkl"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return pkl_files[0] if pkl_files else None
