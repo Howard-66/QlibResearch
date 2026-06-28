@@ -6,14 +6,30 @@ import { BarChart3, ClipboardList, FolderKanban, LayoutDashboard, PlayCircle, Se
 
 import { cn } from "@/lib/utils";
 
-const items = [
-  { href: "/", label: "Overview", icon: LayoutDashboard },
-  { href: "/runs", label: "Runs", icon: FolderKanban },
-  { href: "/breakout", label: "Breakout", icon: TrendingUp },
-  { href: "/compare", label: "Compare", icon: BarChart3 },
-  { href: "/panels", label: "Panels", icon: ClipboardList },
-  { href: "/tasks", label: "Tasks", icon: PlayCircle },
-  { href: "/settings", label: "Settings", icon: Settings2 },
+const groups = [
+  {
+    label: "Workspace",
+    items: [{ href: "/", label: "Overview", icon: LayoutDashboard }],
+  },
+  {
+    label: "截面选股研究",
+    items: [
+      { href: "/panels", label: "Panels", icon: ClipboardList },
+      { href: "/runs", label: "Runs", icon: FolderKanban },
+      { href: "/compare", label: "Compare", icon: BarChart3 },
+    ],
+  },
+  {
+    label: "事件择时研究",
+    items: [{ href: "/breakout", label: "Breakout", icon: TrendingUp }],
+  },
+  {
+    label: "Shared",
+    items: [
+      { href: "/tasks", label: "Tasks", icon: PlayCircle },
+      { href: "/settings", label: "Settings", icon: Settings2 },
+    ],
+  },
 ];
 
 export function AppSidebar({ open }: { open: boolean }) {
@@ -33,26 +49,31 @@ export function AppSidebar({ open }: { open: boolean }) {
         </Link>
       </div>
 
-      <nav className="space-y-1 p-3">
-        {items.map((item) => {
-          const Icon = item.icon;
-          const active = pathname === item.href || (item.href !== "/" && pathname.startsWith(item.href));
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={cn(
-                "group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-all",
-                active ? "bg-primary/7 text-primary" : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
-                !open && "lg:justify-center",
-              )}
-              title={!open ? item.label : undefined}
-            >
-              <Icon className="h-5 w-5 shrink-0" />
-              <span className={cn("transition-all duration-300", !open && "lg:w-0 lg:opacity-0 lg:hidden")}>{item.label}</span>
-            </Link>
-          );
-        })}
+      <nav className="space-y-4 p-3">
+        {groups.map((group) => (
+          <div key={group.label} className="space-y-1">
+            <div className={cn("px-3 text-[11px] font-medium uppercase text-muted-foreground/75", !open && "lg:hidden")}>{group.label}</div>
+            {group.items.map((item) => {
+              const Icon = item.icon;
+              const active = pathname === item.href || (item.href !== "/" && pathname.startsWith(item.href));
+              return (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  className={cn(
+                    "group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-all",
+                    active ? "bg-primary/7 text-primary" : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+                    !open && "lg:justify-center",
+                  )}
+                  title={!open ? item.label : undefined}
+                >
+                  <Icon className="h-5 w-5 shrink-0" />
+                  <span className={cn("transition-all duration-300", !open && "lg:w-0 lg:opacity-0 lg:hidden")}>{item.label}</span>
+                </Link>
+              );
+            })}
+          </div>
+        ))}
       </nav>
 
     </aside>

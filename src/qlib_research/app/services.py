@@ -26,6 +26,9 @@ from qlib_research.app.contracts import (
     ArtifactInventoryResponse,
     BreakoutResearchDetail,
     BreakoutResearchSummary,
+    BreakoutConfigProfile,
+    BreakoutConfigProfileUpdateRequest,
+    BreakoutTableResponse,
     ChartAnnotationPayload,
     ChartPayload,
     ChartSeriesPayload,
@@ -52,6 +55,7 @@ from qlib_research.app.contracts import (
     RunResearchAnalysisTaskRequest,
     ResearchTaskDetail,
     ResearchTaskSummary,
+    RunBreakoutResearchTaskRequest,
     RunDetail,
     RunListItem,
     RunNativeWorkflowTaskRequest,
@@ -63,6 +67,8 @@ from qlib_research.app.contracts import (
     TaskReorderRequest,
     TaskSourceRef,
 )
+from qlib_research.breakout.config import DEFAULT_BREAKOUT_CONFIG_PROFILE
+from qlib_research.breakout.features import FEATURE_GROUPS, feature_group_for
 from qlib_research.config import get_project_root, get_qlib_artifacts_dir
 from qlib_research.core.notebook_workflow import (
     build_native_workflow_cli_command,
@@ -81,6 +87,7 @@ ARTIFACTS_ROOT = get_qlib_artifacts_dir()
 NATIVE_WORKFLOW_ROOT = ARTIFACTS_ROOT / "native_workflow"
 PANELS_ROOT = ARTIFACTS_ROOT / "panels"
 TASKS_ROOT = ARTIFACTS_ROOT / "app_tasks"
+BREAKOUT_CONFIG_ROOT = ARTIFACTS_ROOT / "breakout_config_profiles"
 TASK_QUEUE_FILENAME = "queue.json"
 RESEARCH_VERDICT_VALUES = {
     "incumbent",
@@ -293,14 +300,38 @@ def _breakout_model_dirs() -> list[Path]:
     return sorted(result, key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
 
 
+def _latest_breakout_model_id() -> str | None:
+    latest_path = ARTIFACTS_ROOT / "latest_model.json"
+    latest = _safe_read_json(latest_path, {})
+    if latest.get("research_kind") == "breakout_event" and latest.get("model_id"):
+        return str(latest.get("model_id"))
+    return None
+
+
+def _breakout_artifact_ref(name: str, path: Path) -> ArtifactRef:
+    exists = path.exists()
+    stat = path.stat() if exists else None
+    return ArtifactRef(
+        name=name,
+        path=str(path),
+        exists=exists,
+        size_bytes=stat.st_size if stat else None,
+        updated_at=datetime.fromtimestamp(stat.st_mtime).isoformat() if stat else None,
+    )
+
+
 def _breakout_artifact_inventory(model_dir: Path, manifest: dict[str, Any]) -> list[ArtifactRef]:
     names = [
         "manifest.json",
+        str(manifest.get("events_path") or "events.csv"),
+        str(manifest.get("labels_path") or "labels.csv"),
         str(manifest.get("snapshot_path") or "scores.csv"),
         str(manifest.get("signal_path") or "signals.csv"),
         str(manifest.get("metrics_path") or "metrics.json"),
         str(manifest.get("feature_panel_path") or "feature_panel.csv"),
-        "events_scored.csv",
+        str(manifest.get("feature_panel_parquet_path") or "feature_panel.parquet"),
+        str(manifest.get("events_scored_path") or "events_scored.csv"),
+        str(manifest.get("feature_importance_path") or "feature_importance.csv"),
         str(manifest.get("model_path") or "model.pkl"),
     ]
     inventory: list[ArtifactRef] = []
@@ -343,6 +374,9 @@ def _breakout_summary_from_dir(model_dir: Path) -> BreakoutResearchSummary:
         feature_date=manifest.get("feature_date"),
         generated_at=manifest.get("generated_at"),
         model_dir=str(model_dir),
+        dataset_id=manifest.get("dataset_id"),
+        config_hash=manifest.get("config_hash"),
+        is_latest=(str(manifest.get("model_id") or model_dir.name) == _latest_breakout_model_id()),
         universe_profile=source_data.get("universe_profile"),
         universe_mode=source_data.get("universe_mode"),
         symbol_count=source_data.get("symbol_count"),
@@ -362,6 +396,175 @@ def list_breakout_research_runs() -> list[BreakoutResearchSummary]:
     return [_breakout_summary_from_dir(model_dir) for model_dir in _breakout_model_dirs()]
 
 
+def _breakout_stage_artifacts(model_dir: Path, manifest: dict[str, Any]) -> dict[str, ArtifactRef]:
+    stage_names = {
+        "events": str(manifest.get("events_path") or "events.csv"),
+        "labels": str(manifest.get("labels_path") or "labels.csv"),
+        "feature_panel": str(manifest.get("feature_panel_path") or "feature_panel.csv"),
+        "feature_panel_parquet": str(manifest.get("feature_panel_parquet_path") or "feature_panel.parquet"),
+        "events_scored": str(manifest.get("events_scored_path") or "events_scored.csv"),
+        "walk_forward_predictions": str(manifest.get("walk_forward_predictions_path") or ""),
+        "walk_forward_folds": str(manifest.get("walk_forward_folds_path") or ""),
+        "feature_importance": str(manifest.get("feature_importance_path") or "feature_importance.csv"),
+        "signals": str(manifest.get("signal_path") or "signals.csv"),
+        "scores": str(manifest.get("snapshot_path") or "scores.csv"),
+    }
+    return {key: _breakout_artifact_ref(value, model_dir / value) for key, value in stage_names.items() if value and value != "None"}
+
+
+def _breakout_table_source(model_dir: Path, manifest: dict[str, Any], table_name: str) -> pd.DataFrame:
+    if table_name == "events":
+        return _safe_read_csv(model_dir / str(manifest.get("events_scored_path") or "events_scored.csv"))
+    if table_name == "labels":
+        labels_path = model_dir / str(manifest.get("labels_path") or "labels.csv")
+        labels = _safe_read_csv(labels_path)
+        if not labels.empty:
+            return labels
+        features = _safe_read_csv(model_dir / str(manifest.get("feature_panel_path") or "feature_panel.csv"))
+        label_columns = [column for column in features.columns if str(column).startswith(("future_", "mfe_", "mae_", "label_"))]
+        keep = [column for column in ["event_id", "code", "event_date", *label_columns] if column in features.columns]
+        return features[keep] if keep else pd.DataFrame()
+    if table_name == "features":
+        return _safe_read_csv(model_dir / str(manifest.get("feature_panel_path") or "feature_panel.csv"))
+    if table_name == "signals":
+        return _safe_read_csv(model_dir / str(manifest.get("signal_path") or "signals.csv"))
+    raise FileNotFoundError(f"Unknown breakout table: {table_name}")
+
+
+def _filter_breakout_frame(
+    frame: pd.DataFrame,
+    *,
+    code: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    label_status: str | None = None,
+    score_quantile: str | None = None,
+    candidate_rule: str | None = None,
+    feature_group: str | None = None,
+) -> pd.DataFrame:
+    result = frame.copy()
+    code_col = "code" if "code" in result.columns else ("symbol" if "symbol" in result.columns else None)
+    date_col = "event_date" if "event_date" in result.columns else ("signal_date" if "signal_date" in result.columns else None)
+    if code and code_col:
+        result = result[result[code_col].astype(str).str.contains(code, case=False, na=False)]
+    if date_col:
+        dates = pd.to_datetime(result[date_col], errors="coerce")
+        if start_date:
+            result = result[dates >= pd.to_datetime(start_date)]
+            dates = pd.to_datetime(result[date_col], errors="coerce")
+        if end_date:
+            result = result[dates <= pd.to_datetime(end_date)]
+    if candidate_rule and "candidate_rule" in result.columns:
+        result = result[result["candidate_rule"].astype(str) == candidate_rule]
+    if label_status and label_status != "all":
+        label_cols = [column for column in result.columns if str(column).startswith("label_success_")]
+        if label_cols:
+            label = pd.to_numeric(result[label_cols[0]], errors="coerce")
+            if label_status == "success":
+                result = result[label == 1]
+            elif label_status == "failed":
+                result = result[label == 0]
+            elif label_status == "pending":
+                result = result[label.isna()]
+    if score_quantile and "signal_score" in result.columns:
+        scores = pd.to_numeric(result["signal_score"], errors="coerce")
+        if score_quantile == "top20":
+            threshold = scores.quantile(0.8)
+            result = result[scores >= threshold]
+        elif score_quantile == "bottom20":
+            threshold = scores.quantile(0.2)
+            result = result[scores <= threshold]
+    if feature_group and feature_group in FEATURE_GROUPS:
+        keep = [column for column in ["event_id", "code", "event_date", *FEATURE_GROUPS[feature_group]] if column in result.columns]
+        if keep:
+            result = result[keep]
+    return result
+
+
+def list_breakout_table(
+    model_id: str,
+    table_name: str,
+    *,
+    page: int = 1,
+    page_size: int = 50,
+    code: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    label_status: str | None = None,
+    score_quantile: str | None = None,
+    candidate_rule: str | None = None,
+    feature_group: str | None = None,
+) -> BreakoutTableResponse:
+    model_dir = ARTIFACTS_ROOT / model_id
+    manifest = _safe_read_json(model_dir / "manifest.json", {})
+    if manifest.get("research_kind") != "breakout_event":
+        raise FileNotFoundError(f"Not a breakout research model: {model_id}")
+    frame = _breakout_table_source(model_dir, manifest, table_name)
+    frame = _filter_breakout_frame(
+        frame,
+        code=code,
+        start_date=start_date,
+        end_date=end_date,
+        label_status=label_status,
+        score_quantile=score_quantile,
+        candidate_rule=candidate_rule,
+        feature_group=feature_group,
+    )
+    if "signal_score" in frame.columns:
+        frame = frame.sort_values("signal_score", ascending=False)
+    elif "event_date" in frame.columns:
+        frame = frame.sort_values("event_date", ascending=False)
+    total = int(len(frame))
+    page = max(int(page), 1)
+    page_size = max(min(int(page_size), 500), 1)
+    start = (page - 1) * page_size
+    end = start + page_size
+    return BreakoutTableResponse(
+        model_id=model_id,
+        table_name=table_name,  # type: ignore[arg-type]
+        total=total,
+        page=page,
+        page_size=page_size,
+        table=_frame_to_payload(frame.iloc[start:end]),
+    )
+
+
+def _distribution_chart(key: str, title: str, values: pd.Series) -> ChartPayload:
+    numeric = pd.to_numeric(values, errors="coerce").dropna()
+    if numeric.empty:
+        return ChartPayload(key=key, title=title, kind="stacked_bar")
+    counts, bins = np.histogram(numeric, bins=min(20, max(5, int(np.sqrt(len(numeric))))))
+    x = [f"{bins[index]:.3f}" for index in range(len(counts))]
+    return ChartPayload(
+        key=key,
+        title=title,
+        kind="stacked_bar",
+        x=x,
+        series=[ChartSeriesPayload(key="count", label="Count", values=[float(item) for item in counts], role="bar")],
+    )
+
+
+def _feature_importance_chart(importance: pd.DataFrame) -> ChartPayload:
+    if importance.empty or "feature" not in importance.columns:
+        return ChartPayload(key="feature_importance", title="Feature Importance", kind="stacked_bar")
+    gain_col = "importance_gain" if "importance_gain" in importance.columns else importance.columns[-1]
+    frame = importance.head(20).copy()
+    return ChartPayload(
+        key="feature_importance",
+        title="Top Feature Importance",
+        kind="stacked_bar",
+        x=frame["feature"].astype(str).tolist(),
+        series=[
+            ChartSeriesPayload(
+                key="gain",
+                label="Gain",
+                values=[_normalize_value(value) for value in pd.to_numeric(frame[gain_col], errors="coerce").tolist()],
+                role="bar",
+            )
+        ],
+    )
+
+
 def get_breakout_research_detail(model_id: str) -> BreakoutResearchDetail:
     model_dir = ARTIFACTS_ROOT / model_id
     manifest_path = model_dir / "manifest.json"
@@ -373,10 +576,12 @@ def get_breakout_research_detail(model_id: str) -> BreakoutResearchDetail:
 
     summary = _breakout_summary_from_dir(model_dir)
     metrics = _safe_read_json(model_dir / str(manifest.get("metrics_path") or "metrics.json"), {})
-    events = _safe_read_csv(model_dir / "events_scored.csv")
+    events = _safe_read_csv(model_dir / str(manifest.get("events_scored_path") or "events_scored.csv"))
     features = _safe_read_csv(model_dir / str(manifest.get("feature_panel_path") or "feature_panel.csv"))
     signals = _safe_read_csv(model_dir / str(manifest.get("signal_path") or "signals.csv"))
     scores = _safe_read_csv(model_dir / str(manifest.get("snapshot_path") or "scores.csv"))
+    importance = _safe_read_csv(model_dir / str(manifest.get("feature_importance_path") or "feature_importance.csv"))
+    walk_forward_folds = _safe_read_csv(model_dir / str(manifest.get("walk_forward_folds_path") or "walk_forward_folds.csv"))
 
     label_columns = [column for column in features.columns if str(column).startswith("label_")]
     return_columns = [column for column in features.columns if str(column).startswith("future_return_")]
@@ -386,10 +591,24 @@ def get_breakout_research_detail(model_id: str) -> BreakoutResearchDetail:
     event_dates = pd.to_datetime(events.get("event_date"), errors="coerce") if not events.empty and "event_date" in events else pd.Series(dtype="datetime64[ns]")
 
     top_signals = signals.sort_values("signal_score", ascending=False).head(50) if "signal_score" in signals else signals.head(50)
+    feature_missing = pd.DataFrame()
+    if not features.empty and feature_columns:
+        feature_missing = pd.DataFrame(
+            {
+                "feature": feature_columns,
+                "group": [feature_group_for(column) or "legacy" for column in feature_columns],
+                "missing_rate": [pd.to_numeric(features[column], errors="coerce").isna().mean() if column in features else None for column in feature_columns],
+            }
+        ).sort_values("missing_rate", ascending=False)
     tables = {
         "events_sample": _frame_to_payload(events.head(50)),
         "labels_sample": _frame_to_payload(features[["event_id", "code", "event_date", *return_columns, *label_columns]].head(50)) if not features.empty else DataTablePayload(),
         "features_sample": _frame_to_payload(features[["event_id", "code", "event_date", *feature_columns]].head(50)) if not features.empty and feature_columns else DataTablePayload(),
+        "feature_catalog": _frame_to_payload(feature_missing),
+        "feature_importance": _frame_to_payload(importance.head(50)),
+        "walk_forward_folds": _frame_to_payload(walk_forward_folds.head(80)),
+        "annual_slices": _frame_to_payload(pd.DataFrame(metrics.get("annual_slices") or [])),
+        "symbol_slices": _frame_to_payload(pd.DataFrame(metrics.get("symbol_slices") or [])),
         "top_signals": _frame_to_payload(top_signals),
         "scores": _frame_to_payload(scores.head(50)),
     }
@@ -400,10 +619,14 @@ def get_breakout_research_detail(model_id: str) -> BreakoutResearchDetail:
         metrics=sanitize_for_json(metrics),
         config_sections={
             "source_data": sanitize_for_json(manifest.get("source_data", {})),
+            "detector_policy": sanitize_for_json(manifest.get("detector_policy", {})),
             "label_policy": sanitize_for_json(manifest.get("label_policy", {})),
             "feature_policy": sanitize_for_json(feature_policy),
+            "trainer_policy": sanitize_for_json(manifest.get("trainer_policy", {})),
+            "cache_policy": sanitize_for_json(manifest.get("cache_policy", {})),
         },
         artifact_inventory=_breakout_artifact_inventory(model_dir, manifest),
+        stage_artifacts=_breakout_stage_artifacts(model_dir, manifest),
         event_overview={
             "event_count": int(len(events)),
             "symbol_count": int(events["code"].nunique()) if "code" in events else None,
@@ -436,7 +659,46 @@ def get_breakout_research_detail(model_id: str) -> BreakoutResearchDetail:
             "score_mean": _normalize_value(signal_score.mean()) if not signal_score.empty else None,
         },
         tables=tables,
+        chart_payloads={
+            "score_distribution": _distribution_chart("score_distribution", "Score Distribution", signal_score),
+            "return_distribution": _distribution_chart(
+                "return_distribution",
+                "Future Return Distribution",
+                pd.to_numeric(features[return_columns[0]], errors="coerce") if return_columns and not features.empty else pd.Series(dtype=float),
+            ),
+            "feature_importance": _feature_importance_chart(importance),
+        },
     )
+
+
+def get_breakout_config_profile(profile_id: str) -> BreakoutConfigProfile:
+    profile_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", profile_id or "default")
+    path = BREAKOUT_CONFIG_ROOT / f"{profile_id}.json"
+    config = _safe_read_json(path, {})
+    if not config:
+        config = deepcopy(DEFAULT_BREAKOUT_CONFIG_PROFILE)
+    stat = path.stat() if path.exists() else None
+    return BreakoutConfigProfile(
+        profile_id=profile_id,
+        path=str(path),
+        config=sanitize_for_json(config),
+        updated_at=datetime.fromtimestamp(stat.st_mtime).isoformat() if stat else None,
+    )
+
+
+def update_breakout_config_profile(profile_id: str, request: BreakoutConfigProfileUpdateRequest) -> BreakoutConfigProfile:
+    profile_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", profile_id or "default")
+    BREAKOUT_CONFIG_ROOT.mkdir(parents=True, exist_ok=True)
+    current = get_breakout_config_profile(profile_id).config
+    merged = deepcopy(current)
+    for key, value in (request.config or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = {**merged[key], **value}
+        else:
+            merged[key] = value
+    path = BREAKOUT_CONFIG_ROOT / f"{profile_id}.json"
+    path.write_text(json.dumps(sanitize_for_json(merged), ensure_ascii=False, indent=2), encoding="utf-8")
+    return get_breakout_config_profile(profile_id)
 
 
 def _format_metric(value: Any) -> str:
@@ -3168,6 +3430,76 @@ def _build_research_analysis_command(request: RunResearchAnalysisTaskRequest, ou
     return command
 
 
+def _build_breakout_research_command(request: RunBreakoutResearchTaskRequest) -> list[str]:
+    command = [
+        "uv",
+        "run",
+        "python",
+        "scripts/run_stock_breakout_research.py",
+        "--input-source",
+        request.input_source,
+        "--model-id",
+        request.model_id,
+        "--lookback-window",
+        str(request.lookback_window),
+        "--consolidation-window",
+        str(request.consolidation_window),
+        "--label-horizon-days",
+        str(request.label_horizon_days),
+        "--success-return-pct",
+        str(request.success_return_pct),
+        "--breakout-pct",
+        str(request.breakout_pct),
+        "--min-volume-ratio",
+        str(request.min_volume_ratio),
+        "--learning-rate",
+        str(request.learning_rate),
+        "--num-leaves",
+        str(request.num_leaves),
+        "--num-boost-round",
+        str(request.num_boost_round),
+        "--early-stopping-rounds",
+        str(request.early_stopping_rounds),
+        "--cache-policy",
+        request.cache_policy,
+        "--evaluation-mode",
+        request.evaluation_mode,
+        "--walk-forward-train-days",
+        str(request.walk_forward_train_days),
+        "--walk-forward-valid-days",
+        str(request.walk_forward_valid_days),
+        "--walk-forward-test-days",
+        str(request.walk_forward_test_days),
+        "--walk-forward-step-days",
+        str(request.walk_forward_step_days),
+        "--walk-forward-max-folds",
+        str(request.walk_forward_max_folds),
+    ]
+    if request.artifacts_dir:
+        command += ["--artifacts-dir", request.artifacts_dir]
+    if request.prices_csv:
+        command += ["--prices-csv", request.prices_csv]
+    if request.symbols:
+        command += ["--symbols", ",".join(request.symbols)]
+    if request.symbols_file:
+        command += ["--symbols-file", request.symbols_file]
+    if request.universe_profile and not request.symbols and not request.symbols_file:
+        command += ["--universe-profile", request.universe_profile]
+    if request.universe_mode:
+        command += ["--universe-mode", request.universe_mode]
+    if request.start_date:
+        command += ["--start-date", request.start_date]
+    if request.end_date:
+        command += ["--end-date", request.end_date]
+    if request.train_end_date:
+        command += ["--train-end-date", request.train_end_date]
+    if request.valid_end_date:
+        command += ["--valid-end-date", request.valid_end_date]
+    if request.update_latest:
+        command.append("--update-latest")
+    return command
+
+
 def create_research_analysis_task(request: RunResearchAnalysisTaskRequest) -> ResearchTaskSummary:
     TASKS_ROOT.mkdir(parents=True, exist_ok=True)
     task_id = f"task-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
@@ -3196,6 +3528,33 @@ def create_research_analysis_task(request: RunResearchAnalysisTaskRequest) -> Re
         config_payload=config_payload,
         logs={"stdout": str(task_paths[2]), "stderr": str(task_paths[3])},
         metadata={"cwd": str(PROJECT_ROOT)},
+        source_ref=_default_task_source(request.source_ref),
+        result_path=str(task_paths[4]),
+    )
+    return _enqueue_task(summary)
+
+
+def create_breakout_research_task(request: RunBreakoutResearchTaskRequest) -> ResearchTaskSummary:
+    TASKS_ROOT.mkdir(parents=True, exist_ok=True)
+    task_id = f"task-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+    task_paths = _task_paths(task_id)
+    artifacts_dir = _resolve_artifact_path(request.artifacts_dir or str(ARTIFACTS_ROOT)) or ARTIFACTS_ROOT
+    output_dir = artifacts_dir / request.model_id
+    summary = ResearchTaskSummary(
+        task_id=task_id,
+        task_kind="run_breakout_research",
+        status="queued",
+        display_name=request.display_name or f"Run Breakout Research: {request.model_id}",
+        description=request.description,
+        requested_by=request.requested_by,
+        created_at=_now_iso(),
+        output_dir=str(output_dir),
+        model_id=request.model_id,
+        message="Task queued",
+        command=_build_breakout_research_command(request),
+        config_payload=request.model_dump(mode="json"),
+        logs={"stdout": str(task_paths[2]), "stderr": str(task_paths[3])},
+        metadata={"cwd": str(PROJECT_ROOT), "research_kind": "breakout_event"},
         source_ref=_default_task_source(request.source_ref),
         result_path=str(task_paths[4]),
     )

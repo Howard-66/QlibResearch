@@ -6,7 +6,15 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-TaskKind = Literal["export_panel", "run_native_workflow", "run_convergence", "publish_model", "sync_model", "run_research_analysis"]
+TaskKind = Literal[
+    "export_panel",
+    "run_native_workflow",
+    "run_convergence",
+    "publish_model",
+    "sync_model",
+    "run_research_analysis",
+    "run_breakout_research",
+]
 TaskStatus = Literal["queued", "running", "stopping", "succeeded", "failed", "cancelled"]
 DiagnosticStatus = Literal["healthy", "warning", "danger", "missing", "info"]
 ResearchVerdict = Literal["incumbent", "promoted", "promote", "rejected", "needs_explanation", "hold", "reject", "investigate"]
@@ -269,6 +277,9 @@ class BreakoutResearchSummary(BaseModel):
     feature_date: str | None = None
     generated_at: str | None = None
     model_dir: str
+    dataset_id: str | None = None
+    config_hash: str | None = None
+    is_latest: bool = False
     universe_profile: str | None = None
     universe_mode: str | None = None
     symbol_count: int | None = None
@@ -288,6 +299,7 @@ class BreakoutResearchDetail(BreakoutResearchSummary):
     metrics: dict[str, Any] = Field(default_factory=dict)
     config_sections: dict[str, Any] = Field(default_factory=dict)
     artifact_inventory: list[ArtifactRef] = Field(default_factory=list)
+    stage_artifacts: dict[str, ArtifactRef] = Field(default_factory=dict)
     event_overview: dict[str, Any] = Field(default_factory=dict)
     label_overview: dict[str, Any] = Field(default_factory=dict)
     feature_overview: dict[str, Any] = Field(default_factory=dict)
@@ -295,6 +307,27 @@ class BreakoutResearchDetail(BreakoutResearchSummary):
     evaluation_overview: dict[str, Any] = Field(default_factory=dict)
     model_overview: dict[str, Any] = Field(default_factory=dict)
     tables: dict[str, DataTablePayload] = Field(default_factory=dict)
+    chart_payloads: dict[str, ChartPayload] = Field(default_factory=dict)
+
+
+class BreakoutTableResponse(BaseModel):
+    model_id: str
+    table_name: Literal["events", "labels", "features", "signals"]
+    total: int
+    page: int = 1
+    page_size: int = 50
+    table: DataTablePayload = Field(default_factory=DataTablePayload)
+
+
+class BreakoutConfigProfile(BaseModel):
+    profile_id: str
+    path: str
+    config: dict[str, Any] = Field(default_factory=dict)
+    updated_at: str | None = None
+
+
+class BreakoutConfigProfileUpdateRequest(BaseModel):
+    config: dict[str, Any] = Field(default_factory=dict)
 
 
 class CompareItemRef(BaseModel):
@@ -411,6 +444,43 @@ class RunResearchAnalysisTaskRequest(BaseModel):
     output_dir: str | None = None
 
 
+class RunBreakoutResearchTaskRequest(BaseModel):
+    display_name: str | None = None
+    description: str | None = None
+    requested_by: str | None = None
+    source_ref: TaskSourceRef | None = None
+    input_source: Literal["fdh", "csv"] = "fdh"
+    prices_csv: str | None = None
+    symbols: list[str] | None = None
+    symbols_file: str | None = None
+    universe_profile: Literal["csi300", "csi500", "merged_csi300_500", "watchlist"] | None = "csi300"
+    universe_mode: Literal["historical_membership", "fixed_universe"] = "fixed_universe"
+    start_date: str | None = None
+    end_date: str | None = None
+    model_id: str = "stock-breakout-lgbm-v1"
+    artifacts_dir: str | None = None
+    evaluation_mode: Literal["fixed_split", "walk_forward"] = "fixed_split"
+    train_end_date: str | None = None
+    valid_end_date: str | None = None
+    walk_forward_train_days: int = 756
+    walk_forward_valid_days: int = 126
+    walk_forward_test_days: int = 63
+    walk_forward_step_days: int = 63
+    walk_forward_max_folds: int = 0
+    lookback_window: int = 60
+    consolidation_window: int = 20
+    label_horizon_days: int = 13
+    success_return_pct: float = 0.03
+    breakout_pct: float = 0.0
+    min_volume_ratio: float = 1.0
+    learning_rate: float = 0.03
+    num_leaves: int = 63
+    num_boost_round: int = 500
+    early_stopping_rounds: int = 30
+    cache_policy: Literal["auto", "refresh", "reuse"] = "auto"
+    update_latest: bool = True
+
+
 class ResearchTaskSummary(BaseModel):
     task_id: str
     task_kind: TaskKind
@@ -456,7 +526,7 @@ class TaskBoardResponse(BaseModel):
 
 
 class TaskPresetResponse(BaseModel):
-    task_kind: Literal["export_panel", "run_native_workflow", "run_research_analysis"]
+    task_kind: Literal["export_panel", "run_native_workflow", "run_research_analysis", "run_breakout_research"]
     display_name: str | None = None
     source_ref: TaskSourceRef
     payload: dict[str, Any] = Field(default_factory=dict)

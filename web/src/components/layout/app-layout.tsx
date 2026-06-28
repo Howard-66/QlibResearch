@@ -34,7 +34,7 @@ const titleMap: Record<string, HeaderMeta> = {
   "/breakout": { title: "Breakout", description: "股票突破事件研究：事件、标注、特征、训练、评估与模型产物" },
   "/compare": { title: "Compare", description: "按 recipe 粒度做跨 run 对比" },
   "/panels": { title: "Panels", description: "查看 panel 元信息、列摘要与关联 runs" },
-  "/tasks": { title: "Tasks", description: "提交 panel 导出与 native workflow 调度任务" },
+  "/tasks": { title: "Tasks", description: "提交 panel、native workflow、breakout research 调度任务" },
   "/settings": { title: "Settings", description: "启动命令、端口约定与环境约束" },
 };
 

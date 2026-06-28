@@ -7,6 +7,8 @@
 - `manifest.json`
 - 可选 `latest_model.json`（位于 artifacts 根目录）
 
+股票突破事件模型还会在同一 `<model_id>/` 目录下保存可复用阶段产物：`events.csv`、`labels.csv`、`feature_panel.csv`、可选 `feature_panel.parquet`、`events_scored.csv`、`feature_importance.csv` 和 `metrics.json`。这些文件用于 QlibResearch 研究复盘；ValueInvesting 仍只依赖 `scores.csv`、`signals.csv` 和 `manifest.json`。
+
 兼容目标：`ValueInvesting` 现有快照读取逻辑可原样消费。
 
 `scores.csv` 最少字段：
@@ -59,4 +61,10 @@
 | `signal_path` | `signals.csv` | 当前模型目录内的信号文件 |
 | `metrics_path` | `metrics.json` | 评估指标文件 |
 | `feature_panel_path` | `feature_panel.csv` | 事件级特征文件 |
+| `events_path` | `events.csv` | 事件检测阶段产物 |
+| `labels_path` | `labels.csv` | 标注阶段产物 |
+| `events_scored_path` | `events_scored.csv` | 带模型分数的事件文件 |
+| `feature_importance_path` | `feature_importance.csv` | 特征重要性文件 |
+| `dataset_id` | `stock-D-csi300-...` | 数据集与配置 hash 标识 |
+| `config_hash` | `a1b2c3...` | 检测/标注/特征/source 配置 hash |
 | `model_path` | `model.pkl` | 模型文件 |

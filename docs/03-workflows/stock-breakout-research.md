@@ -52,14 +52,17 @@ v1 不改变现有周频截面 native workflow，也不替代已有 `scores.csv`
 | `mae_return_13d` | 事件后 13 日内最大不利收益 |
 | `label_success_13d` | 事件后第 13 个交易日收盘是否达到 `ref_high * 1.03` |
 
-默认特征包括：
+综合版特征包括原始研究方案中的九大类 70+ 特征，并保留旧版 v1 列名别名以兼容测试和历史产物：
 
-1. 突破强度：`breakout_strength`
-2. 成交量确认：`volume_ratio`
-3. 平台收敛：`consolidation_range`、`range_20d`
-4. 波动率：`volatility_20d`
-5. 动量：`return_5d/10d/20d`
-6. 均线位置：`ma_ratio_5d/10d/20d`
+1. 突破强度：K 线振幅、实体、上影线、ATR、量比、跳空、收盘位置。
+2. 前高形态：前高年龄、高度、前高量比、回撤、触碰次数、突破幅度。
+3. 盘整蓄力：5/10/20/30 日波动、紧密度、缩量、均线收敛、区间收缩、横盘天数。
+4. 量价关系：量价相关、OBV 背离、MFI、VWAP、阳量占比、吸筹、量能波动。
+5. 趋势动量：MA5/10/20/60 斜率、RSI、MACD、ADX、均线排列。
+6. 市场环境：市场收益、宽度、量比、波动、回撤、RSI、趋势和动量。
+7. 价格动量：短中期收益、回撤、跳空次数、连涨天数、距均线距离。
+8. 板块/基本面预留：估值、盈利、成长、市值、换手和相对强度；缺失数据记为 NaN。
+9. 交互特征：振幅 × 量比、紧密度 × 前高年龄、跳空 × 连涨。
 
 ## 3. 离线运行
 
@@ -163,6 +166,8 @@ CSV 最少字段：
 | `--success-return-pct` | `0.03` | 成功突破收益阈值 |
 | `--min-volume-ratio` | `1.0` | 事件日成交量相对均量门槛 |
 | `--train-end-date` | 无 | 设置后，早于等于该日的事件训练，之后事件作为评分样本 |
+| `--valid-end-date` | 无 | 设置后，`train_end_date` 到该日期之间作为验证集，之后作为测试集 |
+| `--cache-policy` | `auto` | `auto` / `refresh` / `reuse`，控制是否复用 `artifacts/breakout_cache` 阶段产物 |
 | `--update-latest` | 关闭 | 写入 artifacts 根目录的 `latest_model.json` |
 
 ## 4. 输出产物
@@ -175,9 +180,19 @@ CSV 最少字段：
 | `signals.csv` | 股票突破事件信号，供 ValueInvesting 图表和回测消费 |
 | `manifest.json` | 模型、标签、特征和产物路径元信息 |
 | `feature_panel.csv` | 事件级训练/评分特征表 |
+| `feature_panel.parquet` | 可选 parquet 版本；本地缺少 parquet engine 时自动跳过 |
+| `events.csv` | 事件检测阶段产物 |
+| `labels.csv` | 标注阶段产物 |
 | `events_scored.csv` | 带模型分数的突破事件 |
+| `feature_importance.csv` | LightGBM feature importance |
 | `metrics.json` | 事件模型评估指标 |
 | `model.pkl` | LightGBM 模型、特征列和配置 |
+
+中间缓存位于：
+
+`artifacts/breakout_cache/<dataset_id>/`
+
+`dataset_id` 由资产、频率、股票池、日期范围和配置 hash 组成。缓存目录保存 `events.csv`、`labels.csv`、`feature_panel.csv` 及可选 parquet 文件，用于后续增量补算或复用训练输入。对外消费仍只读取 `artifacts/<model_id>/`。
 
 `signals.csv` 关键字段：
 
@@ -281,8 +296,14 @@ uv run python scripts/sync_to_valueinvesting.py \
 |------|------|
 | `GET /api/breakout` | 列出突破研究模型 |
 | `GET /api/breakout/{model_id}` | 获取单个突破研究模型详情 |
+| `GET /api/breakout/{model_id}/events` | 事件分页与筛选 |
+| `GET /api/breakout/{model_id}/labels` | 标注分页与筛选 |
+| `GET /api/breakout/{model_id}/features` | 特征分页、分组筛选与缺失率浏览 |
+| `GET /api/breakout/{model_id}/signals` | 信号分页与筛选 |
+| `GET/PUT /api/breakout/config-profiles/{profile_id}` | 读写突破研究配置 profile |
+| `POST /api/tasks/run-breakout-research` | 提交突破研究任务到统一任务队列 |
 
-QlibResearch 仪表盘用于研究过程审阅，不承担 ValueInvesting 的线上图表消费职责。
+QlibResearch 仪表盘用于研究过程审阅，不承担 ValueInvesting 的线上图表消费职责。训练可以继续使用 CLI，也可以在 `/breakout` 页面提交任务并复用 `Tasks` 队列、日志和停止能力。
 
 ### 6.2 ValueInvesting 消费端可视化
 

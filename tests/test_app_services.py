@@ -7,7 +7,9 @@ import pandas as pd
 import pytest
 
 from qlib_research.app.contracts import (
+    BreakoutConfigProfileUpdateRequest,
     DataTablePayload,
+    RunBreakoutResearchTaskRequest,
     RunListItem,
     RunQuickSummary,
     RunResearchAnalysisTaskRequest,
@@ -15,6 +17,51 @@ from qlib_research.app.contracts import (
 )
 from qlib_research.app import services
 from qlib_research.core.weekly_feature_panel import select_panel_feature_columns
+
+
+def _write_breakout_artifact(root: Path, model_id: str = "breakout-demo") -> Path:
+    model_dir = root / model_id
+    model_dir.mkdir(parents=True)
+    manifest = {
+        "model_id": model_id,
+        "research_kind": "breakout_event",
+        "asset_class": "stock",
+        "frequency": "D",
+        "dataset_id": "stock-D-demo",
+        "config_hash": "abc123",
+        "feature_date": "2024-05-10",
+        "source_data": {"universe_profile": "csi300", "symbol_count": 2},
+        "label_policy": {"target": "future_return_13d"},
+        "feature_policy": {"feature_columns": ["bs_return", "pm_return_20d"]},
+        "events_path": "events.csv",
+        "labels_path": "labels.csv",
+        "events_scored_path": "events_scored.csv",
+        "feature_panel_path": "feature_panel.csv",
+        "feature_importance_path": "feature_importance.csv",
+        "signal_path": "signals.csv",
+        "snapshot_path": "scores.csv",
+        "metrics_path": "metrics.json",
+    }
+    (model_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    pd.DataFrame(
+        [
+            {"event_id": "e1", "code": "AAA.SH", "event_date": "2024-05-10", "candidate_rule": "close_above_prior_high", "signal_score": 0.2, "future_return_13d": 0.1, "label_success_13d": 1, "bs_return": 0.03, "pm_return_20d": 0.12},
+            {"event_id": "e2", "code": "BBB.SZ", "event_date": "2024-05-11", "candidate_rule": "close_above_prior_high", "signal_score": 0.1, "future_return_13d": -0.02, "label_success_13d": 0, "bs_return": 0.01, "pm_return_20d": 0.02},
+        ]
+    ).to_csv(model_dir / "events_scored.csv", index=False)
+    pd.DataFrame(
+        [
+            {"event_id": "e1", "code": "AAA.SH", "event_date": "2024-05-10", "future_return_13d": 0.1, "label_success_13d": 1, "bs_return": 0.03, "pm_return_20d": 0.12},
+            {"event_id": "e2", "code": "BBB.SZ", "event_date": "2024-05-11", "future_return_13d": -0.02, "label_success_13d": 0, "bs_return": 0.01, "pm_return_20d": 0.02},
+        ]
+    ).to_csv(model_dir / "feature_panel.csv", index=False)
+    pd.DataFrame([{"event_id": "e1", "code": "AAA.SH", "event_date": "2024-05-10", "future_return_13d": 0.1, "label_success_13d": 1}]).to_csv(model_dir / "labels.csv", index=False)
+    pd.DataFrame([{"event_id": "e1", "code": "AAA.SH", "event_date": "2024-05-10"}]).to_csv(model_dir / "events.csv", index=False)
+    pd.DataFrame([{"feature": "bs_return", "importance_gain": 10.0, "importance_split": 2}]).to_csv(model_dir / "feature_importance.csv", index=False)
+    pd.DataFrame([{"event_id": "e1", "code": "AAA.SH", "signal_date": "2024-05-10", "signal_score": 0.2}]).to_csv(model_dir / "signals.csv", index=False)
+    pd.DataFrame([{"code": "AAA.SH", "qlib_score": 0.2}]).to_csv(model_dir / "scores.csv", index=False)
+    (model_dir / "metrics.json").write_text(json.dumps({"event_count": 2, "evaluated_count": 2, "rank_ic": 1.0, "annual_slices": [{"year": 2024, "n_samples": 2}]}), encoding="utf-8")
+    return model_dir
 
 
 def test_list_runs_returns_quick_summary(monkeypatch, tmp_path):
@@ -1286,3 +1333,67 @@ def test_get_run_analysis_task_preset_defaults_to_batch_mode(monkeypatch):
     assert preset.payload["analysis_template"] == "native_workflow_system_report"
     assert preset.payload["analysis_engine"] == "codex_cli"
     assert preset.payload["skills"] == ["native-workflow-artifact-analysis"]
+
+
+def test_breakout_detail_tables_and_config_profile(monkeypatch, tmp_path):
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    _write_breakout_artifact(root)
+    (root / "latest_model.json").write_text(
+        json.dumps({"model_id": "breakout-demo", "research_kind": "breakout_event"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(services, "ARTIFACTS_ROOT", root)
+    monkeypatch.setattr(services, "BREAKOUT_CONFIG_ROOT", root / "breakout_config_profiles")
+
+    runs = services.list_breakout_research_runs()
+    detail = services.get_breakout_research_detail("breakout-demo")
+    events = services.list_breakout_table("breakout-demo", "events", code="AAA", label_status="success")
+    features = services.list_breakout_table("breakout-demo", "features", feature_group="breakout_strength")
+    profile = services.update_breakout_config_profile(
+        "default",
+        BreakoutConfigProfileUpdateRequest(config={"detector": {"lookback_window": 90}}),
+    )
+
+    assert len(runs) == 1
+    assert runs[0].is_latest is True
+    assert detail.stage_artifacts["feature_panel"].exists is True
+    assert "feature_importance" in detail.chart_payloads
+    assert events.total == 1
+    assert events.table.rows[0]["code"] == "AAA.SH"
+    assert "bs_return" in features.table.columns
+    assert profile.config["detector"]["lookback_window"] == 90
+
+
+def test_create_breakout_research_task_builds_cli(monkeypatch, tmp_path):
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    monkeypatch.setattr(services, "ARTIFACTS_ROOT", root)
+    monkeypatch.setattr(services, "TASKS_ROOT", root / "app_tasks")
+
+    task = services.create_breakout_research_task(
+        RunBreakoutResearchTaskRequest(
+            model_id="breakout-demo",
+            universe_profile="csi300",
+            start_date="2020-01-01",
+            end_date="2024-12-31",
+            evaluation_mode="walk_forward",
+            train_end_date="2023-12-31",
+            valid_end_date="2024-06-30",
+            walk_forward_train_days=504,
+            walk_forward_valid_days=63,
+            walk_forward_test_days=21,
+            walk_forward_step_days=21,
+            walk_forward_max_folds=6,
+            cache_policy="auto",
+        )
+    )
+
+    assert task.task_kind == "run_breakout_research"
+    assert task.model_id == "breakout-demo"
+    assert "scripts/run_stock_breakout_research.py" in task.command
+    assert "--evaluation-mode" in task.command
+    assert "walk_forward" in task.command
+    assert "--valid-end-date" in task.command
+    assert "--walk-forward-max-folds" in task.command
+    assert (root / "app_tasks" / task.task_id / "task.json").exists()

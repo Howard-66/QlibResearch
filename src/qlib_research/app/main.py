@@ -9,8 +9,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from qlib_research.app.contracts import (
     ArtifactInventoryResponse,
+    BreakoutConfigProfile,
+    BreakoutConfigProfileUpdateRequest,
     BreakoutResearchDetail,
     BreakoutResearchSummary,
+    BreakoutTableResponse,
     CompareItemRef,
     CompareResponse,
     ExportPanelTaskRequest,
@@ -21,6 +24,7 @@ from qlib_research.app.contracts import (
     RecipeTablesResponse,
     RecipeSummary,
     RunResearchAnalysisTaskRequest,
+    RunBreakoutResearchTaskRequest,
     ResearchTaskDetail,
     ResearchTaskSummary,
     RunDetail,
@@ -33,10 +37,12 @@ from qlib_research.app.contracts import (
 )
 from qlib_research.app.services import (
     compare_recipe_items,
+    create_breakout_research_task,
     create_export_panel_task,
     create_native_workflow_task,
     create_research_analysis_task,
     get_breakout_research_detail,
+    get_breakout_config_profile,
     get_overview,
     get_panel_detail,
     get_recipe_detail,
@@ -51,6 +57,7 @@ from qlib_research.app.services import (
     get_run_task_preset,
     list_panels,
     list_breakout_research_runs,
+    list_breakout_table,
     list_run_recipes,
     list_runs,
     list_tasks,
@@ -58,6 +65,7 @@ from qlib_research.app.services import (
     reorder_tasks,
     run_task_queue,
     stop_current_task,
+    update_breakout_config_profile,
 )
 
 app = FastAPI(
@@ -91,6 +99,50 @@ def api_get_overview() -> OverviewResponse:
 @app.get("/api/breakout", response_model=list[BreakoutResearchSummary])
 def api_list_breakout_research() -> list[BreakoutResearchSummary]:
     return list_breakout_research_runs()
+
+
+@app.get("/api/breakout/config-profiles/{profile_id}", response_model=BreakoutConfigProfile)
+def api_get_breakout_config_profile(profile_id: str) -> BreakoutConfigProfile:
+    return get_breakout_config_profile(profile_id)
+
+
+@app.put("/api/breakout/config-profiles/{profile_id}", response_model=BreakoutConfigProfile)
+def api_update_breakout_config_profile(profile_id: str, request: BreakoutConfigProfileUpdateRequest) -> BreakoutConfigProfile:
+    return update_breakout_config_profile(profile_id, request)
+
+
+@app.get("/api/breakout/{model_id}/{table_name}", response_model=BreakoutTableResponse)
+def api_get_breakout_table(
+    model_id: str,
+    table_name: str,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=500),
+    code: str | None = Query(default=None),
+    start_date: str | None = Query(default=None),
+    end_date: str | None = Query(default=None),
+    label_status: str | None = Query(default=None),
+    score_quantile: str | None = Query(default=None),
+    candidate_rule: str | None = Query(default=None),
+    feature_group: str | None = Query(default=None),
+) -> BreakoutTableResponse:
+    if table_name not in {"events", "labels", "features", "signals"}:
+        raise HTTPException(status_code=404, detail=f"Unknown breakout table: {table_name}")
+    try:
+        return list_breakout_table(
+            model_id,
+            table_name,
+            page=page,
+            page_size=page_size,
+            code=code,
+            start_date=start_date,
+            end_date=end_date,
+            label_status=label_status,
+            score_quantile=score_quantile,
+            candidate_rule=candidate_rule,
+            feature_group=feature_group,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/api/breakout/{model_id}", response_model=BreakoutResearchDetail)
@@ -192,6 +244,11 @@ def api_create_native_workflow_task(request: RunNativeWorkflowTaskRequest) -> Re
 @app.post("/api/tasks/run-research-analysis", response_model=ResearchTaskSummary)
 def api_create_research_analysis_task(request: RunResearchAnalysisTaskRequest) -> ResearchTaskSummary:
     return create_research_analysis_task(request)
+
+
+@app.post("/api/tasks/run-breakout-research", response_model=ResearchTaskSummary)
+def api_create_breakout_research_task(request: RunBreakoutResearchTaskRequest) -> ResearchTaskSummary:
+    return create_breakout_research_task(request)
 
 
 @app.post("/api/tasks/run-queue", response_model=TaskBoardResponse)

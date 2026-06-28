@@ -14,6 +14,9 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
+from qlib_research.breakout.evaluation import evaluate_breakout_scores
+from qlib_research.breakout.features import ALL_FEATURE_COLUMNS, FEATURE_GROUPS, build_stock_breakout_features
+
 
 @dataclass(frozen=True)
 class StockBreakoutConfig:
@@ -164,39 +167,13 @@ def build_stock_breakout_feature_panel(
 
     cfg = config or StockBreakoutConfig()
     if events.empty:
-        return events.copy()
+        result = events.copy()
+        for column in ALL_FEATURE_COLUMNS:
+            if column not in result.columns:
+                result[column] = pd.Series(dtype=float)
+        return result
     frame = normalize_stock_price_frame(price_frame)
-    feature_frames: list[pd.DataFrame] = []
-    for code, group in frame.groupby("code", sort=True):
-        group = group.sort_values("date").reset_index(drop=True).copy()
-        close = group["close"]
-        high = group["high"]
-        low = group["low"]
-        volume = group["volume"]
-        group["daily_return"] = close.pct_change()
-        group[f"volatility_{cfg.consolidation_window}d"] = group["daily_return"].rolling(cfg.consolidation_window).std()
-        group[f"volume_ratio_{cfg.volume_window}d"] = volume / volume.rolling(cfg.volume_window, min_periods=max(3, cfg.volume_window // 2)).mean().shift(1)
-        group[f"range_{cfg.consolidation_window}d"] = (
-            high.rolling(cfg.consolidation_window).max() - low.rolling(cfg.consolidation_window).min()
-        ) / close.replace(0, np.nan)
-        for window in cfg.momentum_windows:
-            group[f"return_{window}d"] = close / close.shift(window) - 1.0
-            group[f"ma_ratio_{window}d"] = close / close.rolling(window, min_periods=max(3, window // 2)).mean() - 1.0
-        keep = [
-            "code",
-            "date",
-            f"volatility_{cfg.consolidation_window}d",
-            f"volume_ratio_{cfg.volume_window}d",
-            f"range_{cfg.consolidation_window}d",
-            *(f"return_{window}d" for window in cfg.momentum_windows),
-            *(f"ma_ratio_{window}d" for window in cfg.momentum_windows),
-            *[column for column in cfg.extra_feature_columns if column in group.columns],
-        ]
-        feature_frames.append(group[keep])
-    features = pd.concat(feature_frames, ignore_index=True) if feature_frames else pd.DataFrame()
-    result = events.copy()
-    result["_event_date"] = pd.to_datetime(result["event_date"], errors="coerce")
-    result = result.merge(features, left_on=["code", "_event_date"], right_on=["code", "date"], how="left").drop(columns=["date", "_event_date"])
+    result = build_stock_breakout_features(frame, events, extra_feature_columns=cfg.extra_feature_columns)
     return result
 
 
@@ -226,10 +203,30 @@ def stock_breakout_feature_columns(frame: pd.DataFrame) -> list[str]:
         "candidate_rule",
     }
     columns: list[str] = []
-    for column in frame.columns:
+    preferred = [column for column in ALL_FEATURE_COLUMNS if column in frame.columns]
+    legacy = [
+        "entry_price",
+        "ref_high",
+        "ref_low",
+        "breakout_strength",
+        "volume_ratio",
+        "consolidation_range",
+        "volatility_20d",
+        "volume_ratio_20d",
+        "range_20d",
+        "return_5d",
+        "return_10d",
+        "return_20d",
+        "ma_ratio_5d",
+        "ma_ratio_10d",
+        "ma_ratio_20d",
+    ]
+    for column in [*legacy, *preferred, *frame.columns.tolist()]:
         if column in excluded or column.startswith(excluded_prefixes):
             continue
-        if pd.api.types.is_numeric_dtype(frame[column]):
+        if column not in frame.columns:
+            continue
+        if pd.api.types.is_numeric_dtype(frame[column]) and column not in columns:
             columns.append(column)
     return columns
 
@@ -289,29 +286,16 @@ def evaluate_stock_breakout_scores(
     score_column: str = "signal_score",
     return_column: str | None = None,
     top_quantile: float = 0.2,
-) -> dict[str, float | int | None]:
+) -> dict[str, object]:
     """Compute compact event-model metrics for offline promotion checks."""
 
-    if scored_events.empty:
-        return {"event_count": 0, "rank_ic": None, "top_quantile_mean_return": None, "top_quantile_hit_rate": None}
-    frame = scored_events.copy()
-    if return_column is None:
-        candidates = [column for column in frame.columns if column.startswith("future_return_")]
-        return_column = candidates[0] if candidates else ""
-    if score_column not in frame.columns or return_column not in frame.columns:
-        return {"event_count": int(len(frame)), "rank_ic": None, "top_quantile_mean_return": None, "top_quantile_hit_rate": None}
-    valid = frame[[score_column, return_column]].apply(pd.to_numeric, errors="coerce").dropna()
-    if valid.empty:
-        return {"event_count": int(len(frame)), "rank_ic": None, "top_quantile_mean_return": None, "top_quantile_hit_rate": None}
-    top_count = max(1, int(np.ceil(len(valid) * top_quantile)))
-    top = valid.sort_values(score_column, ascending=False).head(top_count)
-    return {
-        "event_count": int(len(frame)),
-        "evaluated_count": int(len(valid)),
-        "rank_ic": _finite_or_none(valid[score_column].corr(valid[return_column], method="spearman")),
-        "top_quantile_mean_return": _finite_or_none(top[return_column].mean()),
-        "top_quantile_hit_rate": _finite_or_none((top[return_column] > 0).mean()),
-    }
+    top_percent = max(1.0, min(100.0, float(top_quantile) * 100.0))
+    return evaluate_breakout_scores(
+        scored_events,
+        score_column=score_column,
+        return_column=return_column,
+        top_percentiles=(5, 10, top_percent),
+    )
 
 
 def train_lightgbm_stock_breakout_model(
@@ -319,6 +303,10 @@ def train_lightgbm_stock_breakout_model(
     label_column: str,
     feature_columns: Iterable[str] | None = None,
     *,
+    valid_frame: pd.DataFrame | None = None,
+    model_params: dict | None = None,
+    num_boost_round: int = 500,
+    early_stopping_rounds: int | None = 30,
     random_state: int = 42,
 ):
     """Train a LightGBM regressor on an event feature frame."""
@@ -338,17 +326,37 @@ def train_lightgbm_stock_breakout_model(
         raise ValueError("No labeled stock breakout rows available for training")
     model_input = train[columns]
     dataset = lgb.Dataset(model_input, label=train[label_column], feature_name=columns, free_raw_data=False)
+    params = {
+        "objective": "regression",
+        "metric": "rmse",
+        "learning_rate": 0.03,
+        "num_leaves": 63,
+        "seed": random_state,
+        "verbosity": -1,
+    }
+    params.update(model_params or {})
+    valid_sets = [dataset]
+    valid_names = ["train"]
+    callbacks = []
+    if valid_frame is not None and not valid_frame.empty:
+        valid = valid_frame[columns + [label_column]].copy()
+        for column in columns + [label_column]:
+            valid[column] = pd.to_numeric(valid[column], errors="coerce")
+        valid = valid.dropna(subset=[label_column])
+        if not valid.empty:
+            valid_dataset = lgb.Dataset(valid[columns], label=valid[label_column], feature_name=columns, reference=dataset, free_raw_data=False)
+            valid_sets.append(valid_dataset)
+            valid_names.append("valid")
+            if early_stopping_rounds:
+                callbacks.append(lgb.early_stopping(stopping_rounds=int(early_stopping_rounds), verbose=False))
+    callbacks.append(lgb.log_evaluation(period=0))
     model = lgb.train(
-        {
-            "objective": "regression",
-            "metric": "l2",
-            "learning_rate": 0.05,
-            "num_leaves": 31,
-            "seed": random_state,
-            "verbosity": -1,
-        },
-        dataset,
-        num_boost_round=200,
+        params,
+        train_set=dataset,
+        num_boost_round=int(num_boost_round),
+        valid_sets=valid_sets,
+        valid_names=valid_names,
+        callbacks=callbacks,
     )
     return model, columns
 

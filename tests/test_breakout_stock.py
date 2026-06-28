@@ -86,6 +86,25 @@ def test_train_and_score_stock_breakout_model_without_sklearn():
     assert scored["signal_score"].notna().any()
 
 
+def test_walk_forward_fold_plan_uses_recent_max_folds():
+    research = pd.DataFrame({"event_date": pd.date_range("2024-01-01", periods=120, freq="D")})
+
+    plan = breakout_script._walk_forward_fold_plan(
+        research,
+        train_days=30,
+        valid_days=10,
+        test_days=7,
+        step_days=14,
+        max_folds=3,
+    )
+
+    assert len(plan) == 3
+    assert plan["fold_id"].tolist() == ["wf_001", "wf_002", "wf_003"]
+    assert pd.to_datetime(plan["train_end"]).lt(pd.to_datetime(plan["valid_start"])).all()
+    assert pd.to_datetime(plan["valid_end"]).lt(pd.to_datetime(plan["test_start"])).all()
+    assert pd.to_datetime(plan["test_end"]).le(pd.Timestamp("2024-04-29")).all()
+
+
 def test_research_frame_accepts_fdh_time_symbol_columns():
     prices = _price_frame().rename(columns={"code": "symbol", "date": "time"})
     config = StockBreakoutConfig(lookback_window=60, min_history_days=60, min_volume_ratio=0.0)
