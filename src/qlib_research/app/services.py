@@ -408,6 +408,7 @@ def _breakout_stage_artifacts(model_dir: Path, manifest: dict[str, Any]) -> dict
         "feature_importance": str(manifest.get("feature_importance_path") or "feature_importance.csv"),
         "signals": str(manifest.get("signal_path") or "signals.csv"),
         "scores": str(manifest.get("snapshot_path") or "scores.csv"),
+        "fresh_scores": str(manifest.get("fresh_scores_path") or ""),
     }
     return {key: _breakout_artifact_ref(value, model_dir / value) for key, value in stage_names.items() if value and value != "None"}
 

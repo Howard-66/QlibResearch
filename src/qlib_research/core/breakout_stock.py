@@ -27,7 +27,10 @@ class StockBreakoutConfig:
     momentum_windows: tuple[int, ...] = (5, 10, 20)
     volume_window: int = 20
     breakout_pct: float = 0.0
+    max_breakout_pct: float | None = None
     min_volume_ratio: float = 1.0
+    max_consolidation_range: float | None = None
+    min_close_position: float = 0.0
     label_horizon_days: int = 13
     success_return_pct: float = 0.03
     min_history_days: int = 80
@@ -89,6 +92,8 @@ def detect_stock_breakout_events(
         volume_ratio = group["volume"] / volume_ma.replace(0, np.nan)
         consolidation_range = (prior_high - prior_low) / prior_high.replace(0, np.nan)
         breakout_strength = group["close"] / prior_high.replace(0, np.nan) - 1.0
+        day_range = (group["high"] - group["low"]).replace(0, np.nan)
+        close_position = (group["close"] - group["low"]) / day_range
         enough_history = group.index >= max(cfg.min_history_days, cfg.lookback_window)
         mask = (
             enough_history
@@ -96,6 +101,12 @@ def detect_stock_breakout_events(
             & (group["close"] > prior_high * (1.0 + cfg.breakout_pct))
             & (volume_ratio.fillna(np.inf) >= cfg.min_volume_ratio)
         )
+        if cfg.max_breakout_pct is not None:
+            mask = mask & (breakout_strength <= float(cfg.max_breakout_pct))
+        if cfg.max_consolidation_range is not None:
+            mask = mask & (consolidation_range <= float(cfg.max_consolidation_range))
+        if cfg.min_close_position:
+            mask = mask & (close_position >= float(cfg.min_close_position))
         if not mask.any():
             continue
         event_frame = pd.DataFrame(
@@ -253,6 +264,7 @@ def build_stock_breakout_signal_frame(
                 "side",
                 "signal_score",
                 f"pred_return_{cfg.label_horizon_days}d",
+                "raw_signal_score",
                 "entry_price",
                 "ref_high",
                 "ref_low",
@@ -262,6 +274,7 @@ def build_stock_breakout_signal_frame(
     if score_column not in frame.columns:
         label_col = f"future_return_{cfg.label_horizon_days}d"
         frame[score_column] = pd.to_numeric(frame.get(label_col), errors="coerce")
+    raw_score = pd.to_numeric(frame.get(f"raw_{score_column}", frame[score_column]), errors="coerce")
     output = pd.DataFrame(
         {
             "event_id": frame["event_id"],
@@ -272,7 +285,8 @@ def build_stock_breakout_signal_frame(
             "signal_type": "breakout",
             "side": frame.get("side", "long"),
             "signal_score": pd.to_numeric(frame[score_column], errors="coerce"),
-            f"pred_return_{cfg.label_horizon_days}d": pd.to_numeric(frame[score_column], errors="coerce"),
+            f"pred_return_{cfg.label_horizon_days}d": raw_score,
+            "raw_signal_score": raw_score,
             "entry_price": pd.to_numeric(frame.get("entry_price"), errors="coerce"),
             "ref_high": pd.to_numeric(frame.get("ref_high"), errors="coerce"),
             "ref_low": pd.to_numeric(frame.get("ref_low"), errors="coerce"),
@@ -286,6 +300,7 @@ def evaluate_stock_breakout_scores(
     score_column: str = "signal_score",
     return_column: str | None = None,
     top_quantile: float = 0.2,
+    include_slices: bool = True,
 ) -> dict[str, object]:
     """Compute compact event-model metrics for offline promotion checks."""
 
@@ -295,6 +310,7 @@ def evaluate_stock_breakout_scores(
         score_column=score_column,
         return_column=return_column,
         top_percentiles=(5, 10, top_percent),
+        include_slices=include_slices,
     )
 
 
@@ -307,6 +323,7 @@ def train_lightgbm_stock_breakout_model(
     model_params: dict | None = None,
     num_boost_round: int = 500,
     early_stopping_rounds: int | None = 30,
+    early_stopping_metric: str = "rmse",
     random_state: int = 42,
 ):
     """Train a LightGBM regressor on an event feature frame."""
@@ -338,6 +355,16 @@ def train_lightgbm_stock_breakout_model(
     valid_sets = [dataset]
     valid_names = ["train"]
     callbacks = []
+    feval = None
+    if early_stopping_metric == "spearman":
+        params["metric"] = "None"
+
+        def _spearman_eval(preds, eval_data):
+            labels = eval_data.get_label()
+            corr = pd.Series(preds).corr(pd.Series(labels), method="spearman")
+            return "spearman", _finite_or_none(corr) or 0.0, True
+
+        feval = _spearman_eval
     if valid_frame is not None and not valid_frame.empty:
         valid = valid_frame[columns + [label_column]].copy()
         for column in columns + [label_column]:
@@ -345,8 +372,8 @@ def train_lightgbm_stock_breakout_model(
         valid = valid.dropna(subset=[label_column])
         if not valid.empty:
             valid_dataset = lgb.Dataset(valid[columns], label=valid[label_column], feature_name=columns, reference=dataset, free_raw_data=False)
-            valid_sets.append(valid_dataset)
-            valid_names.append("valid")
+            valid_sets = [valid_dataset]
+            valid_names = ["valid"]
             if early_stopping_rounds:
                 callbacks.append(lgb.early_stopping(stopping_rounds=int(early_stopping_rounds), verbose=False))
     callbacks.append(lgb.log_evaluation(period=0))
@@ -356,6 +383,7 @@ def train_lightgbm_stock_breakout_model(
         num_boost_round=int(num_boost_round),
         valid_sets=valid_sets,
         valid_names=valid_names,
+        feval=feval,
         callbacks=callbacks,
     )
     return model, columns

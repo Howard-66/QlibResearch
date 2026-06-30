@@ -58,6 +58,27 @@ def test_detect_label_and_feature_stock_breakout_events():
     assert "entry_price" in stock_breakout_feature_columns(features)
 
 
+def test_detect_stock_breakout_events_accepts_quality_filters():
+    prices = _price_frame()
+
+    loose = detect_stock_breakout_events(
+        prices,
+        StockBreakoutConfig(lookback_window=60, min_history_days=60, min_volume_ratio=0.0),
+    )
+    capped_breakout = detect_stock_breakout_events(
+        prices,
+        StockBreakoutConfig(lookback_window=60, min_history_days=60, min_volume_ratio=0.0, max_breakout_pct=0.001),
+    )
+    high_close_position = detect_stock_breakout_events(
+        prices,
+        StockBreakoutConfig(lookback_window=60, min_history_days=60, min_volume_ratio=0.0, min_close_position=0.95),
+    )
+
+    assert not loose.empty
+    assert capped_breakout.empty
+    assert high_close_position.empty
+
+
 def test_build_research_frame_signal_frame_and_metrics():
     config = StockBreakoutConfig(lookback_window=60, min_history_days=60, min_volume_ratio=0.0)
     research = build_stock_breakout_research_frame(_price_frame(), config)
@@ -70,6 +91,155 @@ def test_build_research_frame_signal_frame_and_metrics():
     assert set(["event_id", "code", "signal_date", "signal_score", "pred_return_13d"]).issubset(signals.columns)
     assert signals.iloc[0]["model_id"] == "breakout-demo"
     assert metrics["event_count"] == len(research)
+    assert metrics["top20_excess_return"] is not None
+    assert metrics["score_unique_ratio"] is not None
+
+
+def test_signal_frame_preserves_raw_prediction_when_score_is_calibrated():
+    config = StockBreakoutConfig(label_horizon_days=13)
+    scored = pd.DataFrame(
+        {
+            "event_id": ["e1", "e2"],
+            "code": ["AAA.SH", "BBB.SH"],
+            "event_date": ["2024-01-02", "2024-01-02"],
+            "signal_score": [1.0, 0.5],
+            "raw_signal_score": [0.08, -0.02],
+            "entry_price": [10.0, 20.0],
+            "ref_high": [9.8, 19.8],
+            "ref_low": [9.1, 18.7],
+        }
+    )
+
+    signals = build_stock_breakout_signal_frame(scored, model_id="calibrated", config=config)
+
+    assert signals.loc[0, "signal_score"] == pytest.approx(1.0)
+    assert signals.loc[0, "pred_return_13d"] == pytest.approx(0.08)
+    assert signals.loc[0, "raw_signal_score"] == pytest.approx(0.08)
+
+
+def test_daily_excess_target_demeans_same_date_candidates():
+    research = pd.DataFrame(
+        {
+            "event_date": ["2024-01-02", "2024-01-02", "2024-01-03"],
+            "future_return_13d": [0.10, -0.02, 0.03],
+        }
+    )
+
+    result, label_column = breakout_script._attach_training_target(research, horizon_days=13, target_mode="daily_excess_return")
+
+    assert label_column == "future_daily_excess_return_13d"
+    assert result.loc[0, label_column] == pytest.approx(0.06)
+    assert result.loc[1, label_column] == pytest.approx(-0.06)
+    assert result.loc[2, label_column] == pytest.approx(0.0)
+
+
+def test_path_adjusted_target_penalizes_drawdown_and_can_demean():
+    research = pd.DataFrame(
+        {
+            "event_date": ["2024-01-02", "2024-01-02"],
+            "future_return_13d": [0.10, 0.02],
+            "mfe_return_13d": [0.20, 0.04],
+            "mae_return_13d": [-0.08, -0.01],
+        }
+    )
+
+    result, label_column = breakout_script._attach_training_target(research, horizon_days=13, target_mode="path_adjusted_return")
+    excess, excess_label = breakout_script._attach_training_target(research, horizon_days=13, target_mode="daily_excess_path_adjusted_return")
+
+    assert label_column == "future_path_adjusted_return_13d"
+    assert result.loc[0, label_column] == pytest.approx(0.12)
+    assert result.loc[1, label_column] == pytest.approx(0.03)
+    assert excess_label == "future_daily_excess_path_adjusted_return_13d"
+    assert excess.loc[0, excess_label] == pytest.approx(0.045)
+    assert excess.loc[1, excess_label] == pytest.approx(-0.045)
+
+
+def test_outcome_metrics_keep_realized_return_views_for_path_target():
+    research = pd.DataFrame(
+        {
+            "event_date": ["2024-01-02", "2024-01-02", "2024-01-03"],
+            "future_return_13d": [0.10, -0.02, 0.03],
+            "mfe_return_13d": [0.20, 0.04, 0.05],
+            "mae_return_13d": [-0.08, -0.01, -0.02],
+            "signal_score": [0.8, 0.1, 0.4],
+            "dataset_split": ["train", "train", "test"],
+        }
+    )
+    labeled, label_column = breakout_script._attach_training_target(
+        research,
+        horizon_days=13,
+        target_mode="daily_excess_path_adjusted_return",
+    )
+    scored = breakout_script._attach_outcome_columns(labeled, horizon_days=13)
+
+    outcomes = breakout_script._evaluate_outcome_metrics(scored, horizon_days=13, label_column=label_column)
+
+    assert set(["training_label", "absolute_return", "daily_excess_return"]).issubset(outcomes)
+    assert outcomes["absolute_return"]["top20_mean_return"] == pytest.approx(0.10)
+    assert outcomes["daily_excess_return"]["top20_mean_return"] == pytest.approx(0.06)
+
+
+def test_score_transform_date_rank_preserves_raw_signal_score():
+    scored = pd.DataFrame(
+        {
+            "event_date": ["2024-01-02", "2024-01-02", "2024-01-03"],
+            "signal_score": [0.2, 0.8, -0.1],
+        }
+    )
+
+    result = breakout_script._apply_score_transform(scored, "date_rank")
+
+    assert result["raw_signal_score"].tolist() == pytest.approx([0.2, 0.8, -0.1])
+    assert result["signal_score"].tolist() == pytest.approx([0.5, 1.0, 1.0])
+    assert result["score_transform"].tolist() == ["date_rank", "date_rank", "date_rank"]
+
+
+def test_date_topk_selection_metrics_score_each_event_date():
+    scored = pd.DataFrame(
+        {
+            "event_date": ["2024-01-02", "2024-01-02", "2024-01-03", "2024-01-03"],
+            "signal_score": [0.2, 0.8, 0.9, 0.1],
+            "future_return_13d": [-0.02, 0.10, 0.04, -0.01],
+        }
+    )
+
+    metrics = breakout_script._date_topk_selection_metrics(scored, return_column="future_return_13d")
+
+    assert metrics["date_count"] == 2
+    assert metrics["top1_per_date_count"] == 2
+    assert metrics["top1_per_date_mean_return"] == pytest.approx(0.07)
+    assert metrics["top1_per_date_excess_return"] == pytest.approx(0.0425)
+    assert metrics["top1_per_date_hit_rate"] == pytest.approx(1.0)
+
+
+def test_feature_profile_stable_slim_removes_market_and_empty_fundamentals():
+    config = StockBreakoutConfig(lookback_window=60, min_history_days=60, min_volume_ratio=0.0)
+    research = build_stock_breakout_research_frame(_price_frame(), config)
+
+    columns = breakout_script._feature_columns_for_profile(research, "stable_slim")
+
+    assert "me_market_return_5d" not in columns
+    assert "fn_roe" not in columns
+    assert "entry_price" not in columns
+    assert "breakout_strength" in columns
+
+
+def test_fresh_score_snapshot_filters_stale_signals():
+    signals = pd.DataFrame(
+        {
+            "code": ["AAA.SH", "AAA.SH", "BBB.SH"],
+            "signal_date": ["2024-06-28", "2024-06-30", "2024-06-01"],
+            "feature_date": ["2024-06-28", "2024-06-30", "2024-06-01"],
+            "signal_score": [0.9, 0.2, 0.8],
+            "pred_return_13d": [0.9, 0.2, 0.8],
+        }
+    )
+
+    fresh = breakout_script._fresh_score_snapshot_frame(signals, horizon_days=13, feature_date="2024-06-30", fresh_signal_days=7)
+
+    assert fresh["code"].tolist() == ["AAA.SH"]
+    assert fresh.iloc[0]["signal_age_days"] == 0
+    assert fresh.iloc[0]["qlib_score"] == pytest.approx(0.2)
 
 
 def test_train_and_score_stock_breakout_model_without_sklearn():

@@ -15,6 +15,7 @@ def evaluate_breakout_scores(
     return_column: str | None = None,
     split_column: str | None = "dataset_split",
     top_percentiles: Iterable[float] = (5, 10, 20),
+    include_slices: bool = True,
 ) -> dict[str, object]:
     """Compute event-model metrics with stable legacy keys."""
 
@@ -46,8 +47,8 @@ def evaluate_breakout_scores(
     metrics["splits"] = splits
     metrics["score_distribution"] = _distribution(frame.get(score_column))
     metrics["return_distribution"] = _distribution(frame.get(return_column) if return_column in frame else None)
-    metrics["annual_slices"] = _annual_slices(frame, score_column, return_column)
-    metrics["symbol_slices"] = _symbol_slices(frame, score_column, return_column)
+    metrics["annual_slices"] = _annual_slices(frame, score_column, return_column) if include_slices else []
+    metrics["symbol_slices"] = _symbol_slices(frame, score_column, return_column) if include_slices else []
     metrics["overfit_ratio"] = _overfit_ratio(splits)
     return _json_ready(metrics)
 
@@ -82,17 +83,35 @@ def _metrics_for_frame(frame: pd.DataFrame, score_column: str, return_column: st
         "spearman": _finite_or_none(score.corr(ret, method="spearman")),
         "rmse": _finite_or_none(np.sqrt(((score - ret) ** 2).mean())),
         "mae": _finite_or_none((score - ret).abs().mean()),
+        "mean_return": _finite_or_none(ret.mean()),
+        "hit_rate": _finite_or_none((ret > 0).mean()),
+        "score_std": _finite_or_none(score.std()),
+        "score_unique_ratio": _finite_or_none(score.nunique(dropna=True) / len(score)),
     }
     sorted_valid = valid.sort_values(score_column, ascending=False)
     for pct in top_percentiles:
         tag = str(int(pct)) if float(pct).is_integer() else str(pct).replace(".", "_")
         top_count = max(1, int(np.ceil(len(sorted_valid) * float(pct) / 100.0)))
         top = sorted_valid.head(top_count)
+        top_mean = _finite_or_none(top[return_column].mean())
         out[f"top{tag}_mean_return"] = _finite_or_none(top[return_column].mean())
         out[f"top{tag}_hit_rate"] = _finite_or_none((top[return_column] > 0).mean())
+        out[f"top{tag}_count"] = int(len(top))
+        out[f"top{tag}_excess_return"] = (
+            _finite_or_none(float(top_mean) - float(out["mean_return"]))
+            if top_mean is not None and out.get("mean_return") is not None
+            else None
+        )
     bottom_count = max(1, int(np.ceil(len(sorted_valid) * 0.2)))
     bottom = sorted_valid.tail(bottom_count)
     out["bottom20_mean_return"] = _finite_or_none(bottom[return_column].mean())
+    out["bottom20_hit_rate"] = _finite_or_none((bottom[return_column] > 0).mean())
+    out["bottom20_count"] = int(len(bottom))
+    out["bottom20_excess_return"] = (
+        _finite_or_none(float(out["bottom20_mean_return"]) - float(out["mean_return"]))
+        if out.get("bottom20_mean_return") is not None and out.get("mean_return") is not None
+        else None
+    )
     top20 = out.get("top20_mean_return")
     bottom20 = out.get("bottom20_mean_return")
     out["long_short_spread"] = _finite_or_none(float(top20) - float(bottom20)) if top20 is not None and bottom20 is not None else None
