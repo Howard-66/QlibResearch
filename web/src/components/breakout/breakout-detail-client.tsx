@@ -108,7 +108,7 @@ export function BreakoutDetailClient({ detail }: { detail: BreakoutResearchDetai
         </TabsContent>
 
         <TabsContent value="evaluation" className="space-y-4">
-          <EvaluationMetrics metrics={detail.evaluation_overview} />
+          <EvaluationMetrics metrics={detail.evaluation_overview} walkForwardFolds={detail.tables.walk_forward_folds} />
           <div className="grid gap-4 xl:grid-cols-2">
             <ChartCard chart={detail.chart_payloads.score_distribution} fallbackTitle="Score Distribution" />
             <ChartCard chart={detail.chart_payloads.return_distribution} fallbackTitle="Return Distribution" />
@@ -121,12 +121,6 @@ export function BreakoutDetailClient({ detail }: { detail: BreakoutResearchDetai
             <CardHeader><CardTitle className="text-base">Symbol Slices</CardTitle></CardHeader>
             <CardContent><DataTable table={detail.tables.symbol_slices ?? emptyTable()} maxRows={40} /></CardContent>
           </Card>
-          {detail.tables.walk_forward_folds?.rows?.length ? (
-            <Card>
-              <CardHeader><CardTitle className="text-base">Walk-forward Folds</CardTitle></CardHeader>
-              <CardContent><DataTable table={detail.tables.walk_forward_folds} maxRows={80} /></CardContent>
-            </Card>
-          ) : null}
           <Card>
             <CardHeader><CardTitle className="text-base">Feature Importance</CardTitle></CardHeader>
             <CardContent><DataTable table={detail.tables.feature_importance ?? emptyTable()} maxRows={50} /></CardContent>
@@ -272,10 +266,12 @@ const distributionMetrics: MetricSpec[] = [
   { key: "std", label: "Std", description: metricDescriptions.std },
 ];
 
-function EvaluationMetrics({ metrics }: { metrics: Record<string, unknown> }) {
+function EvaluationMetrics({ metrics, walkForwardFolds }: { metrics: Record<string, unknown>; walkForwardFolds?: DataTablePayload }) {
   const splits = asRecord(metrics.splits);
   const scoreDistribution = asRecord(metrics.score_distribution);
   const returnDistribution = asRecord(metrics.return_distribution);
+  const hasWalkForwardSummary = asRecord(metrics.walk_forward).fold_count !== undefined;
+  const hasWalkForwardFolds = Boolean(walkForwardFolds?.rows?.length);
 
   return (
     <div className="space-y-4">
@@ -287,25 +283,85 @@ function EvaluationMetrics({ metrics }: { metrics: Record<string, unknown> }) {
         <MetricGroup title="Score 分布摘要" detail="模型输出分数的范围和离散程度。" metrics={distributionMetrics} values={scoreDistribution} />
         <MetricGroup title="Return 分布摘要" detail="未来收益标签的范围和离散程度。" metrics={distributionMetrics} values={returnDistribution} valueFormat="percent" />
       </div>
-      {asRecord(metrics.walk_forward).fold_count !== undefined ? <WalkForwardMetricGroup metrics={metrics} /> : null}
+      {hasWalkForwardSummary || hasWalkForwardFolds ? <WalkForwardMetricGroup metrics={metrics} foldTable={walkForwardFolds} /> : null}
     </div>
   );
 }
 
-function WalkForwardMetricGroup({ metrics }: { metrics: Record<string, unknown> }) {
+function WalkForwardMetricGroup({ metrics, foldTable }: { metrics: Record<string, unknown>; foldTable?: DataTablePayload }) {
+  const summaryMetrics = [
+    { key: "walk_forward_fold_count", label: "Folds", format: "integer" as const, description: metricDescriptions.walk_forward_fold_count },
+    { key: "walk_forward_rank_ic", label: "WF Rank IC", format: "number" as const, description: metricDescriptions.walk_forward_rank_ic },
+    { key: "walk_forward_top20_mean_return", label: "WF Top20 Return", format: "percent" as const, description: metricDescriptions.walk_forward_top20_mean_return },
+    { key: "walk_forward_top20_hit_rate", label: "WF Top20 Hit", format: "percent" as const, description: metricDescriptions.walk_forward_top20_hit_rate },
+  ];
+
   return (
-    <MetricGroup
-      title="Walk-forward 汇总"
-      detail="按滚动时间窗口反复训练、验证并预测后续测试窗口，用于观察模型跨时间泛化。"
-      metrics={[
-        { key: "walk_forward_fold_count", label: "Folds", format: "integer", description: metricDescriptions.walk_forward_fold_count },
-        { key: "walk_forward_rank_ic", label: "WF Rank IC", format: "number", description: metricDescriptions.walk_forward_rank_ic },
-        { key: "walk_forward_top20_mean_return", label: "WF Top20 Return", format: "percent", description: metricDescriptions.walk_forward_top20_mean_return },
-        { key: "walk_forward_top20_hit_rate", label: "WF Top20 Hit", format: "percent", description: metricDescriptions.walk_forward_top20_hit_rate },
-      ]}
-      values={metrics}
-    />
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Walk-forward 汇总</CardTitle>
+        <div className="text-xs text-muted-foreground">按滚动时间窗口反复训练、验证并预测后续测试窗口，用于观察模型跨时间泛化。</div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <TooltipProvider delayDuration={120}>
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            {summaryMetrics.map((metric) => (
+              <MetricCell key={metric.key} spec={metric} values={metrics} />
+            ))}
+          </div>
+        </TooltipProvider>
+        {foldTable?.rows?.length ? (
+          <div className="space-y-2">
+            <div className="text-sm font-semibold">Fold 周期与指标</div>
+            <DataTable table={buildWalkForwardFoldTable(foldTable)} maxRows={80} />
+          </div>
+        ) : null}
+      </CardContent>
+    </Card>
   );
+}
+
+function buildWalkForwardFoldTable(table: DataTablePayload): DataTablePayload {
+  const columns = [
+    "fold_id",
+    "train_period",
+    "valid_period",
+    "test_period",
+    "train_rows",
+    "valid_rows",
+    "test_rows",
+    "rank_ic",
+    "top20_mean_return",
+    "top20_excess_return",
+    "top20_hit_rate",
+    "long_short_spread",
+    "status",
+  ];
+  return {
+    columns,
+    rows: table.rows.map((row) => ({
+      fold_id: row.fold_id,
+      train_period: foldPeriod(row, "train_start", "train_end"),
+      valid_period: foldPeriod(row, "valid_start", "valid_end"),
+      test_period: foldPeriod(row, "test_start", "test_end"),
+      train_rows: row.train_rows,
+      valid_rows: row.valid_rows,
+      test_rows: row.test_rows,
+      rank_ic: formatMetric(row.rank_ic, "number"),
+      top20_mean_return: formatMetric(row.top20_mean_return, "percent"),
+      top20_excess_return: formatMetric(row.top20_excess_return, "percent"),
+      top20_hit_rate: formatMetric(row.top20_hit_rate, "percent"),
+      long_short_spread: formatMetric(row.long_short_spread, "percent"),
+      status: row.status,
+    })),
+  };
+}
+
+function foldPeriod(row: Record<string, unknown>, startKey: string, endKey: string) {
+  const start = row[startKey];
+  const end = row[endKey];
+  if (!start && !end) return null;
+  return `${start || "—"} ~ ${end || "—"}`;
 }
 
 function SplitMetricGroup({ splits }: { splits: Record<string, unknown> }) {
