@@ -110,8 +110,16 @@ export function BreakoutDetailClient({ detail }: { detail: BreakoutResearchDetai
         <TabsContent value="evaluation" className="space-y-4">
           <EvaluationMetrics metrics={detail.evaluation_overview} walkForwardFolds={detail.tables.walk_forward_folds} />
           <div className="grid gap-4 xl:grid-cols-2">
-            <ChartCard chart={detail.chart_payloads.score_distribution} fallbackTitle="Score Distribution" />
-            <ChartCard chart={detail.chart_payloads.return_distribution} fallbackTitle="Return Distribution" />
+            <ChartCard
+              chart={detail.chart_payloads.score_distribution}
+              fallbackTitle="Score Distribution"
+              detail="最终模型全部 signal_score 的全样本分布，包含 train/valid/test。"
+            />
+            <ChartCard
+              chart={detail.chart_payloads.return_distribution}
+              fallbackTitle="Return Distribution"
+              detail="feature_panel 中首个 future_return_* 字段的全样本分布，用于观察收益标签背景。"
+            />
           </div>
           <Card>
             <CardHeader><CardTitle className="text-base">Annual Slices</CardTitle></CardHeader>
@@ -206,6 +214,14 @@ const metricDescriptions: Record<string, string> = {
   walk_forward_rank_ic: "所有 walk-forward 测试窗口合并后的 Rank IC。",
   walk_forward_top20_mean_return: "walk-forward 测试窗口中 Top20% 高分事件的平均未来收益。",
   walk_forward_top20_hit_rate: "walk-forward 测试窗口中 Top20% 高分事件未来收益为正的比例。",
+  requested_fold_count: "按配置计划生成的 walk-forward 折数，包含可能被跳过的窗口。",
+  fold_count: "成功完成训练和测试评分的 fold 数量。",
+  rank_ic_mean: "各 fold Rank IC 的简单平均值，用于观察跨窗口稳定性。",
+  rank_ic_positive_rate: "Rank IC 大于 0 的 fold 占比。",
+  top20_excess_mean: "各 fold Top20 超额收益的简单平均值。",
+  top20_excess_positive_rate: "Top20 超额收益大于 0 的 fold 占比。",
+  long_short_spread_mean: "各 fold Top20 与 Bottom20 收益差的简单平均值。",
+  long_short_spread_positive_rate: "Top20 与 Bottom20 收益差大于 0 的 fold 占比。",
   count: "分布中有效数值的数量。",
   min: "有效数值中的最小值。",
   p05: "5% 分位数，用于观察左尾极端情况。",
@@ -270,37 +286,61 @@ function EvaluationMetrics({ metrics, walkForwardFolds }: { metrics: Record<stri
   const splits = asRecord(metrics.splits);
   const scoreDistribution = asRecord(metrics.score_distribution);
   const returnDistribution = asRecord(metrics.return_distribution);
-  const hasWalkForwardSummary = asRecord(metrics.walk_forward).fold_count !== undefined;
+  const walkForward = asRecord(metrics.walk_forward);
+  const hasWalkForwardSummary = walkForward.fold_count !== undefined;
   const hasWalkForwardFolds = Boolean(walkForwardFolds?.rows?.length);
+  const isWalkForwardMode = hasWalkForwardSummary || hasWalkForwardFolds;
+  const hasSplitMetrics = Object.keys(splits).length > 0;
+  const allSampleDetail = "最终模型在完整 research 样本上的合并统计，包含 train/valid/test；用于诊断全样本表现，不作为泛化结论。";
 
   return (
     <div className="space-y-4">
+      {isWalkForwardMode ? <WalkForwardMetricGroup metrics={walkForward} foldTable={walkForwardFolds} /> : null}
+      {!isWalkForwardMode && hasSplitMetrics ? <SplitMetricGroup splits={splits} primary /> : null}
       {evaluationGroups.map((group) => (
-        <MetricGroup key={group.title} title={group.title} detail={group.detail} metrics={group.metrics} values={metrics} />
+        <MetricGroup
+          key={group.title}
+          title={`最终模型全样本 - ${group.title}`}
+          detail={group.detail ? `${group.detail} ${allSampleDetail}` : allSampleDetail}
+          metrics={group.metrics}
+          values={metrics}
+        />
       ))}
-      {Object.keys(splits).length ? <SplitMetricGroup splits={splits} /> : null}
       <div className="grid gap-4 xl:grid-cols-2">
-        <MetricGroup title="Score 分布摘要" detail="模型输出分数的范围和离散程度。" metrics={distributionMetrics} values={scoreDistribution} />
-        <MetricGroup title="Return 分布摘要" detail="未来收益标签的范围和离散程度。" metrics={distributionMetrics} values={returnDistribution} valueFormat="percent" />
+        <MetricGroup title="全样本 Score 分布摘要" detail="最终模型全部 signal_score 的范围和离散程度，包含 train/valid/test。" metrics={distributionMetrics} values={scoreDistribution} />
+        <MetricGroup title="全样本 Return/Label 分布摘要" detail="当前训练目标或收益标签的全样本分布，包含 train/valid/test。" metrics={distributionMetrics} values={returnDistribution} valueFormat="percent" />
       </div>
-      {hasWalkForwardSummary || hasWalkForwardFolds ? <WalkForwardMetricGroup metrics={metrics} foldTable={walkForwardFolds} /> : null}
     </div>
   );
 }
 
 function WalkForwardMetricGroup({ metrics, foldTable }: { metrics: Record<string, unknown>; foldTable?: DataTablePayload }) {
   const summaryMetrics = [
-    { key: "walk_forward_fold_count", label: "Folds", format: "integer" as const, description: metricDescriptions.walk_forward_fold_count },
-    { key: "walk_forward_rank_ic", label: "WF Rank IC", format: "number" as const, description: metricDescriptions.walk_forward_rank_ic },
-    { key: "walk_forward_top20_mean_return", label: "WF Top20 Return", format: "percent" as const, description: metricDescriptions.walk_forward_top20_mean_return },
-    { key: "walk_forward_top20_hit_rate", label: "WF Top20 Hit", format: "percent" as const, description: metricDescriptions.walk_forward_top20_hit_rate },
+    { key: "fold_count", label: "Folds", format: "integer" as const, description: metricDescriptions.walk_forward_fold_count },
+    { key: "requested_fold_count", label: "Requested", format: "integer" as const, description: metricDescriptions.requested_fold_count },
+    { key: "n_samples", label: "WF Samples", format: "integer" as const, description: metricDescriptions.n_samples },
+    { key: "rank_ic", label: "WF Rank IC", format: "number" as const, description: metricDescriptions.walk_forward_rank_ic },
+    { key: "top20_mean_return", label: "WF Top20 Return", format: "percent" as const, description: metricDescriptions.walk_forward_top20_mean_return },
+    { key: "top20_hit_rate", label: "WF Top20 Hit", format: "percent" as const, description: metricDescriptions.walk_forward_top20_hit_rate },
+    { key: "long_short_spread", label: "WF Long-Short", format: "percent" as const, description: metricDescriptions.long_short_spread },
   ];
+  const stability = asRecord(metrics.fold_stability);
+  const stabilityMetrics = [
+    { key: "fold_count", label: "Stable Folds", format: "integer" as const, description: metricDescriptions.fold_count },
+    { key: "rank_ic_mean", label: "IC Mean", format: "number" as const, description: metricDescriptions.rank_ic_mean },
+    { key: "rank_ic_positive_rate", label: "IC Positive", format: "percent" as const, description: metricDescriptions.rank_ic_positive_rate },
+    { key: "top20_excess_mean", label: "Top20 Excess", format: "percent" as const, description: metricDescriptions.top20_excess_mean },
+    { key: "top20_excess_positive_rate", label: "Excess Positive", format: "percent" as const, description: metricDescriptions.top20_excess_positive_rate },
+    { key: "long_short_spread_mean", label: "Spread Mean", format: "percent" as const, description: metricDescriptions.long_short_spread_mean },
+    { key: "long_short_spread_positive_rate", label: "Spread Positive", format: "percent" as const, description: metricDescriptions.long_short_spread_positive_rate },
+  ];
+  const hasStability = Object.keys(stability).some((key) => stability[key] !== null && stability[key] !== undefined);
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Walk-forward 汇总</CardTitle>
-        <div className="text-xs text-muted-foreground">按滚动时间窗口反复训练、验证并预测后续测试窗口，用于观察模型跨时间泛化。</div>
+        <CardTitle className="text-base">Walk-forward 泛化评估</CardTitle>
+        <div className="text-xs text-muted-foreground">每个 fold 只预测后续 test 窗口；汇总指标为所有 walk-forward test 预测合并后的统计。</div>
       </CardHeader>
       <CardContent className="space-y-4">
         <TooltipProvider delayDuration={120}>
@@ -310,6 +350,18 @@ function WalkForwardMetricGroup({ metrics, foldTable }: { metrics: Record<string
             ))}
           </div>
         </TooltipProvider>
+        {hasStability ? (
+          <div className="space-y-2">
+            <div className="text-sm font-semibold">Fold 稳定性</div>
+            <TooltipProvider delayDuration={120}>
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                {stabilityMetrics.map((metric) => (
+                  <MetricCell key={metric.key} spec={metric} values={stability} />
+                ))}
+              </div>
+            </TooltipProvider>
+          </div>
+        ) : null}
         {foldTable?.rows?.length ? (
           <div className="space-y-2">
             <div className="text-sm font-semibold">Fold 周期与指标</div>
@@ -364,7 +416,7 @@ function foldPeriod(row: Record<string, unknown>, startKey: string, endKey: stri
   return `${start || "—"} ~ ${end || "—"}`;
 }
 
-function SplitMetricGroup({ splits }: { splits: Record<string, unknown> }) {
+function SplitMetricGroup({ splits, primary = false }: { splits: Record<string, unknown>; primary?: boolean }) {
   const splitNames = ["train", "valid", "test", ...Object.keys(splits).filter((key) => !["train", "valid", "test"].includes(key))];
   const rows = splitNames
     .map((split) => [split, asRecord(splits[split])] as const)
@@ -374,7 +426,12 @@ function SplitMetricGroup({ splits }: { splits: Record<string, unknown> }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">训练/验证/测试切分</CardTitle>
+        <CardTitle className="text-base">{primary ? "Fixed-split 泛化评估" : "最终模型固定切分 train/valid/test"}</CardTitle>
+        <div className="text-xs text-muted-foreground">
+          {primary
+            ? "固定切分模式下，valid/test 是泛化能力的首要观察口径；train 主要用于对照过拟合。"
+            : "这是最终模型在固定 dataset_split 上的分组统计，不是 walk-forward 每折指标的汇总。"}
+        </div>
       </CardHeader>
       <CardContent>
         <TooltipProvider delayDuration={120}>
@@ -576,7 +633,7 @@ function KeyValueGrid({ title, values }: { title: string; values: Record<string,
   );
 }
 
-function ChartCard({ chart, fallbackTitle }: { chart?: ChartPayload; fallbackTitle: string }) {
+function ChartCard({ chart, fallbackTitle, detail }: { chart?: ChartPayload; fallbackTitle: string; detail?: string }) {
   const option = React.useMemo(() => chartToOption(chart), [chart]);
   return (
     <Card>
@@ -585,6 +642,7 @@ function ChartCard({ chart, fallbackTitle }: { chart?: ChartPayload; fallbackTit
           <BarChart3 className="h-4 w-4 text-muted-foreground" />
           {chart?.title ?? fallbackTitle}
         </CardTitle>
+        {detail ? <div className="text-xs text-muted-foreground">{detail}</div> : null}
       </CardHeader>
       <CardContent>{option ? <EChartsChart option={option} height={320} /> : <div className="rounded-lg border border-dashed border-border/70 p-6 text-sm text-muted-foreground">当前没有可展示的数据。</div>}</CardContent>
     </Card>
